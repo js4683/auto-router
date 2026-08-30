@@ -36,6 +36,8 @@ const DEFAULT_CONFIG: RouterConfig = {
     refreshIntervalHours: 24,
     artificialAnalysis: { apiUrl: "https://artificialanalysis.ai/api/v2/data/llms/models", apiKeyEnv: "AA_API_KEY" },
   },
+  avengersPro: { enabled: false, artifactDir: "./packages/router-core/artifacts/avengers-pro/fixture", topK: 3, beta: 9, timeoutMs: 400 },
+  modelMap: {},
 };
 
 function asConfig(raw: unknown): RouterConfig {

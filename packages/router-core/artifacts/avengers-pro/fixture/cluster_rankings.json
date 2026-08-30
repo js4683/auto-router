@@ -1,0 +1,10 @@
+{
+  "0": {
+    "ranking": ["qwen/qwen3", "openai/gpt-5-medium"],
+    "scores": { "qwen/qwen3": 0.9, "openai/gpt-5-medium": 0.4 }
+  },
+  "1": {
+    "ranking": ["openai/gpt-5-medium", "qwen/qwen3"],
+    "scores": { "openai/gpt-5-medium": 0.95, "qwen/qwen3": 0.3 }
+  }
+}

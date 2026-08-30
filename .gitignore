@@ -8,3 +8,4 @@ dist/
 .opencode/plugins/*.js.map
 .opencode/plugins/*.d.ts
 .DS_Store
+docs/superpowers/

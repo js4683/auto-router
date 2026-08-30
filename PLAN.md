@@ -34,8 +34,8 @@ policy, integration behavior, scope, or verification evidence changes.
 - Per-turn model switching.
 - Recursive `opencode models` discovery from inside the plugin.
 - Mutating unsupported fields in `chat.params`.
-- Building the standalone OpenAI-compatible proxy in this change.
-- Embedding or LLM-judge classifiers.
+- Competing for the assigned OpenCode `llm.request.before` hook.
+- Training a new Avengers-Pro cluster set from scratch in the first proxy slice.
 - Hardcoding a single provider as the only source of models.
 
 ## Routing Contract
@@ -233,6 +233,7 @@ Supported strategies:
 - **2026-08-29, verification smoke:** `run no-mistakes...` → `TASK SELECT taskType=run_tests via=free-first source=live target=opencode/muse-spark-1.2-contributor-free`. Six later stream calls produced one `TASK RECOMMEND` only.
 - **2026-08-29, planning smoke (stale config):** first run classified `planning` but selected `via=free-first` because global inline `opencode.json` lacked the planning policy.
 - **2026-08-29, planning smoke (after merge):** `plan the architecture...` → `TASK SELECT taskType=planning via=quality source=live target=openai/gpt-5.6-sol` and one `TASK RECOMMEND` from Muse.
+- **2026-08-30, Avengers-Pro + proxy:** `npm test` — 10 files, 58 tests passed (9 core + 1 proxy).
 
 ## Decision Log
 
@@ -259,10 +260,13 @@ Supported strategies:
 - **2026-08-29:** `loadConfig` must deep-merge user/global configs over defaults. Stale
   configs that omit new `taskTypeModels` keys otherwise silently drop planning/verification
   policy.
+- **2026-08-30:** Do not implement the assigned OpenCode hook. The local proxy is the
+  apply path for OpenCode and every other harness that can set a base URL.
+- **2026-08-30:** Avengers-Pro scores the first message of a task. Overlap models join
+  through LLMRouterBench (`source: "bench"`). Muse / Grok / Luna-class IDs use an
+  explicit `source: "hand"` bootstrap until we have our own labels.
 
 ## Supporting Documents
 
 - `design.md`: architecture rationale and selection model.
 - `roadmap.md`: broader project phases beyond the current change.
-- `docs/superpowers/plans/2026-08-29-task-level-routing.md`: detailed executable plan
-  for the current task-level routing work.

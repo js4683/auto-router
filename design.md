@@ -19,11 +19,11 @@
 
 Two adapters deliver "opencode **or any harness**":
 
-- **opencode plugin** — deep integration, task-boundary model selection and full session
-  signals. The current OpenCode hook can record the selected target but cannot safely
-  mutate the provider/model; an upstream routing hook is required for automatic application.
-- **OpenAI-compatible proxy** — RouteLLM-style drop-in server; works with anything that
-  lets you set a base URL.
+- **opencode plugin** — session signals and one-shot recommendations. It cannot change
+  the outbound model while `llm.request.before` is assigned to someone else.
+- **OpenAI/Anthropic proxy** — the apply path. Point OpenCode, Claude Code, Codex, or
+  Cursor at `http://127.0.0.1:8787`. The proxy rewrites only `model` and forwards with
+  the user's backend keys.
 
 `router-core` has zero harness dependencies. Both adapters call the same
 `classify()` + policy engine.

@@ -1,0 +1,19 @@
+{
+  "name": "@auto-router/proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "start": "node dist/src/server.js"
+  },
+  "dependencies": {
+    "@auto-router/router-core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.1.0"
+  }
+}
