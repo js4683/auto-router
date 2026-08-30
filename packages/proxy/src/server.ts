@@ -1,7 +1,8 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
-import { detectBoundary, selectModel } from "../../router-core/src/index.js";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
+import { detectBoundary, loadCatalogSync, loadConfig, selectModel } from "../../router-core/src/index.js";
 import type { Catalog, RouterConfig, SelectionResult, SessionState } from "../../router-core/src/types.js";
-import type { ProxySessionStore } from "./session.js";
+import { memorySessions, type ProxySessionStore } from "./session.js";
 
 export interface ProxyBackend {
   baseUrl: string;
@@ -148,4 +149,27 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
     },
     close() {},
   };
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  const config = loadConfig();
+  const catalog = loadCatalogSync(config);
+  const server = createProxyServer({
+    select: selectModel,
+    catalog,
+    config,
+    sessions: memorySessions(),
+    backends: {
+      openai: { baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com" },
+      opencode: { baseUrl: process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen" },
+      anthropic: { baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com" },
+    },
+  });
+  const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";
+  const port = Number(process.env.AUTO_ROUTER_PORT ?? 8787);
+  createServer((req, res) => {
+    void server.handle(req, res);
+  }).listen(port, host, () => {
+    console.log(`[auto-router-proxy] listening on http://${host}:${port}`);
+  });
 }

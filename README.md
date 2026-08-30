@@ -23,9 +23,10 @@ of the above do.
 
 1. **Language:** TypeScript for `router-core` + the opencode plugin (native plugin
    language, richest session signals). Revisit Go later for the standalone proxy.
-2. **Classifier v1:** Tier-0 heuristics only. Embeddings / LLM-judge are later phases.
-3. **First target:** opencode plugin (tighter loop, richer session state for the
-   "don't lose context" logic). Proxy adapter second for broad reach.
+2. **Classifier:** Avengers-Pro cluster scoring on a task boundary, with heuristic
+   `selectModel` as fallback. Overlap models join through LLMRouterBench; Muse/Grok/Luna
+   use an explicit hand map until we have our own labels.
+3. **Apply path:** a local OpenAI/Anthropic proxy. The OpenCode plugin stays observational.
 4. **Model selection data:** Artificial Analysis free API for quality (coding index)
    + price -> a "bang-for-buck" score per model, refreshed daily and cached.
 5. **Free-first:** within the tier a task needs, prefer models that are free *to the
@@ -39,14 +40,27 @@ of the above do.
    every session. Model names are never hardcoded — catalog + free-set + task policy drive
    selection, so the router survives model churn.
 
-## Integration seam (verified)
+## Apply path
 
-- opencode 1.18.25 plugins expose `chat.message` and `chat.params` hooks with full
-  session signals, but `chat.params` does not expose a supported provider/model
-  mutation. The plugin therefore records one task-level recommendation and leaves the
-  actual model unchanged until an upstream routing hook is available.
-- Open feature request `sst/opencode#45764` asks for exactly `llm.request.before`
-  model routing → documented community demand; possible upstream contribution.
+The OpenCode plugin can recommend a model but cannot change the outbound request.
+`chat.params` has no model field, and `anomalyco/opencode#45764` is assigned to someone
+else, so we do not implement that hook.
+
+To actually switch models, run the local proxy and point the harness at it:
+
+```bash
+npm start --workspace=@auto-router/proxy
+```
+
+Default listen address is `http://127.0.0.1:8787`.
+
+- OpenCode: add a custom provider whose `baseURL` is the proxy and whose model is a
+  virtual id such as `auto-router/auto`.
+- Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
+- Codex / Cursor: OpenAI base URL `http://127.0.0.1:8787/v1`.
+
+The proxy scores the first message of a task with Avengers-Pro, applies free-first /
+planning-quality overlays, then holds that target until a confirmed boundary.
 
 ## Docs
 
@@ -55,7 +69,9 @@ of the above do.
 | [PLAN.md](./PLAN.md) | Canonical scope, implementation status, acceptance criteria, and decision log |
 | [design.md](./design.md) | Architecture, the two hard problems, classification tiers |
 | [roadmap.md](./roadmap.md) | Phased plan, effort, checklist |
-| [task-level routing plan](./docs/superpowers/plans/2026-08-29-task-level-routing.md) | Current implementation plan and decision log |
+| [task-level routing plan](./docs/superpowers/plans/2026-08-29-task-level-routing.md) | Task-lock plugin plan |
+| [Avengers-Pro proxy spec](./docs/superpowers/specs/2026-08-30-avengers-pro-proxy-design.md) | Scorer + proxy apply path |
+| [Avengers-Pro proxy plan](./docs/superpowers/plans/2026-08-30-avengers-pro-proxy.md) | Executable implementation plan |
 
 ## Why this is a strong fit
 
