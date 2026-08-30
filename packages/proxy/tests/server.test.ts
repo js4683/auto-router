@@ -199,4 +199,92 @@ describe("proxy", () => {
     expect(outbound[0].auth).toBe("Bearer zen-test-key");
     expect(outbound[0].input).toBe("implement the feature");
   });
+
+  it("sends unprefixed gpt-5 planning targets to Zen /v1/responses", async () => {
+    const outbound: Array<{ url: string; model: string }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: { baseUrl: "http://openai.test", fetchImpl: async () => new Response("wrong backend") },
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            const parsed = JSON.parse(String(init?.body));
+            outbound.push({ url: String(url), model: parsed.model });
+            return new Response(JSON.stringify({ id: "resp_ok" }), { status: 200 });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "gpt-5.4",
+          tier: "simple",
+          taskType: "planning",
+          confidence: 1,
+          reason: "quality",
+          via: "quality",
+          catalogSource: "fallback",
+          score: 0.8,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "plan the architecture" }] }, { authorization: "Bearer zen-test-key" }),
+      collectRes() as never
+    );
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].url).toBe("https://opencode.ai/zen/v1/responses");
+    expect(outbound[0].model).toBe("gpt-5.4");
+  });
+
+  it("sends Gemini targets to Google generateContent with the inbound key", async () => {
+    const outbound: Array<{ url: string; text?: string; key?: string }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: { baseUrl: "http://openai.test", fetchImpl: async () => new Response("wrong backend") },
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          fetchImpl: async (url, init) => {
+            const parsed = JSON.parse(String(init?.body ?? "{}"));
+            const target = new URL(String(url));
+            outbound.push({
+              url: `${target.origin}${target.pathname}`,
+              key: target.searchParams.get("key") ?? undefined,
+              text: parsed.contents?.[0]?.parts?.[0]?.text,
+            });
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "OK" }] } }] }), { status: 200 });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0.2,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "google/gemini-3-flash", messages: [{ role: "user", content: "say hi" }] }, { authorization: "Bearer AIza-test" }),
+      collectRes() as never
+    );
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent");
+    expect(outbound[0].key).toBe("AIza-test");
+    expect(outbound[0].text).toBe("say hi");
+  });
 });

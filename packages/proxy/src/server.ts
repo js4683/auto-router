@@ -28,7 +28,25 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 const ZEN_RESPONSE_MODELS = /muse-spark|gpt-5|grok-/i;
-const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free/i;
+const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
+
+function bearerToken(value: string | string[] | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return value.replace(/^Bearer\s+/i, "").trim() || undefined;
+}
+
+function resolveProvider(modelId: string): { provider: string; bareModel: string } {
+  const slash = modelId.indexOf("/");
+  const providerFromId = slash >= 0 ? modelId.slice(0, slash) : "";
+  const bareModel = slash >= 0 ? modelId.slice(slash + 1) : modelId;
+  if (providerFromId === "google" || providerFromId === "gemini" || /^gemini/i.test(bareModel)) {
+    return { provider: "google", bareModel };
+  }
+  if (providerFromId === "opencode" || (!providerFromId && ZEN_MODEL_HINT.test(bareModel))) {
+    return { provider: "opencode", bareModel };
+  }
+  return { provider: providerFromId || "openai", bareModel };
+}
 
 function lastUserText(body: any): string {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
@@ -108,6 +126,23 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       paperIds = undefined;
     }
 
+    const forced = req.headers["x-force-model"];
+    if (typeof forced === "string" && forced) {
+      const result: SelectionResult = {
+        modelId: forced,
+        tier: "simple",
+        taskType: null,
+        confidence: 1,
+        reason: "x-force-model",
+        via: "force",
+        catalogSource: opts.catalog.source,
+        score: 0,
+        boundary,
+      };
+      opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
+      return result;
+    }
+
     const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, paperIds ? { paperIds } : undefined);
     opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
     return result;
@@ -130,24 +165,29 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         return;
       }
 
-      const slash = result.modelId.indexOf("/");
-      const providerFromId = slash >= 0 ? result.modelId.slice(0, slash) : "";
-      const bareModel = slash >= 0 ? result.modelId.slice(slash + 1) : result.modelId;
-      const provider = providerFromId || (ZEN_MODEL_HINT.test(bareModel) ? "opencode" : "openai");
-      const backend = opts.backends[provider] ?? (provider === "opencode" ? opts.backends.opencode : opts.backends.openai);
+      const { provider, bareModel } = resolveProvider(result.modelId);
+      const backend = opts.backends[provider] ?? (provider === "google" ? opts.backends.google : provider === "opencode" ? opts.backends.opencode : opts.backends.openai);
       if (!backend) {
         json(res, 502, { error: `no backend for ${provider}` });
         return;
       }
 
-      const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
-      const outbound = useZenResponses
-        ? { model: bareModel, input: text }
-        : { ...body, model: provider === "opencode" ? bareModel : result.modelId };
-      const path = useZenResponses ? "/v1/responses" : req.url;
-      const headers: Record<string, string> = { "content-type": "application/json" };
       const authorization = req.headers.authorization ?? req.headers.Authorization;
-      if (typeof authorization === "string" && authorization) headers.authorization = authorization;
+      const token = bearerToken(authorization);
+      const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
+      const useGemini = provider === "google";
+      const outbound = useGemini
+        ? { contents: [{ role: "user", parts: [{ text }] }] }
+        : useZenResponses
+          ? { model: bareModel, input: text }
+          : { ...body, model: provider === "opencode" ? bareModel : result.modelId };
+      const path = useGemini
+        ? `/models/${bareModel}:generateContent${token ? `?key=${encodeURIComponent(token)}` : ""}`
+        : useZenResponses
+          ? "/v1/responses"
+          : req.url;
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (!useGemini && typeof authorization === "string" && authorization) headers.authorization = authorization;
       const fetchImpl = backend.fetchImpl ?? fetch;
       const upstream = await fetchImpl(`${backend.baseUrl}${path}`, {
         method: req.method,
@@ -175,6 +215,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       openai: { baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com" },
       opencode: { baseUrl: process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen" },
       anthropic: { baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com" },
+      google: { baseUrl: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta" },
     },
   });
   const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";
