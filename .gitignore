@@ -1,0 +1,10 @@
+node_modules/
+packages/*/node_modules/
+packages/*/dist/
+dist/
+.cache/
+*.log
+.opencode/plugins/*.js
+.opencode/plugins/*.js.map
+.opencode/plugins/*.d.ts
+.DS_Store

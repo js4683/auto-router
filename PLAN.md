@@ -1,0 +1,268 @@
+# Auto-Router Project Plan
+
+## Purpose
+
+Build a lightweight, harness-aware model router that chooses one appropriate model for
+each task/theme rather than changing models on every turn. The router should minimize
+cost for routine verification work, reserve high-capability models for planning and
+architecture, preserve context-window fit, and avoid prompt-cache thrashing.
+
+This file is the canonical living plan and decision log. Update it whenever routing
+policy, integration behavior, scope, or verification evidence changes.
+
+## Current Scope
+
+### In scope
+
+- Classify task complexity as `simple`, `medium`, or `complex`.
+- Resolve task type from explicit tags, agent mappings, and narrow high-confidence
+  inference.
+- Discover models from OpenCode's connected providers with a bounded fallback.
+- Preserve provider-qualified runtime IDs.
+- Select one target model at a confirmed task/theme boundary.
+- Hold that target for every message inside the task.
+- Prefer free models for routine work when they clear the required quality floor.
+- For verification tasks, use a free model first and otherwise the lowest-cost eligible
+  model.
+- For planning and architecture tasks, use a high quality floor and quality-first
+  ordering so Sol, Fable, Opus, or equivalent frontier models win when connected.
+- Log one task-level recommendation when OpenCode's actual model differs from the target.
+- Keep unit, integration, build, deployment, and smoke-test evidence current.
+
+### Out of scope
+
+- Per-turn model switching.
+- Recursive `opencode models` discovery from inside the plugin.
+- Mutating unsupported fields in `chat.params`.
+- Building the standalone OpenAI-compatible proxy in this change.
+- Embedding or LLM-judge classifiers.
+- Hardcoding a single provider as the only source of models.
+
+## Routing Contract
+
+### Task boundaries
+
+A new model decision is allowed only when one of these establishes a task boundary:
+
+- New session.
+- Explicit task tag, such as `[task:planning]` or `[task:run_tests]`.
+- Active-agent change.
+- Compaction or cleared context.
+- High-confidence topic shift supported by multiple boundary signals.
+
+Errors, retries, file growth, and tool depth are complexity signals. They do not switch
+models in the middle of a task.
+
+### Task locking
+
+- The first message in a task selects the task target.
+- Follow-up messages keep that target even if their individual wording looks easier or
+  harder.
+- A confirmed new task performs a fresh selection immediately.
+- Task-level selection must not inherit the old task's downgrade delay. Downgrade delay
+  is unnecessary once a new task has been confirmed.
+
+### Verification policy
+
+Verification includes:
+
+- Tests and coverage.
+- `no-mistakes`.
+- Lint and formatting checks.
+- Build and compile checks.
+- Typecheck.
+- Validate and verify commands.
+
+Selection order:
+
+1. Models that clear the effective quality floor and fit the context.
+2. Free eligible models, highest quality first.
+3. If no free model is eligible, lowest blended cost first.
+4. Quality is the tie-breaker for equal cost.
+
+### Planning and architecture policy
+
+Planning includes architecture, system design, design decisions, trade-off analysis,
+and implementation planning.
+
+Selection order:
+
+1. Apply an effective minimum quality of at least `85`.
+2. Select the highest-quality eligible connected model.
+3. Use value as the tie-breaker.
+4. Recognize Sol, Fable, and Opus families as high-capability when live quality metadata
+   is unavailable.
+
+Model family names are hints for offline quality inference, not hardcoded provider
+requirements. Any connected model with equivalent or better quality may win.
+
+## Architecture
+
+### Router core
+
+`packages/router-core` remains harness-agnostic and owns:
+
+- Complexity classification.
+- Task-type resolution.
+- Boundary detection.
+- Catalog normalization.
+- Cost, quality, and context-window policy.
+- Provider-qualified target selection.
+
+### OpenCode adapter
+
+`.opencode/plugins/auto-router.ts` owns:
+
+- Mapping OpenCode events to router session state.
+- Lazy connected-provider discovery with a 1500 ms fail-open timeout.
+- Task target persistence.
+- Actual-model observation.
+- One-shot task-level recommendation logging.
+- Tool, diff, token, and error signal collection.
+
+The installed global adapter at
+`~/.config/opencode/plugins/auto-router.ts` must stay behaviorally synchronized with the
+repository adapter. Its compiled core is deployed under
+`~/.config/opencode/plugins/router-core/dist`.
+
+### Integration limitation
+
+OpenCode 1.18.25 does not expose a supported provider/model mutation through
+`chat.params`. The adapter must leave generation output untouched, observe the actual
+model, and log the task target once. Automatic application remains blocked on an
+upstream model-routing hook such as `llm.request.before`.
+
+## Configuration Contract
+
+Task policies extend `taskTypeModels`:
+
+```jsonc
+{
+  "taskTypeModels": {
+    "run_tests": {
+      "prefer": null,
+      "strategy": "lowest-cost"
+    },
+    "planning": {
+      "prefer": null,
+      "strategy": "quality",
+      "minQuality": 85
+    }
+  }
+}
+```
+
+Supported strategies:
+
+- `value`: free first, then best quality-per-cost value.
+- `lowest-cost`: free first, then lowest blended cost.
+- `quality`: highest quality above the effective floor.
+
+## Implementation Work
+
+### 1. Documentation and decision record
+
+- [x] Create this canonical `PLAN.md`.
+- [x] Record task-level, verification-cost, planning-quality, and integration decisions.
+- [x] Finish synchronizing `README.md`, `design.md`, and `roadmap.md` with this contract.
+- [x] Link all project documentation back to this plan.
+
+### 2. Task policy and classification
+
+- [x] Add `planning` to `TaskType`.
+- [x] Add task strategy and optional task quality floor to configuration types.
+- [x] Recognize tests, `no-mistakes`, lint, build, typecheck, validate, and verify as
+  `run_tests`.
+- [x] Recognize planning, architecture, system design, design decisions, and trade-offs
+  as `planning`.
+- [x] Keep explicit tags and agent mappings highest priority.
+- [x] Add red-green regression tests for each task family.
+
+### 3. Cost and high-capability selection
+
+- [x] Apply the greater of the tier quality floor and task policy quality floor.
+- [x] Implement `lowest-cost` ordering after free-first filtering.
+- [x] Implement quality-first planning selection.
+- [x] Add fallback quality inference for Sol, Fable, and Opus families.
+- [x] Preserve live provider cost, context limits, and provider-qualified runtime IDs.
+- [x] Add red-green selector and catalog tests.
+
+### 4. Task-level adapter locking
+
+  - [x] Store a task target separately from the model OpenCode actually used.
+  - [x] Select only on the first task message or a confirmed boundary.
+  - [x] Prevent errors and complexity changes from switching targets mid-task.
+  - [x] Emit at most one recommendation per task.
+  - [x] Keep `chat.params` observational and leave its output unchanged.
+  - [x] Add red-green plugin integration tests.
+
+### 5. Validation and deployment
+
+  - [x] Run focused tests after each red-green cycle.
+  - [x] Run `npm run build && npm test` from the repository root.
+  - [x] Clean and deploy `packages/router-core/dist` to the global plugin directory.
+  - [x] Smoke-test a verification task against the live provider catalog.
+  - [x] Smoke-test a planning/architecture task against the live provider catalog.
+  - [x] Verify follow-up messages do not produce additional task recommendations.
+  - [x] Record final test counts and runtime evidence below.
+
+## Acceptance Criteria
+
+- A prompt such as `Run no-mistakes and report failures` resolves to `run_tests` and
+  targets a free eligible model, or the lowest-cost eligible paid model if no free model
+  is available.
+- A prompt such as `Plan the architecture for this project` resolves to `planning`,
+  enforces quality `>= 85`, and chooses the highest-quality eligible connected model.
+- A follow-up message in either task keeps the existing task target.
+- A confirmed new task performs one new selection.
+- `chat.params` never receives unsupported model mutation fields.
+- The task log uses provider-qualified target IDs and distinguishes recommendation from
+  actual runtime model.
+- Build and all tests pass.
+- Repository and installed global plugin behavior match.
+
+## Verification Record
+
+- **2026-08-29, existing baseline:** `npm run build` passed.
+- **2026-08-29, existing baseline:** 6 Vitest files and 37 tests passed.
+- **2026-08-29, existing baseline:** live provider discovery returned a `live` catalog
+  and selected `opencode/muse-spark-1.2-contributor-free` for a simple task.
+- **2026-08-29, existing baseline:** a fresh OpenAI run logged a Muse recommendation
+  while OpenCode correctly kept the requested OpenAI model unchanged.
+- **2026-08-29, after task-level lock:** `npm run build && npm test` — 7 files, 49 tests passed.
+- **2026-08-29, verification smoke:** `run no-mistakes...` → `TASK SELECT taskType=run_tests via=free-first source=live target=opencode/muse-spark-1.2-contributor-free`. Six later stream calls produced one `TASK RECOMMEND` only.
+- **2026-08-29, planning smoke (stale config):** first run classified `planning` but selected `via=free-first` because global inline `opencode.json` lacked the planning policy.
+- **2026-08-29, planning smoke (after merge):** `plan the architecture...` → `TASK SELECT taskType=planning via=quality source=live target=openai/gpt-5.6-sol` and one `TASK RECOMMEND` from Muse.
+
+## Decision Log
+
+- **2026-08-29:** Use task/theme-level routing. Per-turn routing is rejected because it
+  harms cache reuse and task coherence.
+- **2026-08-29:** Use existing boundary signals plus explicit task tags. Do not require
+  tags for every task, but keep heuristic boundaries confidence-gated.
+- **2026-08-29:** Treat tests, `no-mistakes`, lint, build, typecheck, validate, and verify
+  as verification work.
+- **2026-08-29:** Verification uses free-first selection, then strict lowest blended
+  cost among eligible paid models.
+- **2026-08-29:** Planning and architecture use quality-first selection with a minimum
+  quality of `85`, favoring Sol/Fable/Opus-class models when connected.
+- **2026-08-29:** A confirmed new task may downgrade immediately; no old-task downgrade
+  counter carries across task boundaries.
+- **2026-08-29:** Errors and hard signals do not change the model during a task. They are
+  recorded as complexity evidence for the next confirmed boundary.
+- **2026-08-29:** Never call `opencode models` from the plugin; use
+  `client.provider.list({ query: { directory } })` with a timeout and fallback.
+- **2026-08-29:** Do not mutate unsupported `chat.params` fields. Log a one-shot task
+  recommendation until OpenCode exposes a supported model-routing hook.
+- **2026-08-29:** Keep implementation inline for this lightweight, tightly coupled
+  change. Subagents are unnecessary unless an independent final review is requested.
+- **2026-08-29:** `loadConfig` must deep-merge user/global configs over defaults. Stale
+  configs that omit new `taskTypeModels` keys otherwise silently drop planning/verification
+  policy.
+
+## Supporting Documents
+
+- `design.md`: architecture rationale and selection model.
+- `roadmap.md`: broader project phases beyond the current change.
+- `docs/superpowers/plans/2026-08-29-task-level-routing.md`: detailed executable plan
+  for the current task-level routing work.

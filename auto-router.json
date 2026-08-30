@@ -1,0 +1,73 @@
+{
+  "$schema": "./auto-router.schema.json",
+  "tiers": {
+    "simple": { "minQuality": 0, "description": "rename, typo, formatting, comment, bump version" },
+    "medium": { "minQuality": 60, "description": "feature, bugfix, small refactor" },
+    "complex": { "minQuality": 80, "description": "architecture, large refactor, concurrency, debugging" }
+  },
+  "scorer": {
+    "weights": {
+      "promptTokens": 0.2,
+      "sessionTokens": 0.2,
+      "filesTouched": 0.15,
+      "diffHunks": 0.15,
+      "toolDepth": 0.15,
+      "keywords": 0.15
+    },
+    "thresholds": {
+      "simpleMax": 0.4,
+      "mediumMax": 0.7
+    }
+  },
+  "stickiness": {
+    "downgradeAfter": 3,
+    "upgradeImmediate": true
+  },
+  "guards": {
+    "contextFitMarginTokens": 8000
+  },
+  "taskTypeModels": {
+    "code_review": { "prefer": null },
+    "run_tests": { "prefer": null, "strategy": "lowest-cost" },
+    "monitoring": { "prefer": null },
+    "planning": { "prefer": null, "strategy": "quality", "minQuality": 85 },
+    "implement": { "prefer": null },
+    "debug": { "prefer": null }
+  },
+  "providerFreeSet": [
+    "muse-spark-1.2-contributor-free",
+    "hy3-free",
+    "big-pickle",
+    "mimo-v2.5-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "ling-3.0-flash-fin-free"
+  ],
+  "windowRegistry": {
+    "muse-spark-1.2-contributor-free": 272000,
+    "muse-spark-1.2": 272000,
+    "hy3-free": 128000,
+    "big-pickle": 128000,
+    "mimo-v2.5-free": 128000,
+    "nemotron-3-ultra-free": 272000,
+    "nemotron-3.5-lightning-free": 128000,
+    "ling-3.0-flash-fin-free": 128000,
+    "gpt-5.2": 272000,
+    "gpt-5.2-codex": 272000,
+    "gpt-5.3-codex-spark": 100000,
+    "gpt-5.4": 1000000,
+    "gpt-5.4-mini": 272000,
+    "gpt-5.5": 272000,
+    "gpt-5.6-luna": 272000,
+    "gpt-5.6-sol": 272000,
+    "gpt-5.6-terra": 272000
+  },
+  "catalog": {
+    "cachePath": "./.cache/auto-router-catalog.json",
+    "refreshIntervalHours": 24,
+    "artificialAnalysis": {
+      "apiUrl": "https://artificialanalysis.ai/api/v2/data/llms/models",
+      "apiKeyEnv": "AA_API_KEY"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "auto-router",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "test:all": "npm run test --workspaces --if-present",
+    "catalog:refresh": "node packages/router-core/dist/catalog-cli.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
