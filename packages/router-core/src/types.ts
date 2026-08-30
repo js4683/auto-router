@@ -86,6 +86,15 @@ export interface Catalog {
   source: "aa" | "cache" | "fallback" | "live";
 }
 
+export type ModelMapSource = "bench" | "hand";
+
+export interface ModelMapEntry {
+  runtimeId: string;
+  source: ModelMapSource;
+}
+
+export type ModelMap = Record<string, ModelMapEntry[]>;
+
 // ---- Policy config (from auto-router.json) ----
 export interface TierConfig {
   minQuality: number;
