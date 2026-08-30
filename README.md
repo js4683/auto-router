@@ -69,9 +69,6 @@ planning-quality overlays, then holds that target until a confirmed boundary.
 | [PLAN.md](./PLAN.md) | Canonical scope, implementation status, acceptance criteria, and decision log |
 | [design.md](./design.md) | Architecture, the two hard problems, classification tiers |
 | [roadmap.md](./roadmap.md) | Phased plan, effort, checklist |
-| [task-level routing plan](./docs/superpowers/plans/2026-08-29-task-level-routing.md) | Task-lock plugin plan |
-| [Avengers-Pro proxy spec](./docs/superpowers/specs/2026-08-30-avengers-pro-proxy-design.md) | Scorer + proxy apply path |
-| [Avengers-Pro proxy plan](./docs/superpowers/plans/2026-08-30-avengers-pro-proxy.md) | Executable implementation plan |
 
 ## Why this is a strong fit
 

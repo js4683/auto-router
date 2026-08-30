@@ -270,8 +270,3 @@ Supported strategies:
 
 - `design.md`: architecture rationale and selection model.
 - `roadmap.md`: broader project phases beyond the current change.
-- `docs/superpowers/plans/2026-08-29-task-level-routing.md`: detailed executable plan
-  for the current task-level routing work.
-- `docs/superpowers/specs/2026-08-30-avengers-pro-proxy-design.md`: Avengers-Pro scorer
-  plus local proxy apply path.
-- `docs/superpowers/plans/2026-08-30-avengers-pro-proxy.md`: executable plan for that spec.
