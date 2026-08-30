@@ -116,23 +116,37 @@ If the embedding call fails or exceeds `timeoutMs`, fall back to the current heu
 
 Avengers-Pro rankings use paper IDs (`openai/gpt-5-medium`, `google/gemini-2.5-pro`, `qwen/qwen3`, …). The live catalog uses runtime IDs (`opencode/muse-spark-1.2-contributor-free`, `openai/gpt-5.6-sol`, `amazon-bedrock-mantle/xai.grok-4.6`).
 
-A required `modelMap` file joins them:
+Two joins, in this order:
+
+1. **OpenRouterBench / LLMRouterBench overlap (preferred).**
+   Avengers-Pro's public labeled set is [LLMRouterBench](https://github.com/ynulihao/LLMRouterBench) / [HF NPULH/LLMRouterBench](https://huggingface.co/datasets/NPULH/LLMRouterBench) (Avengers-Pro also called this OpenRouterBench). It has per-query scores and costs for the paper models. If a connected runtime ID is the same model family as a bench ID, or an official successor in the same product line (e.g. `claude-opus-4.1` → `claude-opus-5`, `gpt-5-medium` → `gpt-5.6-sol`), use that join. These mappings must be listed with `source: "bench"` so they are not confused with guesses.
+2. **Hand map (bootstrap only).**
+   Models with no bench overlap (Muse, Grok, Luna, and any other local/free ID) get an explicit `source: "hand"` alias to the closest bench cluster role: cheap-coder, mid, or frontier. Hand maps are documented guesses. They must never silently look like bench joins.
 
 ```json
 {
-  "openai/gpt-5-medium": ["openai/gpt-5.6-sol", "openai/gpt-5.6-terra"],
-  "qwen/qwen3": ["opencode/muse-spark-1.2-contributor-free"],
-  "anthropic/claude-opus-4.1": ["anthropic/claude-opus-5"]
+  "openai/gpt-5-medium": [
+    { "runtimeId": "openai/gpt-5.6-sol", "source": "bench" },
+    { "runtimeId": "openai/gpt-5.6-terra", "source": "bench" }
+  ],
+  "qwen/qwen3": [
+    { "runtimeId": "opencode/muse-spark-1.2-contributor-free", "source": "hand" }
+  ],
+  "anthropic/claude-opus-4.1": [
+    { "runtimeId": "anthropic/claude-opus-5", "source": "bench" }
+  ]
 }
 ```
 
 Resolution:
 
 1. Avengers-Pro returns a ranked paper-model list.
-2. Walk the list. For each paper ID, take the first mapped runtime ID that exists in the connected catalog and passes context-fit.
+2. Walk the list. For each paper ID, take the first mapped runtime ID that exists in the connected catalog and passes context-fit. Prefer `source: "bench"` over `source: "hand"` when both exist for the same paper ID.
 3. If none map, fall back to heuristic `selectModel` on the live catalog.
 
-Unmapped connected models (Muse, Grok, Luna, Sol) do not invent Avengers-Pro scores. They only win through an explicit map or the heuristic fallback. Later we can replace the hand map with logs labeled from real sessions.
+Unmapped connected models do not invent Avengers-Pro scores. They only win through an explicit map or the heuristic fallback.
+
+A later offline job can rebuild cluster rankings from LLMRouterBench JSON (`origin_query`, `score`, `cost` per model) so overlap models stop depending on the paper's original 8-model table. That job is not in the first proxy slice. Session logs can eventually replace `source: "hand"` entries; they do not replace bench joins.
 
 ## Task lock
 
@@ -224,7 +238,7 @@ Verification and planning overlays remain deterministic even when Avengers-Pro r
 ## Testing
 
 - Unit: Avengers-Pro scorer with fixture embeddings and tiny cluster centers (2–3 clusters, 3 models). Assert nearest-cluster ranking and `top_k` aggregation.
-- Unit: `modelMap` walks the ranked paper list and skips missing runtime IDs.
+- Unit: `modelMap` walks the ranked paper list, prefers `source: "bench"` over `source: "hand"`, and skips missing runtime IDs.
 - Unit: task lock — second request with same session and no boundary does not re-embed.
 - Unit: planning overlay still rejects mapped models below quality 85.
 - Unit: embedding timeout triggers heuristic fallback.
@@ -244,15 +258,16 @@ Verification and planning overlays remain deterministic even when Avengers-Pro r
 
 ## Implementation order
 
-1. Port Avengers-Pro inference + fixtures + model map. Heuristic remains fallback.
-2. Teach `selectModel` to consume the ranked list on a task boundary.
-3. Add the proxy and wire OpenCode to it locally.
-4. Only then consider logging real tasks to replace the hand map.
+1. Port Avengers-Pro inference + fixtures. Heuristic remains fallback.
+2. Check in a `modelMap` with `source: "bench"` for LLMRouterBench overlap and `source: "hand"` for Muse/Grok/Luna-class IDs.
+3. Teach `selectModel` to consume the ranked list on a task boundary.
+4. Add the proxy and wire OpenCode to it locally.
+5. Offline later: rebuild cluster rankings from LLMRouterBench labels; replace hand maps only when we have our own session labels.
 
 ## Open decisions already locked
 
 - Do not touch the assigned OpenCode hook.
 - Do not start with heuristics-only proxy.
-- Avengers-Pro is the first scorer, with a hand-mapped catalog for Muse / Luna / Sol / Grok.
+- Avengers-Pro is the first scorer. Overlap models join through OpenRouterBench / LLMRouterBench (`source: "bench"`). Muse / Grok / Luna-class IDs use an explicit `source: "hand"` bootstrap until we have our own labels.
 - Task lock stays. Avengers-Pro does not run on every tool call.
 - MIT Avengers-Pro code is a reference. We reimplement inference; we do not exec their Python from the proxy.
