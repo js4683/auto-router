@@ -55,11 +55,11 @@ const config: RouterConfig = {
   },
 };
 
-function fakeReq(url: string, body: unknown): IncomingMessage {
+function fakeReq(url: string, body: unknown, headers: Record<string, string> = {}): IncomingMessage {
   const req = new IncomingMessage(new Socket());
   req.method = "POST";
   req.url = url;
-  req.headers = { "content-type": "application/json", "x-session-id": "ses_test" };
+  req.headers = { "content-type": "application/json", "x-session-id": "ses_test", ...headers };
   queueMicrotask(() => {
     req.emit("data", Buffer.from(JSON.stringify(body)));
     req.emit("end");
@@ -125,7 +125,7 @@ describe("proxy", () => {
     await server.handle(fakeReq("/v1/chat/completions", body), collectRes() as never);
     await server.handle(fakeReq("/v1/chat/completions", { ...body, messages: [{ role: "user", content: "continue" }] }), collectRes() as never);
 
-    expect(outbound[0].model).toBe("opencode/muse-spark-1.2-contributor-free");
+    expect(outbound[0].model).toBe("muse-spark-1.2-contributor-free");
     expect(outbound[1].model).toBe(outbound[0].model);
     expect(rankCalls).toBe(1);
   });
@@ -155,5 +155,48 @@ describe("proxy", () => {
     );
     expect(backendCalls).toBe(0);
     expect(JSON.parse(res.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
+  });
+
+  it("forwards authorization and sends Muse to Zen /v1/responses", async () => {
+    const outbound: Array<{ url: string; model: string; auth?: string; input?: string }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: { baseUrl: "http://openai.test", fetchImpl: async () => new Response("wrong backend") },
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            const parsed = JSON.parse(String(init?.body));
+            const headers = init?.headers as Record<string, string>;
+            outbound.push({
+              url: String(url),
+              model: parsed.model,
+              auth: headers?.authorization ?? headers?.Authorization,
+              input: parsed.input,
+            });
+            return new Response(JSON.stringify({ id: "resp_ok", status: "completed", output: [] }), { status: 200 });
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+
+    await server.handle(
+      fakeReq(
+        "/v1/chat/completions",
+        { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] },
+        { authorization: "Bearer zen-test-key" }
+      ),
+      collectRes() as never
+    );
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].url).toBe("https://opencode.ai/zen/v1/responses");
+    expect(outbound[0].model).toBe("muse-spark-1.2-contributor-free");
+    expect(outbound[0].auth).toBe("Bearer zen-test-key");
+    expect(outbound[0].input).toBe("implement the feature");
   });
 });

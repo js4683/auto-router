@@ -27,6 +27,9 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+const ZEN_RESPONSE_MODELS = /muse-spark|gpt-5|grok-/i;
+const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free/i;
+
 function lastUserText(body: any): string {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -128,18 +131,27 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       }
 
       const slash = result.modelId.indexOf("/");
-      const provider = slash >= 0 ? result.modelId.slice(0, slash) : "openai";
-      const backend = opts.backends[provider] ?? opts.backends.openai;
+      const providerFromId = slash >= 0 ? result.modelId.slice(0, slash) : "";
+      const bareModel = slash >= 0 ? result.modelId.slice(slash + 1) : result.modelId;
+      const provider = providerFromId || (ZEN_MODEL_HINT.test(bareModel) ? "opencode" : "openai");
+      const backend = opts.backends[provider] ?? (provider === "opencode" ? opts.backends.opencode : opts.backends.openai);
       if (!backend) {
         json(res, 502, { error: `no backend for ${provider}` });
         return;
       }
 
-      const outbound = { ...body, model: result.modelId };
+      const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
+      const outbound = useZenResponses
+        ? { model: bareModel, input: text }
+        : { ...body, model: provider === "opencode" ? bareModel : result.modelId };
+      const path = useZenResponses ? "/v1/responses" : req.url;
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      const authorization = req.headers.authorization ?? req.headers.Authorization;
+      if (typeof authorization === "string" && authorization) headers.authorization = authorization;
       const fetchImpl = backend.fetchImpl ?? fetch;
-      const upstream = await fetchImpl(`${backend.baseUrl}${req.url}`, {
+      const upstream = await fetchImpl(`${backend.baseUrl}${path}`, {
         method: req.method,
-        headers: { "content-type": "application/json" },
+        headers,
         body: JSON.stringify(outbound),
       });
       const payload = await upstream.text();
