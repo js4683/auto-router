@@ -204,4 +204,45 @@ describe("selector — two axes + guards + stickiness", () => {
     expect(r3.via).not.toBe("stay-sticky");
     expect(["free-medium", "paid-mid", "small-window"]).toContain(r3.modelId);
   });
+
+  it("uses the first mapped Avengers-Pro paper id on a new task", () => {
+    const r = selectModel(
+      sess({ lastUserMessage: "implement the feature", isNewSession: true }),
+      catalog,
+      { ...cfg, modelMap: { "qwen/qwen3": [{ runtimeId: "free-medium", source: "hand" }] } },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      { paperIds: ["qwen/qwen3"] }
+    );
+    expect(r.modelId).toBe("free-medium");
+    expect(r.via).toBe("avengers-pro");
+  });
+
+  it("planning overlay still rejects mapped models below quality 85", () => {
+    const r = selectModel(
+      sess({ lastUserMessage: "plan the architecture", userTag: "planning", forceTier: "simple", isNewSession: true }),
+      catalog,
+      { ...cfg, modelMap: { "qwen/qwen3": [{ runtimeId: "free-medium", source: "hand" }] } },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      { paperIds: ["qwen/qwen3"] }
+    );
+    expect(r.modelId).toBe("frontier");
+    expect(r.via).toBe("quality");
+  });
+
+  it("falls back to heuristic select when no paper id maps", () => {
+    const r = selectModel(
+      sess({ lastUserMessage: "hello", isNewSession: true }),
+      catalog,
+      cfg,
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      { paperIds: ["missing/model"] }
+    );
+    expect(r.via).not.toBe("avengers-pro");
+  });
 });

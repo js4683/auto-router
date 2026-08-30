@@ -2,6 +2,7 @@ import type { Catalog, ModelEntry, RouterConfig, RouterState, SessionState, Sele
 import { classify, detectBoundary, tierRank } from "./classify.js";
 import { passesContextFit, isUpgrade } from "./guards.js";
 import { resolveTaskType } from "./task-type.js";
+import { resolveMappedModels } from "./model-map.js";
 
 function bestModelForTier(catalog: Catalog, minQuality: number, strategy: TaskStrategy): ModelEntry | null {
   const eligible = catalog.models.filter((m) => m.codingIndex >= minQuality);
@@ -40,7 +41,8 @@ export function selectModel(
   config: RouterConfig,
   state: RouterState,
   prevAgent?: string,
-  prevMessage?: string
+  prevMessage?: string,
+  avengers?: { paperIds: string[] }
 ): SelectionResult {
   const cls = classify(session, config);
   const boundary = detectBoundary(session, prevAgent, prevMessage);
@@ -65,6 +67,24 @@ export function selectModel(
       reason = `taskType ${taskType} prefer ${preferredId} clears tier ${cls.tier} (quality ${preferred.codingIndex} >= ${minQuality})`;
     } else if (preferred) {
       reason = `taskType prefer ${preferredId} rejected: quality ${preferred.codingIndex} < ${minQuality} for tier ${cls.tier}`;
+    }
+  }
+
+  if (!candidate && avengers?.paperIds?.length && config.modelMap) {
+    const mapped = resolveMappedModels(avengers.paperIds, config.modelMap, catalog)
+      .map((entry) => catalog.models.find((m) => (m.runtimeId ?? m.id) === entry.runtimeId || m.id === entry.runtimeId))
+      .filter((m): m is ModelEntry => !!m && m.codingIndex >= minQuality);
+    if (strategy === "lowest-cost") {
+      const free = mapped.filter((m) => m.isFree);
+      candidate = (free[0] ?? [...mapped].sort((a, b) => a.blendedPrice - b.blendedPrice)[0]) ?? null;
+    } else if (strategy === "quality") {
+      candidate = [...mapped].sort((a, b) => b.codingIndex - a.codingIndex)[0] ?? null;
+    } else {
+      candidate = mapped[0] ?? null;
+    }
+    if (candidate) {
+      via = strategy === "value" || !taskPolicy?.strategy ? "avengers-pro" : candidate.isFree && strategy !== "quality" ? "free-first" : strategy;
+      reason = `avengers-pro mapped ${candidate.id}`;
     }
   }
 

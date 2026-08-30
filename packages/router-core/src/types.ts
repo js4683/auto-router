@@ -140,6 +140,15 @@ export interface RouterConfig {
   };
   // optional agent -> taskType map
   agentTaskTypeMap?: Record<string, TaskType>;
+  avengersPro?: {
+    enabled: boolean;
+    artifactDir: string;
+    embedding?: { baseUrl: string; apiKeyEnv: string; model: string };
+    topK?: number;
+    beta?: number;
+    timeoutMs?: number;
+  };
+  modelMap?: ModelMap;
 }
 
 // ---- Routing state (holds stickiness) ----
@@ -156,7 +165,7 @@ export interface SelectionResult {
   taskType: TaskType | null;
   confidence: number;
   reason: string;
-  via: "taskType-prefer" | "free-first" | "lowest-cost" | "quality" | "value" | "stay-sticky" | "context-fit-block" | "force" | "fallback";
+  via: "taskType-prefer" | "free-first" | "lowest-cost" | "quality" | "value" | "avengers-pro" | "stay-sticky" | "context-fit-block" | "force" | "fallback";
   blockedDowngrade?: boolean;
   catalogSource: Catalog["source"];
   score: number;
