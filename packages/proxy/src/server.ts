@@ -136,22 +136,28 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.end(body);
 }
 
-function nativeResponseText(payload: any, provider: string): string {
+function nativeResponse(payload: any, provider: string): { content: string; refusal?: string } {
   if (provider === "google") {
     const parts = payload?.candidates?.[0]?.content?.parts;
-    return Array.isArray(parts) ? parts.map((part: any) => part?.text ?? "").join("") : "";
+    return { content: Array.isArray(parts) ? parts.map((part: any) => part?.text ?? "").join("") : "" };
   }
 
   const output = Array.isArray(payload?.output) ? payload.output : [];
-  return output
+  const parts = output
     .filter((item: any) => item?.type === "message" && Array.isArray(item.content))
-    .flatMap((item: any) => item.content)
+    .flatMap((item: any) => item.content);
+  const content = parts
     .filter((part: any) => part?.type === "output_text")
     .map((part: any) => part.text ?? "")
     .join("");
+  const refusal = parts
+    .filter((part: any) => part?.type === "refusal")
+    .map((part: any) => part.refusal ?? "")
+    .join("");
+  return { content, ...(refusal ? { refusal } : {}) };
 }
 
-function nativeFinishReason(payload: any, provider: string): "stop" | "length" | "content_filter" {
+function nativeFinishReason(payload: any, provider: string, refusal?: string): "stop" | "length" | "content_filter" {
   if (provider === "google") {
     const reason = payload?.candidates?.[0]?.finishReason ?? payload?.promptFeedback?.blockReason;
     if (!reason || reason === "STOP") return "stop";
@@ -159,6 +165,7 @@ function nativeFinishReason(payload: any, provider: string): "stop" | "length" |
     return "content_filter";
   }
 
+  if (refusal) return "content_filter";
   if (!payload?.status || payload.status === "completed") return "stop";
   if (payload.status === "incomplete" && payload?.incomplete_details?.reason === "max_output_tokens") return "length";
   return "content_filter";
@@ -167,8 +174,9 @@ function nativeFinishReason(payload: any, provider: string): "stop" | "length" |
 function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
   const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
   const created = Math.floor(Date.now() / 1000);
-  const content = nativeResponseText(payload, provider);
-  const finishReason = nativeFinishReason(payload, provider);
+  const { content, refusal } = nativeResponse(payload, provider);
+  const finishReason = nativeFinishReason(payload, provider, refusal);
+  const message = refusal ? { role: "assistant", content: content || null, refusal } : { role: "assistant", content };
 
   if (!body?.stream) {
     json(res, 200, {
@@ -176,13 +184,14 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
       object: "chat.completion",
       created,
       model,
-      choices: [{ index: 0, message: { role: "assistant", content }, logprobs: null, finish_reason: finishReason }],
+      choices: [{ index: 0, message, logprobs: null, finish_reason: finishReason }],
     });
     return;
   }
 
+  const delta = refusal ? { role: "assistant", content: content || null, refusal } : { role: "assistant", content };
   const chunks = [
-    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content }, logprobs: null, finish_reason: null }] },
+    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, logprobs: null, finish_reason: null }] },
     { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: finishReason }] },
   ];
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });

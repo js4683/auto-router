@@ -226,6 +226,54 @@ describe("proxy", () => {
     expect(res.body).toContain("data: [DONE]");
   });
 
+  it("preserves Zen refusals as content-filtered Chat Completions", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "resp_refusal",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "refusal", refusal: "I cannot help with that request." }] }],
+              })
+            ),
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+    const body = { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "Make a restricted request." }] };
+
+    const jsonRes = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", body), jsonRes as never);
+    expect(JSON.parse(jsonRes.body)).toMatchObject({
+      choices: [
+        {
+          message: { role: "assistant", content: null, refusal: "I cannot help with that request." },
+          finish_reason: "content_filter",
+        },
+      ],
+    });
+
+    const streamRes = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { ...body, stream: true }), streamRes as never);
+    const chunks = streamRes.body
+      .split("\n\n")
+      .filter((line) => line.startsWith("data: {") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)));
+    expect(chunks[0].choices[0].delta).toEqual({
+      role: "assistant",
+      content: null,
+      refusal: "I cannot help with that request.",
+    });
+    expect(chunks[1].choices[0].finish_reason).toBe("content_filter");
+  });
+
   it("sends unprefixed gpt-5 planning targets to Zen /v1/responses", async () => {
     const outbound: Array<{ url: string; model: string }> = [];
     const server = createProxyServer({
