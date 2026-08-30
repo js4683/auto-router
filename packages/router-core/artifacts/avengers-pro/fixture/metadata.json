@@ -1,0 +1,7 @@
+{
+  "n_clusters": 2,
+  "embedding_model": "fixture",
+  "available_models": ["qwen/qwen3", "openai/gpt-5-medium"],
+  "top_k": 1,
+  "beta": 9
+}

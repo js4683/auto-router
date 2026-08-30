@@ -5,3 +5,4 @@ export * from "./catalog.js";
 export * from "./task-type.js";
 export * from "./selector.js";
 export * from "./config.js";
+export * from "./avengers-pro.js";
