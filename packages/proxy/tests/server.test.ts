@@ -387,4 +387,28 @@ describe("proxy", () => {
       choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "length" }],
     });
   });
+
+  it("wires Avengers-Pro fixture ranking into the executable bootstrap", async () => {
+    const { bootstrapProxyOptions } = await import("../src/server.js");
+    const opts = bootstrapProxyOptions();
+    expect(opts.rankAvengers).toBeTypeOf("function");
+    expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("qwen/qwen3");
+
+    const res = collectRes();
+    const server = createProxyServer({
+      ...opts,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "http://backend.test",
+          fetchImpl: async () => new Response(JSON.stringify({ id: "ok", output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }] })),
+        },
+      },
+    });
+    await server.handle(
+      fakeReq("/v1/route", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] }),
+      res as never
+    );
+    expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
+  });
 });

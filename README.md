@@ -70,9 +70,9 @@ Responses API and Gemini's `generateContent` API. Anthropic Messages ingress, Op
 Responses ingress, and cross-provider tool-call translation are not implemented yet,
 so Claude Code, Codex, and full coding-agent tool loops are not currently supported.
 
-The proxy applies free-first / planning-quality overlays, then holds that target until
-a confirmed boundary. `createProxyServer` accepts an Avengers-Pro ranker, but the
-packaged executable does not wire one yet and therefore uses heuristic selection.
+The proxy scores the first message of a task with Avengers-Pro fixture ranking when
+enabled, applies free-first / planning-quality overlays, then holds that target until
+a confirmed boundary.
 
 ## Docs
 

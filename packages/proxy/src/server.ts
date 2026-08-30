@@ -1,9 +1,13 @@
+import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   detectBoundary,
+  loadAvengersProArtifacts,
   loadCatalogSync,
   loadConfig,
+  scoreAvengersPro,
   selectModel,
   type Catalog,
   type RouterConfig,
@@ -83,7 +87,10 @@ function textMessages(body: any): TextMessage[] {
 }
 
 function lastUserText(messages: TextMessage[]): string {
-  return messages.findLast((message) => message.role === "user")?.content ?? "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") return messages[i].content;
+  }
+  return "";
 }
 
 function geminiRequest(messages: TextMessage[]): Record<string, unknown> {
@@ -312,10 +319,28 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+function resolveExistingPath(path: string): string {
+  const candidates = [resolve(path), resolve("..", path), resolve("../..", path)];
+  return candidates.find((candidate) => existsSync(candidate)) ?? resolve(path);
+}
+
+function fixtureEmbed(text: string): number[] {
+  return /plan|architect|design/i.test(text) ? [0, 1] : [1, 0];
+}
+
+export function bootstrapProxyOptions(): CreateProxyServerOptions {
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
-  const server = createProxyServer({
+  let rankAvengers: CreateProxyServerOptions["rankAvengers"];
+  if (config.avengersPro?.enabled) {
+    try {
+      const artifacts = loadAvengersProArtifacts(resolveExistingPath(config.avengersPro.artifactDir));
+      rankAvengers = (text) => scoreAvengersPro(fixtureEmbed(text), artifacts);
+    } catch {
+      rankAvengers = undefined;
+    }
+  }
+  return {
     select: selectModel,
     catalog,
     config,
@@ -329,7 +354,12 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
         apiKey: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY,
       },
     },
-  });
+    rankAvengers,
+  };
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  const server = createProxyServer(bootstrapProxyOptions());
   const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";
   const port = Number(process.env.AUTO_ROUTER_PORT ?? 8787);
   createServer((req, res) => {
