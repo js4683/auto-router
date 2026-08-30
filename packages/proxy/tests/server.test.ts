@@ -157,7 +157,7 @@ describe("proxy", () => {
   });
 
   it("forwards authorization and sends Muse to Zen /v1/responses", async () => {
-    const outbound: Array<{ url: string; model: string; auth?: string; input?: string }> = [];
+    const outbound: Array<{ url: string; model: string; auth?: string; input?: unknown }> = [];
     const server = createProxyServer({
       catalog,
       config,
@@ -178,7 +178,8 @@ describe("proxy", () => {
             return new Response(
               JSON.stringify({
                 id: "resp_ok",
-                status: "completed",
+                status: "incomplete",
+                incomplete_details: { reason: "max_output_tokens" },
                 output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }],
               }),
               { status: 200 }
@@ -194,7 +195,16 @@ describe("proxy", () => {
     await server.handle(
       fakeReq(
         "/v1/chat/completions",
-        { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }], stream: true },
+        {
+          model: "openai/gpt-5.6-luna",
+          messages: [
+            { role: "system", content: "Follow the repository rules." },
+            { role: "user", content: "Implement the feature." },
+            { role: "assistant", content: "I inspected the code." },
+            { role: "user", content: [{ type: "text", text: "Continue with the fix." }] },
+          ],
+          stream: true,
+        },
         { authorization: "Bearer zen-test-key" }
       ),
       res as never
@@ -204,9 +214,15 @@ describe("proxy", () => {
     expect(outbound[0].url).toBe("https://opencode.ai/zen/v1/responses");
     expect(outbound[0].model).toBe("muse-spark-1.2-contributor-free");
     expect(outbound[0].auth).toBe("Bearer zen-test-key");
-    expect(outbound[0].input).toBe("implement the feature");
+    expect(outbound[0].input).toEqual([
+      { role: "system", content: "Follow the repository rules." },
+      { role: "user", content: "Implement the feature." },
+      { role: "assistant", content: "I inspected the code." },
+      { role: "user", content: "Continue with the fix." },
+    ]);
     expect(res.headers["content-type"]).toBe("text/event-stream");
     expect(res.body).toContain('"content":"OK"');
+    expect(res.body).toContain('"finish_reason":"length"');
     expect(res.body).toContain("data: [DONE]");
   });
 
@@ -252,7 +268,7 @@ describe("proxy", () => {
   });
 
   it("sends Gemini targets to Google generateContent with the backend key", async () => {
-    const outbound: Array<{ url: string; text?: string; key?: string }> = [];
+    const outbound: Array<{ url: string; body: any; key?: string }> = [];
     const server = createProxyServer({
       catalog,
       config,
@@ -268,9 +284,9 @@ describe("proxy", () => {
             outbound.push({
               url: `${target.origin}${target.pathname}`,
               key: target.searchParams.get("key") ?? undefined,
-              text: parsed.contents?.[0]?.parts?.[0]?.text,
+              body: parsed,
             });
-            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "OK" }] } }] }), { status: 200 });
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "MAX_TOKENS" }] }), { status: 200 });
           },
         },
       },
@@ -290,17 +306,37 @@ describe("proxy", () => {
 
     const res = collectRes();
     await server.handle(
-      fakeReq("/v1/chat/completions", { model: "google/gemini-3-flash", messages: [{ role: "user", content: "say hi" }] }, { authorization: "Bearer AIza-test" }),
+      fakeReq(
+        "/v1/chat/completions",
+        {
+          model: "google/gemini-3-flash",
+          messages: [
+            { role: "system", content: "Be concise." },
+            { role: "developer", content: "Use plain text." },
+            { role: "user", content: "Say hi." },
+            { role: "assistant", content: "Hi." },
+            { role: "user", content: [{ type: "text", text: "Now say bye." }] },
+          ],
+        },
+        { authorization: "Bearer AIza-test" }
+      ),
       res as never
     );
 
     expect(outbound).toHaveLength(1);
     expect(outbound[0].url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent");
     expect(outbound[0].key).toBe("gemini-backend-key");
-    expect(outbound[0].text).toBe("say hi");
+    expect(outbound[0].body).toEqual({
+      systemInstruction: { parts: [{ text: "Be concise." }, { text: "Use plain text." }] },
+      contents: [
+        { role: "user", parts: [{ text: "Say hi." }] },
+        { role: "model", parts: [{ text: "Hi." }] },
+        { role: "user", parts: [{ text: "Now say bye." }] },
+      ],
+    });
     expect(JSON.parse(res.body)).toMatchObject({
       object: "chat.completion",
-      choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+      choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "length" }],
     });
   });
 });

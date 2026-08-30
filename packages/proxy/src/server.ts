@@ -38,6 +38,12 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 const ZEN_RESPONSE_MODELS = /muse-spark|gpt-5|grok-/i;
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
+const TEXT_MESSAGE_ROLES = new Set(["system", "developer", "user", "assistant"]);
+
+interface TextMessage {
+  role: "system" | "developer" | "user" | "assistant";
+  content: string;
+}
 
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -57,17 +63,43 @@ function resolveProvider(modelId: string): { provider: string; bareModel: string
   return { provider: providerFromId || "openai", bareModel };
 }
 
-function lastUserText(body: any): string {
+function messageText(content: any): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+    .map((part: any) => part.text)
+    .join("\n");
+  return text || undefined;
+}
+
+function textMessages(body: any): TextMessage[] {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg?.role !== "user") continue;
-    if (typeof msg.content === "string") return msg.content;
-    if (Array.isArray(msg.content)) {
-      return msg.content.map((part: any) => part?.text ?? part?.content ?? "").join("\n");
-    }
-  }
-  return "";
+  return messages.flatMap((message: any) => {
+    const content = messageText(message?.content);
+    if (!TEXT_MESSAGE_ROLES.has(message?.role) || content === undefined) return [];
+    return [{ role: message.role, content } as TextMessage];
+  });
+}
+
+function lastUserText(messages: TextMessage[]): string {
+  return messages.findLast((message) => message.role === "user")?.content ?? "";
+}
+
+function geminiRequest(messages: TextMessage[]): Record<string, unknown> {
+  const systemParts = messages
+    .filter((message) => message.role === "system" || message.role === "developer")
+    .map((message) => ({ text: message.content }));
+  const contents = messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map((message) => ({
+      role: message.role === "assistant" ? "model" : "user",
+      parts: [{ text: message.content }],
+    }));
+  return {
+    ...(systemParts.length ? { systemInstruction: { parts: systemParts } } : {}),
+    contents,
+  };
 }
 
 function sessionId(req: IncomingMessage, text: string): string {
@@ -119,10 +151,24 @@ function nativeResponseText(payload: any, provider: string): string {
     .join("");
 }
 
+function nativeFinishReason(payload: any, provider: string): "stop" | "length" | "content_filter" {
+  if (provider === "google") {
+    const reason = payload?.candidates?.[0]?.finishReason ?? payload?.promptFeedback?.blockReason;
+    if (!reason || reason === "STOP") return "stop";
+    if (reason === "MAX_TOKENS") return "length";
+    return "content_filter";
+  }
+
+  if (!payload?.status || payload.status === "completed") return "stop";
+  if (payload.status === "incomplete" && payload?.incomplete_details?.reason === "max_output_tokens") return "length";
+  return "content_filter";
+}
+
 function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
   const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
   const created = Math.floor(Date.now() / 1000);
   const content = nativeResponseText(payload, provider);
+  const finishReason = nativeFinishReason(payload, provider);
 
   if (!body?.stream) {
     json(res, 200, {
@@ -130,14 +176,14 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
       object: "chat.completion",
       created,
       model,
-      choices: [{ index: 0, message: { role: "assistant", content }, logprobs: null, finish_reason: "stop" }],
+      choices: [{ index: 0, message: { role: "assistant", content }, logprobs: null, finish_reason: finishReason }],
     });
     return;
   }
 
   const chunks = [
     { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content }, logprobs: null, finish_reason: null }] },
-    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: "stop" }] },
+    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: finishReason }] },
   ];
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
@@ -205,7 +251,8 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
       const raw = await readBody(req);
       const body = raw ? JSON.parse(raw) : {};
-      const text = lastUserText(body);
+      const messages = textMessages(body);
+      const text = lastUserText(messages);
       const result = decide(req, text);
 
       if (req.url === "/v1/route") {
@@ -226,9 +273,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
       const useGemini = provider === "google";
       const outbound = useGemini
-        ? { contents: [{ role: "user", parts: [{ text }] }] }
+        ? geminiRequest(messages)
         : useZenResponses
-          ? { model: bareModel, input: text }
+          ? { model: bareModel, input: messages }
           : { ...body, model: provider === "opencode" ? bareModel : result.modelId };
       const path = useGemini
         ? `/models/${bareModel}:generateContent${token ? `?key=${encodeURIComponent(token)}` : ""}`
