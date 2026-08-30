@@ -1,8 +1,7 @@
 import { IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import { describe, expect, it } from "vitest";
-import { selectModel } from "../../router-core/src/selector.js";
-import type { Catalog, RouterConfig } from "../../router-core/src/types.js";
+import { selectModel, type Catalog, type RouterConfig } from "@auto-router/router-core";
 import { createProxyServer } from "../src/server.js";
 import { memorySessions } from "../src/session.js";
 
@@ -176,7 +175,14 @@ describe("proxy", () => {
               auth: headers?.authorization ?? headers?.Authorization,
               input: parsed.input,
             });
-            return new Response(JSON.stringify({ id: "resp_ok", status: "completed", output: [] }), { status: 200 });
+            return new Response(
+              JSON.stringify({
+                id: "resp_ok",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }],
+              }),
+              { status: 200 }
+            );
           },
         },
       },
@@ -184,13 +190,14 @@ describe("proxy", () => {
       select: selectModel,
     });
 
+    const res = collectRes();
     await server.handle(
       fakeReq(
         "/v1/chat/completions",
-        { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] },
+        { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }], stream: true },
         { authorization: "Bearer zen-test-key" }
       ),
-      collectRes() as never
+      res as never
     );
 
     expect(outbound).toHaveLength(1);
@@ -198,6 +205,9 @@ describe("proxy", () => {
     expect(outbound[0].model).toBe("muse-spark-1.2-contributor-free");
     expect(outbound[0].auth).toBe("Bearer zen-test-key");
     expect(outbound[0].input).toBe("implement the feature");
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.body).toContain('"content":"OK"');
+    expect(res.body).toContain("data: [DONE]");
   });
 
   it("sends unprefixed gpt-5 planning targets to Zen /v1/responses", async () => {
@@ -241,7 +251,7 @@ describe("proxy", () => {
     expect(outbound[0].model).toBe("gpt-5.4");
   });
 
-  it("sends Gemini targets to Google generateContent with the inbound key", async () => {
+  it("sends Gemini targets to Google generateContent with the backend key", async () => {
     const outbound: Array<{ url: string; text?: string; key?: string }> = [];
     const server = createProxyServer({
       catalog,
@@ -251,6 +261,7 @@ describe("proxy", () => {
         openai: { baseUrl: "http://openai.test", fetchImpl: async () => new Response("wrong backend") },
         google: {
           baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-backend-key",
           fetchImpl: async (url, init) => {
             const parsed = JSON.parse(String(init?.body ?? "{}"));
             const target = new URL(String(url));
@@ -277,14 +288,19 @@ describe("proxy", () => {
         }) as never,
     });
 
+    const res = collectRes();
     await server.handle(
       fakeReq("/v1/chat/completions", { model: "google/gemini-3-flash", messages: [{ role: "user", content: "say hi" }] }, { authorization: "Bearer AIza-test" }),
-      collectRes() as never
+      res as never
     );
 
     expect(outbound).toHaveLength(1);
     expect(outbound[0].url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent");
-    expect(outbound[0].key).toBe("AIza-test");
+    expect(outbound[0].key).toBe("gemini-backend-key");
     expect(outbound[0].text).toBe("say hi");
+    expect(JSON.parse(res.body)).toMatchObject({
+      object: "chat.completion",
+      choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+    });
   });
 });

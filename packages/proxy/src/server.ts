@@ -1,11 +1,20 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { pathToFileURL } from "node:url";
-import { detectBoundary, loadCatalogSync, loadConfig, selectModel } from "../../router-core/src/index.js";
-import type { Catalog, RouterConfig, SelectionResult, SessionState } from "../../router-core/src/types.js";
+import {
+  detectBoundary,
+  loadCatalogSync,
+  loadConfig,
+  selectModel,
+  type Catalog,
+  type RouterConfig,
+  type SelectionResult,
+  type SessionState,
+} from "@auto-router/router-core";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 
 export interface ProxyBackend {
   baseUrl: string;
+  apiKey?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -95,6 +104,45 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.end(body);
 }
 
+function nativeResponseText(payload: any, provider: string): string {
+  if (provider === "google") {
+    const parts = payload?.candidates?.[0]?.content?.parts;
+    return Array.isArray(parts) ? parts.map((part: any) => part?.text ?? "").join("") : "";
+  }
+
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  return output
+    .filter((item: any) => item?.type === "message" && Array.isArray(item.content))
+    .flatMap((item: any) => item.content)
+    .filter((part: any) => part?.type === "output_text")
+    .map((part: any) => part.text ?? "")
+    .join("");
+}
+
+function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
+  const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
+  const created = Math.floor(Date.now() / 1000);
+  const content = nativeResponseText(payload, provider);
+
+  if (!body?.stream) {
+    json(res, 200, {
+      id,
+      object: "chat.completion",
+      created,
+      model,
+      choices: [{ index: 0, message: { role: "assistant", content }, logprobs: null, finish_reason: "stop" }],
+    });
+    return;
+  }
+
+  const chunks = [
+    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant", content }, logprobs: null, finish_reason: null }] },
+    { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: "stop" }] },
+  ];
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
+}
+
 export function createProxyServer(opts: CreateProxyServerOptions): {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   close(): void;
@@ -172,8 +220,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         return;
       }
 
-      const authorization = req.headers.authorization ?? req.headers.Authorization;
-      const token = bearerToken(authorization);
+      const inboundAuthorization = req.headers.authorization ?? req.headers.Authorization;
+      const authorization = backend.apiKey ? `Bearer ${backend.apiKey}` : inboundAuthorization;
+      const token = backend.apiKey ?? bearerToken(inboundAuthorization);
       const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
       const useGemini = provider === "google";
       const outbound = useGemini
@@ -195,6 +244,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         body: JSON.stringify(outbound),
       });
       const payload = await upstream.text();
+      if (upstream.ok && req.url === "/v1/chat/completions" && (useGemini || useZenResponses)) {
+        writeChatCompletion(res, body, provider, bareModel, JSON.parse(payload));
+        return;
+      }
       if (typeof res.writeHead === "function") res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
       else res.statusCode = upstream.status;
       res.end(payload);
@@ -212,10 +265,13 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     config,
     sessions: memorySessions(),
     backends: {
-      openai: { baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com" },
-      opencode: { baseUrl: process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen" },
-      anthropic: { baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com" },
-      google: { baseUrl: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta" },
+      openai: { baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com", apiKey: process.env.OPENAI_API_KEY },
+      opencode: { baseUrl: process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen", apiKey: process.env.OPENCODE_API_KEY },
+      anthropic: { baseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com", apiKey: process.env.ANTHROPIC_API_KEY },
+      google: {
+        baseUrl: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta",
+        apiKey: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY,
+      },
     },
   });
   const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";

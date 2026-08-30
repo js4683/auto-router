@@ -49,18 +49,30 @@ else, so we do not implement that hook.
 To actually switch models, run the local proxy and point the harness at it:
 
 ```bash
+export OPENCODE_API_KEY="..."
+export GEMINI_API_KEY="..."
 npm start --workspace=@auto-router/proxy
 ```
 
+Set the matching API-key environment variable for every provider the router may
+select (`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, or
+`ANTHROPIC_API_KEY`).
+
 Default listen address is `http://127.0.0.1:8787`.
 
-- OpenCode: add a custom provider whose `baseURL` is the proxy and whose model is a
-  virtual id such as `auto-router/auto`.
-- Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
-- Codex / Cursor: OpenAI base URL `http://127.0.0.1:8787/v1`.
+- OpenCode: add an `@ai-sdk/openai-compatible` custom provider whose `baseURL` is
+  `http://127.0.0.1:8787/v1` and whose model is a virtual id such as
+  `auto-router/auto`.
+- Other OpenAI Chat Completions clients can use `http://127.0.0.1:8787/v1`.
 
-The proxy scores the first message of a task with Avengers-Pro, applies free-first /
-planning-quality overlays, then holds that target until a confirmed boundary.
+The proxy accepts Chat Completions requests and translates text responses from Zen's
+Responses API and Gemini's `generateContent` API. Anthropic Messages ingress, OpenAI
+Responses ingress, and cross-provider tool-call translation are not implemented yet,
+so Claude Code, Codex, and full coding-agent tool loops are not currently supported.
+
+The proxy applies free-first / planning-quality overlays, then holds that target until
+a confirmed boundary. `createProxyServer` accepts an Avengers-Pro ranker, but the
+packaged executable does not wire one yet and therefore uses heuristic selection.
 
 ## Docs
 
