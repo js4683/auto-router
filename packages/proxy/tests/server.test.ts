@@ -1061,4 +1061,156 @@ describe("proxy", () => {
     });
     expect(JSON.parse(res.body)).toMatchObject({ id: "resp_ok", object: "response", status: "completed" });
   });
+
+  it("forwards inbound x-api-key when calling Anthropic backend natively without backend apiKey", async () => {
+    const outbound: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), headers: init?.headers as Record<string, string>, body: JSON.parse(String(init?.body)) });
+            return new Response(
+              JSON.stringify({
+                id: "msg_ok",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "OK" }],
+                stop_reason: "end_turn",
+              })
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq(
+        "/v1/messages?beta=true",
+        {
+          model: "claude-sonnet-4-5",
+          max_tokens: 32,
+          messages: [{ role: "user", content: "hello" }],
+        },
+        { "x-api-key": "inbound-claude-key" }
+      ),
+      res as never
+    );
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].url).toBe("https://api.anthropic.com/v1/messages");
+    expect(outbound[0].headers["x-api-key"]).toBe("inbound-claude-key");
+    expect(outbound[0].headers["anthropic-version"]).toBe("2023-06-01");
+    expect(outbound[0].headers.authorization).toBeUndefined();
+    expect(JSON.parse(res.body)).toMatchObject({ type: "message", role: "assistant" });
+  });
+
+  it("handles query strings on /health and /v1/route and /v1/responses", async () => {
+    const outbound: Array<{ url: string; body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+            return new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [] }));
+          },
+        },
+      },
+      select: selectModel,
+    });
+
+    const healthRes = collectRes();
+    await server.handle(fakeReq("/health?verbose=1", {}), healthRes as never);
+    expect(healthRes.statusCode).toBe(200);
+    expect(JSON.parse(healthRes.body)).toEqual({ ok: true });
+
+    const routeRes = collectRes();
+    await server.handle(
+      fakeReq("/v1/route?format=json", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] }),
+      routeRes as never
+    );
+    expect(routeRes.statusCode).toBe(200);
+    expect(JSON.parse(routeRes.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
+
+    const responsesRes = collectRes();
+    await server.handle(
+      fakeReq("/v1/responses?stream=false", { model: "openai/gpt-5.6-luna", input: "implement the feature" }),
+      responsesRes as never
+    );
+    expect(responsesRes.statusCode).toBe(200);
+    expect(outbound[0].url).toBe("https://opencode.ai/zen/v1/responses");
+  });
+
+  it("prevents cross-protocol credential leakage when Anthropic client routes to Zen or Google", async () => {
+    const outboundZen: Array<{ url: string; headers: Record<string, string> }> = [];
+    const outboundGoogle: Array<{ url: string; headers: Record<string, string> }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            outboundZen.push({ url: String(url), headers: (init?.headers as Record<string, string>) ?? {} });
+            return new Response(JSON.stringify({ id: "resp_zen", status: "completed", output: [] }));
+          },
+        },
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          fetchImpl: async (url, init) => {
+            outboundGoogle.push({ url: String(url), headers: (init?.headers as Record<string, string>) ?? {} });
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "OK" }] } }] }));
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq(
+        "/v1/messages?beta=true",
+        { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hello" }] },
+        { "x-api-key": "anthropic-secret-key", authorization: "Bearer anthropic-oauth-token" }
+      ),
+      res as never
+    );
+
+    expect(outboundZen).toHaveLength(1);
+    expect(outboundZen[0].headers.authorization).toBeUndefined();
+    expect(outboundZen[0].headers["x-api-key"]).toBeUndefined();
+  });
 });
+
