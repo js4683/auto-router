@@ -22,8 +22,10 @@ Two adapters deliver "opencode **or any harness**":
 - **opencode plugin** — session signals and one-shot recommendations. It cannot change
   the outbound model while `llm.request.before` is assigned to someone else.
 - **OpenAI/Anthropic proxy** — the apply path. Point OpenCode, Claude Code, Codex, or
-  Cursor at `http://127.0.0.1:8787`. The proxy rewrites only `model` and forwards with
-  the user's backend keys.
+  Cursor at `http://127.0.0.1:8787`. It accepts OpenAI Chat Completions, Anthropic
+  Messages, and OpenAI Responses requests, selects the target `model`, and translates
+  text and function calls across Zen's Responses API and Gemini's `generateContent` API,
+  forwarding with each provider's backend key.
 
 `router-core` has zero harness dependencies. Both adapters call the same
 `classify()` + policy engine.
