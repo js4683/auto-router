@@ -88,6 +88,35 @@ function collectRes() {
 }
 
 describe("proxy", () => {
+  it("handles the Claude Code preflight without calling a backend", async () => {
+    let backendCalls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () => {
+            backendCalls += 1;
+            return new Response("{}");
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+    const req = fakeReq("/api/hello", {});
+    req.method = "HEAD";
+    const res = collectRes();
+
+    await server.handle(req, res as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("");
+    expect(backendCalls).toBe(0);
+  });
+
   it("rewrites chat completions model to the task target and holds it on the second call", async () => {
     const outbound: Array<{ url: string; model: string }> = [];
     let rankCalls = 0;
@@ -631,7 +660,7 @@ describe("proxy", () => {
   });
 
   it("accepts Anthropic /v1/messages and returns a Messages response", async () => {
-    const outbound: Array<{ url: string; input: unknown; maxOutputTokens?: number }> = [];
+    const outbound: Array<{ url: string; input: unknown; maxOutputTokens?: number; authorization?: string }> = [];
     const server = createProxyServer({
       catalog,
       config,
@@ -641,7 +670,8 @@ describe("proxy", () => {
           baseUrl: "https://opencode.ai/zen",
           fetchImpl: async (url, init) => {
             const parsed = JSON.parse(String(init?.body));
-            outbound.push({ url: String(url), input: parsed.input, maxOutputTokens: parsed.max_output_tokens });
+            const headers = init?.headers as Record<string, string>;
+            outbound.push({ url: String(url), input: parsed.input, maxOutputTokens: parsed.max_output_tokens, authorization: headers.authorization });
             return new Response(
               JSON.stringify({
                 id: "resp_ok",
@@ -658,12 +688,16 @@ describe("proxy", () => {
 
     const res = collectRes();
     await server.handle(
-      fakeReq("/v1/messages", {
-        model: "claude-sonnet-4-5",
-        max_tokens: 32,
-        system: "Be brief.",
-        messages: [{ role: "user", content: "implement the feature" }],
-      }),
+      fakeReq(
+        "/v1/messages?beta=true",
+        {
+          model: "claude-sonnet-4-5",
+          max_tokens: 32,
+          system: "Be brief.",
+          messages: [{ role: "user", content: "implement the feature" }],
+        },
+        { authorization: "Bearer claude-oauth-token" }
+      ),
       res as never
     );
 
@@ -673,6 +707,7 @@ describe("proxy", () => {
       { role: "user", content: "implement the feature" },
     ]);
     expect(outbound[0].maxOutputTokens).toBe(32);
+    expect(outbound[0].authorization).toBeUndefined();
     expect(JSON.parse(res.body)).toMatchObject({
       type: "message",
       role: "assistant",

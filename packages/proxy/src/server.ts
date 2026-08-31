@@ -51,14 +51,34 @@ interface TextMessage {
 type IngressProtocol = "chat" | "anthropic" | "responses";
 
 function ingressProtocol(url: string | undefined): IngressProtocol {
-  if (url === "/v1/messages") return "anthropic";
-  if (url === "/v1/responses") return "responses";
+  const path = url?.split("?", 1)[0];
+  if (path === "/v1/messages") return "anthropic";
+  if (path === "/v1/responses") return "responses";
   return "chat";
 }
 
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   return value.replace(/^Bearer\s+/i, "").trim() || undefined;
+}
+
+/**
+ * Inbound client credentials only apply when the client's protocol matches the
+ * routed provider. A Claude Code OAuth header must never reach Zen or Gemini.
+ */
+function inboundCredentials(
+  headers: IncomingMessage["headers"],
+  protocol: IngressProtocol,
+  provider: string
+): { authorization?: string | string[]; token?: string } {
+  if (protocol === "anthropic" && provider === "anthropic") {
+    const apiKey = headers["x-api-key"];
+    return { token: typeof apiKey === "string" ? apiKey : bearerToken(headers.authorization) };
+  }
+  const matches = protocol === "chat" || (protocol === "responses" && provider === "openai");
+  if (!matches) return {};
+  const authorization = headers.authorization ?? headers.Authorization;
+  return { authorization, token: bearerToken(authorization) };
 }
 
 function resolveProvider(modelId: string): { provider: string; bareModel: string } {
@@ -754,8 +774,15 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
   return {
     async handle(req, res) {
-      if (req.url === "/health") {
+      const path = req.url?.split("?", 1)[0];
+      if (path === "/health") {
         json(res, 200, { ok: true });
+        return;
+      }
+      if (req.method === "HEAD" && path === "/api/hello") {
+        if (typeof res.writeHead === "function") res.writeHead(200);
+        else res.statusCode = 200;
+        res.end();
         return;
       }
 
@@ -767,7 +794,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const text = lastUserText(messages);
       const result = decide(req, text);
 
-      if (req.url === "/v1/route") {
+      if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
         return;
       }
@@ -779,9 +806,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         return;
       }
 
-      const inboundAuthorization = req.headers.authorization ?? req.headers.Authorization;
-      const authorization = backend.apiKey ? `Bearer ${backend.apiKey}` : inboundAuthorization;
-      const token = backend.apiKey ?? bearerToken(inboundAuthorization);
+      const inbound = inboundCredentials(req.headers, protocol, provider);
+      const authorization = backend.apiKey ? `Bearer ${backend.apiKey}` : inbound.authorization;
+      const token = backend.apiKey ?? inbound.token;
       const upstreamRequestPlan = upstreamRequest(protocol, body, normalizedBody, provider, bareModel, token, req.url);
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (provider === "anthropic") {
