@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "pretest": "npm run build --workspace=@auto-router/router-core",
     "test": "vitest run",
     "start": "node dist/src/server.js"
   },

@@ -194,8 +194,13 @@ function fallbackCatalog(config: RouterConfig): Catalog {
       ];
 
   const cat = buildCatalog(stub, config, "fallback");
-  // Mark free for fallback based on freeSet
-  cat.models.forEach((m) => (m.isFree = freeSet.has(m.id.toLowerCase())));
+  const mappedRuntimeIds = Object.values(config.modelMap ?? {}).flatMap((entries) => entries.map((entry) => entry.runtimeId));
+  cat.models.forEach((m) => {
+    m.isFree = freeSet.has(m.id.toLowerCase());
+    if (!m.runtimeId) {
+      m.runtimeId = mappedRuntimeIds.find((runtimeId) => runtimeId === m.id || runtimeId.endsWith(`/${m.id}`));
+    }
+  });
   return cat;
 }
 

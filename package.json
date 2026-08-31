@@ -4,7 +4,7 @@
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "build": "npm run build --workspaces",
+    "build": "npm run build --workspace=@auto-router/router-core && npm run build --workspace=@auto-router/proxy",
     "test": "npm run test --workspaces",
     "test:all": "npm run test --workspaces --if-present",
     "catalog:refresh": "node packages/router-core/dist/catalog-cli.js"

@@ -49,18 +49,33 @@ else, so we do not implement that hook.
 To actually switch models, run the local proxy and point the harness at it:
 
 ```bash
+export OPENCODE_API_KEY="..."
+export GEMINI_API_KEY="..."
 npm start --workspace=@auto-router/proxy
 ```
 
+Set the matching API-key environment variable for every provider the router may
+select (`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, or
+`ANTHROPIC_API_KEY`).
+
 Default listen address is `http://127.0.0.1:8787`.
 
-- OpenCode: add a custom provider whose `baseURL` is the proxy and whose model is a
-  virtual id such as `auto-router/auto`.
-- Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
-- Codex / Cursor: OpenAI base URL `http://127.0.0.1:8787/v1`.
+- OpenCode: add an `@ai-sdk/openai-compatible` custom provider whose `baseURL` is
+  `http://127.0.0.1:8787/v1` and whose model is a virtual id such as
+  `auto-router/auto`.
+- Other OpenAI Chat Completions clients can use `http://127.0.0.1:8787/v1`.
+- Claude Code can use `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
+- Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.
 
-The proxy scores the first message of a task with Avengers-Pro, applies free-first /
-planning-quality overlays, then holds that target until a confirmed boundary.
+The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
+requests. It translates text and function calls across Zen's Responses API and
+Gemini's `generateContent` API, including client-compatible streaming envelopes.
+Translated streams are currently emitted after the upstream response completes;
+native OpenAI Responses streams are forwarded unchanged.
+
+The proxy scores the first message of a task with Avengers-Pro fixture ranking when
+enabled, applies free-first / planning-quality overlays, then holds that target until
+a confirmed boundary.
 
 ## Docs
 
