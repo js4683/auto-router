@@ -49,6 +49,14 @@ interface TextMessage {
   content: string;
 }
 
+type IngressProtocol = "chat" | "anthropic" | "responses";
+
+function ingressProtocol(url: string | undefined): IngressProtocol {
+  if (url === "/v1/messages") return "anthropic";
+  if (url === "/v1/responses") return "responses";
+  return "chat";
+}
+
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   return value.replace(/^Bearer\s+/i, "").trim() || undefined;
@@ -71,10 +79,88 @@ function messageText(content: any): string | undefined {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return undefined;
   const text = content
-    .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+    .filter((part: any) => ["text", "input_text", "output_text"].includes(part?.type) && typeof part.text === "string")
     .map((part: any) => part.text)
     .join("\n");
   return text || undefined;
+}
+
+function anthropicMessages(body: any): any[] {
+  const system = messageText(body?.system);
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const normalized = messages.flatMap((message: any) => {
+    if (!Array.isArray(message?.content)) return [{ role: message.role, content: message.content }];
+    const items: any[] = [];
+    const text = messageText(message.content);
+    if (text) items.push({ role: message.role, content: text });
+    for (const part of message.content) {
+      if (part?.type === "tool_use") {
+        items.push({
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: part.id, type: "function", function: { name: part.name, arguments: JSON.stringify(part.input ?? {}) } }],
+        });
+      }
+      if (part?.type === "tool_result") {
+        items.push({ role: "tool", tool_call_id: part.tool_use_id, content: messageText(part.content) ?? String(part.content ?? "") });
+      }
+    }
+    return items;
+  });
+  return system ? [{ role: "system", content: system }, ...normalized] : normalized;
+}
+
+function responsesMessages(body: any): any[] {
+  const input = typeof body?.input === "string" ? [{ role: "user", content: body.input }] : Array.isArray(body?.input) ? body.input : [];
+  const messages = input.flatMap((item: any) => {
+    if (item?.type === "function_call") {
+      return [{
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: item.call_id ?? item.id, type: "function", function: { name: item.name, arguments: item.arguments ?? "{}" } }],
+      }];
+    }
+    if (item?.type === "function_call_output") {
+      return [{ role: "tool", tool_call_id: item.call_id, content: messageText(item.output) ?? String(item.output ?? "") }];
+    }
+    if (TEXT_MESSAGE_ROLES.has(item?.role)) {
+      const content = messageText(item.content);
+      return content === undefined ? [] : [{ role: item.role, content }];
+    }
+    return [];
+  });
+  const instructions = messageText(body?.instructions);
+  return instructions ? [{ role: "system", content: instructions }, ...messages] : messages;
+}
+
+function normalizeIngress(body: any, protocol: IngressProtocol): any {
+  if (protocol === "chat") return body;
+  if (protocol === "anthropic") {
+    const tools = (Array.isArray(body?.tools) ? body.tools : []).map((tool: any) => ({
+      type: "function",
+      function: { name: tool.name, description: tool.description, parameters: tool.input_schema },
+    }));
+    return {
+      model: body.model,
+      messages: anthropicMessages(body),
+      stream: body.stream,
+      max_completion_tokens: body.max_tokens,
+      ...(tools.length ? { tools } : {}),
+    };
+  }
+  const tools = (Array.isArray(body?.tools) ? body.tools : [])
+    .filter((tool: any) => tool?.type === "function" && tool.name)
+    .map((tool: any) => ({
+      type: "function",
+      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+    }));
+  return {
+    model: body.model,
+    messages: responsesMessages(body),
+    stream: body.stream,
+    max_completion_tokens: body.max_output_tokens,
+    ...(tools.length ? { tools } : {}),
+  };
 }
 
 function textMessages(body: any): TextMessage[] {
@@ -124,6 +210,19 @@ function zenInput(body: any): unknown[] {
     if (!TEXT_MESSAGE_ROLES.has(message?.role) || content === undefined) return [];
     return [{ role: message.role, content }];
   });
+}
+
+function zenRequest(body: any, model: string): Record<string, unknown> {
+  const tools = zenTools(body);
+  const maxOutputTokens = body?.max_completion_tokens ?? body?.max_tokens;
+  return {
+    model,
+    input: zenInput(body),
+    ...(tools.length ? { tools } : {}),
+    ...(typeof maxOutputTokens === "number" ? { max_output_tokens: maxOutputTokens } : {}),
+    ...(typeof body?.temperature === "number" ? { temperature: body.temperature } : {}),
+    ...(typeof body?.top_p === "number" ? { top_p: body.top_p } : {}),
+  };
 }
 
 function zenFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string }> {
@@ -210,6 +309,42 @@ function geminiFunctionCalls(payload: any): Array<{ id: string; name: string; ar
     }));
 }
 
+interface UpstreamRequest {
+  body: unknown;
+  path: string;
+  translateResponse: boolean;
+  useGemini: boolean;
+}
+
+function upstreamRequest(
+  protocol: IngressProtocol,
+  originalBody: any,
+  normalizedBody: any,
+  provider: string,
+  model: string,
+  token: string | undefined,
+  inboundPath: string | undefined
+): UpstreamRequest {
+  if (provider === "openai" && protocol === "responses") {
+    return { body: { ...originalBody, model }, path: "/v1/responses", translateResponse: false, useGemini: false };
+  }
+  if (provider === "google") {
+    const key = token ? `?key=${encodeURIComponent(token)}` : "";
+    return { body: geminiRequest(normalizedBody), path: `/models/${model}:generateContent${key}`, translateResponse: true, useGemini: true };
+  }
+  if (provider === "opencode" && ZEN_RESPONSE_MODELS.test(model)) {
+    return { body: zenRequest(normalizedBody, model), path: "/v1/responses", translateResponse: true, useGemini: false };
+  }
+
+  const body = { ...normalizedBody, ...(protocol === "chat" ? {} : { stream: false }), model };
+  return {
+    body,
+    path: protocol === "chat" ? inboundPath ?? "/v1/chat/completions" : "/v1/chat/completions",
+    translateResponse: protocol === "anthropic",
+    useGemini: false,
+  };
+}
+
 function sessionId(req: IncomingMessage, text: string): string {
   return String(req.headers["x-session-id"] ?? req.headers["x-opencode-session"] ?? text.slice(0, 64) ?? "global");
 }
@@ -245,6 +380,10 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 function nativeResponse(payload: any, provider: string): { content: string; refusal?: string } {
+  if (provider === "openai") {
+    const message = payload?.choices?.[0]?.message;
+    return { content: messageText(message?.content) ?? "", ...(message?.refusal ? { refusal: message.refusal } : {}) };
+  }
   if (provider === "google") {
     const parts = payload?.candidates?.[0]?.content?.parts;
     return { content: Array.isArray(parts) ? parts.map((part: any) => part?.text ?? "").join("") : "" };
@@ -267,6 +406,12 @@ function nativeResponse(payload: any, provider: string): { content: string; refu
 
 function nativeFinishReason(payload: any, provider: string, refusal?: string, toolCalls: unknown[] = []): "stop" | "length" | "content_filter" | "tool_calls" {
   if (toolCalls.length) return "tool_calls";
+  if (provider === "openai") {
+    const reason = payload?.choices?.[0]?.finish_reason;
+    if (reason === "length") return "length";
+    if (reason === "content_filter" || refusal) return "content_filter";
+    return "stop";
+  }
   if (provider === "google") {
     const reason = payload?.candidates?.[0]?.finishReason ?? payload?.promptFeedback?.blockReason;
     if (!reason || reason === "STOP") return "stop";
@@ -284,7 +429,7 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
   const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
   const created = Math.floor(Date.now() / 1000);
   const { content, refusal } = nativeResponse(payload, provider);
-  const toolCalls = provider === "google" ? geminiFunctionCalls(payload) : provider === "opencode" ? zenFunctionCalls(payload) : [];
+  const toolCalls = nativeToolCalls(payload, provider);
   const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
   const message = refusal
     ? { role: "assistant", content: content || null, refusal }
@@ -307,13 +452,131 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
     return;
   }
 
-  const delta = refusal ? { role: "assistant", content: content || null, refusal } : { role: "assistant", content };
+  const delta = refusal
+    ? { role: "assistant", content: content || null, refusal }
+    : toolCalls.length
+      ? {
+          role: "assistant",
+          content: content || null,
+          tool_calls: toolCalls.map((call, index) => ({ index, id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })),
+        }
+      : { role: "assistant", content };
   const chunks = [
     { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, logprobs: null, finish_reason: null }] },
     { id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: finishReason }] },
   ];
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
+}
+
+function nativeToolCalls(payload: any, provider: string): Array<{ id: string; name: string; arguments: string }> {
+  if (provider === "openai") {
+    const calls = payload?.choices?.[0]?.message?.tool_calls;
+    return (Array.isArray(calls) ? calls : [])
+      .filter((call: any) => call?.function?.name)
+      .map((call: any) => ({ id: call.id, name: call.function.name, arguments: call.function.arguments ?? "{}" }));
+  }
+  if (provider === "google") return geminiFunctionCalls(payload);
+  if (provider === "opencode") return zenFunctionCalls(payload);
+  return [];
+}
+
+type AnthropicContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
+
+function writeAnthropicMessage(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
+  const { content, refusal } = nativeResponse(payload, provider);
+  const toolCalls = nativeToolCalls(payload, provider);
+  const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
+  const blocks: AnthropicContentBlock[] = [
+    ...(content || refusal ? [{ type: "text" as const, text: content || refusal || "" }] : []),
+    ...toolCalls.map((call) => ({ type: "tool_use" as const, id: call.id, name: call.name, input: parseToolArguments(call.arguments) })),
+  ];
+  const message = {
+    id: String(payload?.id ?? `msg_${Date.now()}`),
+    type: "message",
+    role: "assistant",
+    model,
+    content: blocks,
+    stop_reason: finishReason === "tool_calls" ? "tool_use" : finishReason === "length" ? "max_tokens" : "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: payload?.usage?.input_tokens ?? 0, output_tokens: payload?.usage?.output_tokens ?? 0 },
+  };
+  if (!body?.stream) {
+    json(res, 200, message);
+    return;
+  }
+
+  const events: Array<[string, unknown]> = [
+    ["message_start", { type: "message_start", message: { ...message, content: [], stop_reason: null, usage: { ...message.usage, output_tokens: 0 } } }],
+  ];
+  blocks.forEach((block, index) => {
+    events.push(["content_block_start", { type: "content_block_start", index, content_block: block.type === "text" ? { type: "text", text: "" } : { ...block, input: {} } }]);
+    if (block.type === "text") {
+      events.push(["content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } }]);
+    } else {
+      events.push(["content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) } }]);
+    }
+    events.push(["content_block_stop", { type: "content_block_stop", index }]);
+  });
+  events.push(
+    ["message_delta", { type: "message_delta", delta: { stop_reason: message.stop_reason, stop_sequence: null }, usage: message.usage }],
+    ["message_stop", { type: "message_stop" }]
+  );
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  res.end(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""));
+}
+
+function responsesStreamEvents(response: any): Array<[string, unknown]> {
+  let sequence = 0;
+  const event = (type: string, data: Record<string, unknown>): [string, unknown] => [type, { type, sequence_number: sequence++, ...data }];
+  const events = [event("response.created", { response: { ...response, status: "in_progress", output: [] } })];
+  response.output.forEach((item: any, outputIndex: number) => {
+    events.push(event("response.output_item.added", { output_index: outputIndex, item: { ...item, status: "in_progress", ...(item.type === "message" ? { content: [] } : {}) } }));
+    if (item.type === "message") {
+      const part = item.content[0];
+      events.push(event("response.content_part.added", { item_id: item.id, output_index: outputIndex, content_index: 0, part: { ...part, text: "" } }));
+      events.push(event("response.output_text.delta", { item_id: item.id, output_index: outputIndex, content_index: 0, delta: part.text ?? part.refusal ?? "" }));
+      events.push(event("response.output_text.done", { item_id: item.id, output_index: outputIndex, content_index: 0, text: part.text ?? part.refusal ?? "" }));
+      events.push(event("response.content_part.done", { item_id: item.id, output_index: outputIndex, content_index: 0, part }));
+    } else {
+      events.push(event("response.function_call_arguments.delta", { item_id: item.id, output_index: outputIndex, delta: item.arguments }));
+      events.push(event("response.function_call_arguments.done", { item_id: item.id, output_index: outputIndex, arguments: item.arguments }));
+    }
+    events.push(event("response.output_item.done", { output_index: outputIndex, item }));
+  });
+  events.push(event("response.completed", { response }));
+  return events;
+}
+
+function writeResponsesPayload(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
+  const { content, refusal } = nativeResponse(payload, provider);
+  const toolCalls = nativeToolCalls(payload, provider);
+  const id = String(payload?.id ?? `resp_${Date.now()}`);
+  const output = [
+    ...(content || refusal
+      ? [{ id: `msg_${id}`, type: "message", status: "completed", role: "assistant", content: [{ type: refusal ? "refusal" : "output_text", [refusal ? "refusal" : "text"]: refusal || content }] }]
+      : []),
+    ...toolCalls.map((call) => ({ type: "function_call", id: call.id, call_id: call.id, name: call.name, arguments: call.arguments, status: "completed" })),
+  ];
+  const response = {
+    id,
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    status: "completed",
+    model,
+    output,
+    usage: payload?.usage,
+  };
+  if (!body?.stream) {
+    json(res, 200, response);
+    return;
+  }
+
+  const events = responsesStreamEvents(response);
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  res.end(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(""));
 }
 
 export function createProxyServer(opts: CreateProxyServerOptions): {
@@ -378,7 +641,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
       const raw = await readBody(req);
       const body = raw ? JSON.parse(raw) : {};
-      const messages = textMessages(body);
+      const protocol = ingressProtocol(req.url);
+      const normalizedBody = normalizeIngress(body, protocol);
+      const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
       const result = decide(req, text);
 
@@ -388,7 +653,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       }
 
       const { provider, bareModel } = resolveProvider(result.modelId);
-      const backend = opts.backends[provider] ?? (provider === "google" ? opts.backends.google : provider === "opencode" ? opts.backends.opencode : opts.backends.openai);
+      const backend = opts.backends[provider];
       if (!backend) {
         json(res, 502, { error: `no backend for ${provider}` });
         return;
@@ -397,29 +662,21 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const inboundAuthorization = req.headers.authorization ?? req.headers.Authorization;
       const authorization = backend.apiKey ? `Bearer ${backend.apiKey}` : inboundAuthorization;
       const token = backend.apiKey ?? bearerToken(inboundAuthorization);
-      const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
-      const useGemini = provider === "google";
-      const outbound = useGemini
-        ? geminiRequest(body)
-        : useZenResponses
-          ? { model: bareModel, input: zenInput(body), ...(zenTools(body).length ? { tools: zenTools(body) } : {}) }
-          : { ...body, model: provider === "opencode" ? bareModel : result.modelId };
-      const path = useGemini
-        ? `/models/${bareModel}:generateContent${token ? `?key=${encodeURIComponent(token)}` : ""}`
-        : useZenResponses
-          ? "/v1/responses"
-          : req.url;
+      const upstreamRequestPlan = upstreamRequest(protocol, body, normalizedBody, provider, bareModel, token, req.url);
       const headers: Record<string, string> = { "content-type": "application/json" };
-      if (!useGemini && typeof authorization === "string" && authorization) headers.authorization = authorization;
+      if (!upstreamRequestPlan.useGemini && typeof authorization === "string" && authorization) headers.authorization = authorization;
       const fetchImpl = backend.fetchImpl ?? fetch;
-      const upstream = await fetchImpl(`${backend.baseUrl}${path}`, {
+      const upstream = await fetchImpl(`${backend.baseUrl}${upstreamRequestPlan.path}`, {
         method: req.method,
         headers,
-        body: JSON.stringify(outbound),
+        body: JSON.stringify(upstreamRequestPlan.body),
       });
       const payload = await upstream.text();
-      if (upstream.ok && req.url === "/v1/chat/completions" && (useGemini || useZenResponses)) {
-        writeChatCompletion(res, body, provider, bareModel, JSON.parse(payload));
+      if (upstream.ok && upstreamRequestPlan.translateResponse) {
+        const parsed = JSON.parse(payload);
+        if (protocol === "chat") writeChatCompletion(res, normalizedBody, provider, bareModel, parsed);
+        if (protocol === "anthropic") writeAnthropicMessage(res, normalizedBody, provider, bareModel, parsed);
+        if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, parsed);
         return;
       }
       if (typeof res.writeHead === "function") res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });

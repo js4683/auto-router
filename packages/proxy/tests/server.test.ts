@@ -450,6 +450,7 @@ describe("proxy", () => {
         "/v1/chat/completions",
         {
           model: "openai/gpt-5.6-luna",
+          stream: true,
           messages: [
             { role: "user", content: "implement the feature" },
             {
@@ -470,15 +471,9 @@ describe("proxy", () => {
       { type: "function_call", call_id: "call_read", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
       { type: "function_call_output", call_id: "call_read", output: "auto-router" },
     ]));
-    expect(JSON.parse(res.body)).toMatchObject({
-      choices: [{
-        finish_reason: "tool_calls",
-        message: {
-          role: "assistant",
-          tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
-        },
-      }],
-    });
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.body).toContain('"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}]');
+    expect(res.body).toContain('"finish_reason":"tool_calls"');
   });
 
   it("translates Chat Completions tools to Gemini generateContent and back", async () => {
@@ -555,5 +550,254 @@ describe("proxy", () => {
         },
       }],
     });
+  });
+
+  it("accepts Anthropic /v1/messages and returns a Messages response", async () => {
+    const outbound: Array<{ url: string; input: unknown; maxOutputTokens?: number }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            const parsed = JSON.parse(String(init?.body));
+            outbound.push({ url: String(url), input: parsed.input, maxOutputTokens: parsed.max_output_tokens });
+            return new Response(
+              JSON.stringify({
+                id: "resp_ok",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }],
+              })
+            );
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/messages", {
+        model: "claude-sonnet-4-5",
+        max_tokens: 32,
+        system: "Be brief.",
+        messages: [{ role: "user", content: "implement the feature" }],
+      }),
+      res as never
+    );
+
+    expect(outbound[0].url).toBe("https://opencode.ai/zen/v1/responses");
+    expect(outbound[0].input).toEqual([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: "implement the feature" },
+    ]);
+    expect(outbound[0].maxOutputTokens).toBe(32);
+    expect(JSON.parse(res.body)).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "OK" }],
+      stop_reason: "end_turn",
+    });
+  });
+
+  it("accepts OpenAI /v1/responses and returns a Responses payload", async () => {
+    const outbound: Array<{ url: string; input: unknown }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), input: JSON.parse(String(init?.body)).input });
+            return new Response(
+              JSON.stringify({
+                id: "resp_ok",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }],
+              })
+            );
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/responses", { model: "openai/gpt-5.6-luna", instructions: "Be brief.", input: "implement the feature" }),
+      res as never
+    );
+
+    expect(outbound[0].url).toBe("https://opencode.ai/zen/v1/responses");
+    expect(outbound[0].input).toEqual([
+      { role: "system", content: "Be brief." },
+      { role: "user", content: "implement the feature" },
+    ]);
+    expect(JSON.parse(res.body)).toMatchObject({
+      object: "response",
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }],
+    });
+  });
+
+  it("streams Anthropic tool-use events", async () => {
+    const outbound: any[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (_url, init) => {
+            outbound.push(JSON.parse(String(init?.body)));
+            return new Response(
+              JSON.stringify({
+                id: "resp_tool",
+                status: "completed",
+                output: [{ type: "function_call", call_id: "call_1", name: "read_file", arguments: "{\"path\":\"README.md\"}" }],
+              })
+            );
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/messages", {
+        model: "claude-sonnet-4-5",
+        max_tokens: 32,
+        stream: true,
+        messages: [{ role: "user", content: "implement the feature" }],
+        tools: [{ name: "read_file", description: "Read a file", input_schema: { type: "object" } }],
+      }),
+      res as never
+    );
+
+    expect(outbound[0].tools).toEqual([{ type: "function", name: "read_file", description: "Read a file", parameters: { type: "object" } }]);
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.body).toContain("event: content_block_start");
+    expect(res.body).toContain('"type":"tool_use","id":"call_1","name":"read_file"');
+    expect(res.body).toContain('"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\"}"');
+    expect(res.body).toContain('"stop_reason":"tool_use"');
+    expect(res.body).toContain("event: message_stop");
+  });
+
+  it("streams OpenAI Responses text events", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () => new Response(
+            JSON.stringify({
+              id: "resp_stream",
+              status: "completed",
+              output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }],
+            })
+          ),
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/responses", { model: "openai/gpt-5.6-luna", input: "implement the feature", stream: true }),
+      res as never
+    );
+
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.body).toContain("event: response.created");
+    expect(res.body).toContain('"type":"response.output_text.delta"');
+    expect(res.body).toContain('"delta":"OK"');
+    expect(res.body).toContain("event: response.completed");
+  });
+
+  it("translates an OpenAI Chat Completions target back to Anthropic Messages", async () => {
+    const outbound: Array<{ url: string; body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+            return new Response(JSON.stringify({
+              id: "chatcmpl_ok",
+              choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
+            }));
+          },
+        },
+      },
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq(
+        "/v1/messages",
+        { model: "claude-sonnet-4-5", max_tokens: 32, stream: true, messages: [{ role: "user", content: "implement the feature" }] },
+        { "x-force-model": "openai/gpt-5.6-sol" }
+      ),
+      res as never
+    );
+
+    expect(outbound[0]).toMatchObject({
+      url: "https://api.openai.com/v1/chat/completions",
+      body: { model: "gpt-5.6-sol", stream: false, messages: [{ role: "user", content: "implement the feature" }] },
+    });
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.body).toContain('"type":"text_delta","text":"OK"');
+    expect(res.body).toContain("event: message_stop");
+  });
+
+  it("preserves native OpenAI Responses requests for OpenAI targets", async () => {
+    const outbound: Array<{ url: string; body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+            return new Response(JSON.stringify({ id: "resp_ok", object: "response", status: "completed", output: [] }));
+          },
+        },
+      },
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq(
+        "/v1/responses",
+        { model: "auto", input: "plan the architecture", reasoning: { effort: "high" } },
+        { "x-force-model": "openai/gpt-5.6-sol" }
+      ),
+      res as never
+    );
+
+    expect(outbound[0]).toEqual({
+      url: "https://api.openai.com/v1/responses",
+      body: { model: "gpt-5.6-sol", input: "plan the architecture", reasoning: { effort: "high" } },
+    });
+    expect(JSON.parse(res.body)).toMatchObject({ id: "resp_ok", object: "response", status: "completed" });
   });
 });

@@ -64,11 +64,14 @@ Default listen address is `http://127.0.0.1:8787`.
   `http://127.0.0.1:8787/v1` and whose model is a virtual id such as
   `auto-router/auto`.
 - Other OpenAI Chat Completions clients can use `http://127.0.0.1:8787/v1`.
+- Claude Code can use `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
+- Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.
 
-The proxy accepts Chat Completions requests and translates text and function-call
-responses from Zen's Responses API and Gemini's `generateContent` API. Anthropic
-Messages ingress and OpenAI Responses ingress are not implemented yet, so Claude
-Code and Codex are not currently supported.
+The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
+requests. It translates text and function calls across Zen's Responses API and
+Gemini's `generateContent` API, including client-compatible streaming envelopes.
+Translated streams are currently emitted after the upstream response completes;
+native OpenAI Responses streams are forwarded unchanged.
 
 The proxy scores the first message of a task with Avengers-Pro fixture ranking when
 enabled, applies free-first / planning-quality overlays, then holds that target until
