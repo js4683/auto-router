@@ -515,20 +515,25 @@ function upstreamRequest(
     return { body: { ...originalBody, model }, path: "/v1/responses", translateResponse: false, useGemini: false };
   }
   if (provider === "google") {
+    const isStream = !!normalizedBody.stream;
     const key = token ? `?key=${encodeURIComponent(token)}` : "";
-    return { body: geminiRequest(normalizedBody), path: `/models/${model}:generateContent${key}`, translateResponse: true, useGemini: true };
+    const alt = isStream ? (key ? "&alt=sse" : "?alt=sse") : "";
+    const action = isStream ? "streamGenerateContent" : "generateContent";
+    return { body: geminiRequest(normalizedBody), path: `/models/${model}:${action}${key}${alt}`, translateResponse: true, useGemini: true };
   }
   if (provider === "anthropic") {
     const native = protocol === "anthropic";
-    return {
-      body: native ? { ...originalBody, model } : anthropicRequest(normalizedBody, model),
-      path: "/v1/messages",
-      translateResponse: !native,
-      useGemini: false,
-    };
+    if (native) {
+      return { body: { ...originalBody, model }, path: "/v1/messages", translateResponse: !native, useGemini: false };
+    }
+    const body: any = anthropicRequest(normalizedBody, model);
+    if (normalizedBody.stream) body.stream = true;
+    return { body, path: "/v1/messages", translateResponse: !native, useGemini: false };
   }
   if (provider === "opencode") {
-    return { body: zenRequest(normalizedBody, model), path: "/v1/responses", translateResponse: true, useGemini: false };
+    const body: any = zenRequest(normalizedBody, model);
+    if (normalizedBody.stream) body.stream = true;
+    return { body, path: "/v1/responses", translateResponse: true, useGemini: false };
   }
 
   const body = { ...normalizedBody, ...(protocol === "chat" ? {} : { stream: false }), model };
@@ -992,6 +997,102 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         headers,
         body: JSON.stringify(upstreamRequestPlan.body),
       });
+
+      const isUpstreamEventStream = (upstream.headers.get("content-type") ?? "").includes("text/event-stream");
+      const wantsStream = !!normalizedBody.stream;
+
+      if (wantsStream && isUpstreamEventStream && upstream.ok) {
+        if (!upstreamRequestPlan.translateResponse) {
+          // Native passthrough: pipe upstream SSE directly
+          if (typeof (res as any).writeHead === "function") (res as any).writeHead(upstream.status, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+          else {
+            (res as any).statusCode = upstream.status;
+            (res as any).setHeader?.("content-type", "text/event-stream");
+          }
+          if (upstream.body) {
+            const reader = (upstream.body as any).getReader?.() ?? (upstream.body as any)[Symbol.asyncIterator]?.();
+            if (reader && typeof reader.read === "function") {
+              const decoder = new TextDecoder();
+              let buf = "";
+              while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const chunk = typeof value === "string" ? value : decoder.decode(value, { stream: true });
+                buf += chunk;
+                let idx;
+                while ((idx = buf.indexOf("\n\n")) !== -1) {
+                  const raw = buf.slice(0, idx);
+                  buf = buf.slice(idx + 2);
+                  if (raw.trim()) (res as any).write(raw + "\n\n");
+                }
+              }
+              if (buf.trim()) (res as any).write(buf);
+            } else {
+              const text = await upstream.text();
+              (res as any).write(text);
+            }
+          }
+          (res as any).end();
+          return;
+        }
+
+        // Translated streaming: Gemini -> Chat
+        if (upstreamRequestPlan.useGemini && protocol === "chat") {
+          const id = `chatcmpl-${Date.now()}`;
+          const created = Math.floor(Date.now() / 1000);
+          if (typeof (res as any).writeHead === "function") (res as any).writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+          else {
+            (res as any).statusCode = 200;
+            (res as any).setHeader?.("content-type", "text/event-stream");
+          }
+          const reader = (upstream.body as any).getReader?.();
+          if (!reader) {
+            const text = await upstream.text();
+            // fallback to buffered
+            const parsedFallback = JSON.parse(text);
+            // synthesize from fallback? but we are in streaming branch, shouldn't happen
+            (res as any).end(text);
+            return;
+          }
+          const decoder = new TextDecoder();
+          let buf = "";
+          let firstDelta = true;
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const chunk = typeof value === "string" ? value : decoder.decode(value, { stream: true });
+            buf += chunk;
+            let idx;
+            while ((idx = buf.indexOf("\n\n")) !== -1) {
+              const raw = buf.slice(0, idx);
+              buf = buf.slice(idx + 2);
+              const line = raw.split("\n").find((l) => l.startsWith("data:"))?.slice(5).trim();
+              if (!line || line === "[DONE]") continue;
+              try {
+                const payloadJson = JSON.parse(line);
+                const textDelta = payloadJson.candidates?.[0]?.content?.parts?.[0]?.text ?? payloadJson.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("") ?? "";
+                if (textDelta) {
+                  const delta: any = firstDelta ? { role: "assistant", content: textDelta } : { content: textDelta };
+                  firstDelta = false;
+                  const downstreamChunk = { id, object: "chat.completion.chunk", created, model: bareModel, choices: [{ index: 0, delta, logprobs: null, finish_reason: null }] };
+                  (res as any).write(`data: ${JSON.stringify(downstreamChunk)}\n\n`);
+                }
+                // handle finishReason if present
+                const finishReason = payloadJson.candidates?.[0]?.finishReason;
+                if (finishReason && finishReason !== "STOP") {
+                  // ignore for now
+                }
+              } catch {}
+            }
+          }
+          const finalChunk = { id, object: "chat.completion.chunk", created, model: bareModel, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: "stop" }] };
+          (res as any).write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          (res as any).write("data: [DONE]\n\n");
+          (res as any).end();
+          return;
+        }
+      }
+
       const payload = await upstream.text();
       if (upstream.ok && upstreamRequestPlan.translateResponse) {
         const parsed = JSON.parse(payload);

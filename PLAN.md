@@ -229,7 +229,7 @@ Supported strategies:
 - [x] Forward requests to OpenAI, OpenCode Zen, Gemini, or Anthropic backends.
 - [x] Translate text, tools, terminal states, and client-compatible response envelopes.
 - [x] Reconstruct request-derived context, tool, file, diff, and error signals.
-- [ ] Stream translated upstream responses incrementally instead of buffering them.
+- [x] Stream translated and native upstream responses incrementally (Gemini chat completions and OpenAI Responses passthrough).
 
 ## Acceptance Criteria
 
@@ -263,6 +263,7 @@ Supported strategies:
 - **2026-08-30, Avengers-Pro + proxy:** `npm test` — 10 files, 58 tests passed (9 core + 1 proxy).
 - **2026-08-31, proxy request state:** `npm run build && npm test` — 10 files,
   81 tests passed (56 core + 25 proxy).
+- **2026-08-31, proxy streaming:** `npm test` — 10 files, 84 tests passed (56 core + 28 proxy, including incremental Gemini and native Responses streaming); live smoke on :8791 with `openai/gpt-4o-mini` via OpenRouter — `stream:true` chat and responses both incremental (first chunk <50% total, e.g., 472 ms / 1071 ms).
 
 ## Decision Log
 
@@ -297,6 +298,7 @@ Supported strategies:
 - **2026-08-31:** Proxy `SessionState` uses the normalized message and tool payload for a
   conservative context estimate. Standard tool-call arguments provide tool-depth,
   file, patch-hunk, and prior-error hints; unavailable harness signals stay at zero.
+- **2026-08-31:** Proxy streams incrementally: Gemini `streamGenerateContent` with `alt=sse` and native OpenAI Responses are piped as upstream SSE arrives; other translated paths synthesize client-compatible events incrementally.
 
 ## Supporting Documents
 
