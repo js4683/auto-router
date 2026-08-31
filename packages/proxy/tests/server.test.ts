@@ -1,7 +1,7 @@
 import { IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import { describe, expect, it } from "vitest";
-import { selectModel, type Catalog, type RouterConfig } from "@auto-router/router-core";
+import { selectModel, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
 import { createProxyServer } from "../src/server.js";
 import { memorySessions } from "../src/session.js";
 
@@ -117,6 +117,85 @@ describe("proxy", () => {
     expect(backendCalls).toBe(0);
   });
 
+  it("answers Codex model discovery locally without calling a backend", async () => {
+    let backendCalls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () => {
+            backendCalls += 1;
+            return new Response("{}");
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+    const req = fakeReq("/v1/models?client_version=0.147.0", {});
+    req.method = "GET";
+    const res = collectRes();
+
+    await server.handle(req, res as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      object: "list",
+      data: [{ id: "auto", object: "model", created: 0, owned_by: "auto-router" }],
+      models: [{
+        slug: "auto",
+        display_name: "Auto Router",
+        description: "Task-aware model routing",
+        default_reasoning_level: "none",
+        supported_reasoning_levels: [],
+        shell_type: "shell_command",
+        visibility: "list",
+        supported_in_api: true,
+        priority: 1,
+        additional_speed_tiers: [],
+        service_tiers: [],
+        availability_nux: null,
+        upgrade: null,
+        model_messages: {
+          instructions_template: "",
+          instructions_variables: { personality_default: "", personality_friendly: "", personality_pragmatic: "" },
+          approvals: null,
+          collaboration_modes: null,
+          auto_review: null,
+          permissions: null,
+        },
+        include_skills_usage_instructions: false,
+        include_plugin_usage_instructions: false,
+        include_apps_usage_instructions: false,
+        default_reasoning_summary: "none",
+        support_verbosity: false,
+        default_verbosity: "low",
+        apply_patch_tool_type: "freeform",
+        web_search_tool_type: "text_and_image",
+        truncation_policy: { mode: "tokens", limit: 10000 },
+        supports_image_detail_original: false,
+        context_window: 272000,
+        max_context_window: 272000,
+        comp_hash: "auto-router-v1",
+        effective_context_window_percent: 95,
+        experimental_supported_tools: [],
+        input_modalities: ["text"],
+        supports_parallel_tool_calls: true,
+        supports_search_tool: false,
+        use_responses_lite: true,
+        tool_mode: "code_mode_only",
+        multi_agent_version: "v2",
+        base_instructions: "",
+        auto_compact_token_limit: 244800,
+        supports_reasoning_summaries: false,
+      }],
+    });
+    expect(backendCalls).toBe(0);
+  });
+
   it("rewrites chat completions model to the task target and holds it on the second call", async () => {
     const outbound: Array<{ url: string; model: string }> = [];
     let rankCalls = 0;
@@ -183,6 +262,83 @@ describe("proxy", () => {
     );
     expect(backendCalls).toBe(0);
     expect(JSON.parse(res.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
+  });
+
+  it("reconstructs routing signals from request messages and tools", async () => {
+    const observed: SessionState[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      select: ((state: SessionState) => {
+        observed.push(state);
+        return {
+          modelId: "openai/gpt-5.6-sol",
+          tier: "complex",
+          taskType: "implement",
+          confidence: 1,
+          reason: "captured",
+          via: "value",
+          catalogSource: "live",
+          score: 1,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        };
+      }) as typeof selectModel,
+    });
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: src/b.ts",
+      "@@ first hunk",
+      "-old",
+      "+new",
+      "@@ second hunk",
+      "-before",
+      "+after",
+      "*** End Patch",
+    ].join("\n");
+    const body = {
+      model: "auto",
+      messages: [
+        { role: "system", content: "Follow repository instructions." },
+        { role: "user", content: "Inspect the files." },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_read", type: "function", function: { name: "read", arguments: '{"path":"src/a.ts"}' } },
+            { id: "call_patch", type: "function", function: { name: "apply_patch", arguments: JSON.stringify({ patchText }) } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_read", content: "Error: first attempt failed" },
+        { role: "user", content: "continue" },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "read",
+            description: "Read a file. ".repeat(40),
+            parameters: { type: "object", properties: { path: { type: "string" } } },
+          },
+        },
+      ],
+    };
+
+    await server.handle(fakeReq("/v1/route", body, { "x-session-id": "with_tools" }), collectRes() as never);
+    await server.handle(fakeReq("/v1/route", { ...body, tools: [] }, { "x-session-id": "without_tools" }), collectRes() as never);
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0].lifetimeTokens - observed[1].lifetimeTokens).toBeGreaterThan(100);
+    expect(observed[0].currentTask).toMatchObject({
+      promptTokens: 2,
+      taskTokens: observed[0].lifetimeTokens,
+      filesTouched: 2,
+      diffHunks: 2,
+      toolDepth: 2,
+      priorErrors: 1,
+      lastUserMessage: "continue",
+    });
   });
 
   it("forwards authorization and sends Muse to Zen /v1/responses", async () => {
@@ -543,7 +699,7 @@ describe("proxy", () => {
     expect(res.body).toContain('"finish_reason":"tool_calls"');
   });
 
-  it("translates Chat Completions tools to Gemini generateContent and back", async () => {
+  it("translates Chat Completions tools to Gemini and removes unsupported schema fields", async () => {
     const outbound: Array<{ body: any }> = [];
     const server = createProxyServer({
       catalog,
@@ -597,15 +753,39 @@ describe("proxy", () => {
             },
             { role: "tool", tool_call_id: "call_read", content: "auto-router" },
           ],
-          tools: [{ type: "function", function: { name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
+          tools: [{
+            type: "function",
+            function: {
+              name: "read_file",
+              description: "Read a file",
+              parameters: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  path: { type: "string" },
+                  options: { type: "object", additionalProperties: false, properties: { encoding: { type: "string" } } },
+                },
+              },
+            },
+          }],
         }
       ),
       res as never
     );
 
-    expect(outbound[0].body.tools).toEqual([{ functionDeclarations: [{ name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }] }]);
+    expect(outbound[0].body.tools).toEqual([{ functionDeclarations: [{
+      name: "read_file",
+      description: "Read a file",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          options: { type: "object", properties: { encoding: { type: "string" } } },
+        },
+      },
+    }] }]);
     expect(outbound[0].body.contents).toEqual(expect.arrayContaining([
-      { role: "model", parts: [{ text: "I will read it." }, { functionCall: { name: "read_file", args: { path: "README.md" } } }] },
+      { role: "model", parts: [{ text: "I will read it." }, { functionCall: expect.objectContaining({ name: "read_file", args: { path: "README.md" } }) }] },
       { role: "user", parts: [{ functionResponse: { name: "read_file", response: { result: "auto-router" } } }] },
     ]));
     expect(JSON.parse(res.body)).toMatchObject({
@@ -1062,7 +1242,7 @@ describe("proxy", () => {
     expect(JSON.parse(res.body)).toMatchObject({ id: "resp_ok", object: "response", status: "completed" });
   });
 
-  it("forwards inbound x-api-key when calling Anthropic backend natively without backend apiKey", async () => {
+  it("forwards native Anthropic credentials and beta capabilities", async () => {
     const outbound: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
     const server = createProxyServer({
       catalog,
@@ -1107,8 +1287,9 @@ describe("proxy", () => {
           model: "claude-sonnet-4-5",
           max_tokens: 32,
           messages: [{ role: "user", content: "hello" }],
+          context_management: { edits: [] },
         },
-        { "x-api-key": "inbound-claude-key" }
+        { "x-api-key": "inbound-claude-key", "anthropic-beta": "context-management-2025-06-27" }
       ),
       res as never
     );
@@ -1117,7 +1298,9 @@ describe("proxy", () => {
     expect(outbound[0].url).toBe("https://api.anthropic.com/v1/messages");
     expect(outbound[0].headers["x-api-key"]).toBe("inbound-claude-key");
     expect(outbound[0].headers["anthropic-version"]).toBe("2023-06-01");
+    expect(outbound[0].headers["anthropic-beta"]).toBe("context-management-2025-06-27");
     expect(outbound[0].headers.authorization).toBeUndefined();
+    expect(outbound[0].body.context_management).toEqual({ edits: [] });
     expect(JSON.parse(res.body)).toMatchObject({ type: "message", role: "assistant" });
   });
 
@@ -1213,4 +1396,3 @@ describe("proxy", () => {
     expect(outboundZen[0].headers["x-api-key"]).toBeUndefined();
   });
 });
-
