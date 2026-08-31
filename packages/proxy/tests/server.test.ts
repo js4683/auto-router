@@ -1395,4 +1395,181 @@ describe("proxy", () => {
     expect(outboundZen[0].headers.authorization).toBeUndefined();
     expect(outboundZen[0].headers["x-api-key"]).toBeUndefined();
   });
+
+  it("streams translated Gemini chat completions incrementally from upstream SSE", async () => {
+    const outbound: Array<{ url: string; body: any }> = [];
+    let resolveSecondChunk: () => void;
+    const secondChunkReady = new Promise<void>((r) => (resolveSecondChunk = r));
+    // Gemini streamGenerateContent SSE chunks: each data: {...} with candidates delta
+    const sseChunks = [
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "Hello " }] } }] })}\n\n`,
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "World" }] } }] })}\n\n`,
+    ];
+    function streamingGeminiResponse() {
+      let idx = 0;
+      const enc = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (idx < sseChunks.length) {
+            controller.enqueue(enc.encode(sseChunks[idx++]));
+            if (idx === 1) {
+              // wait a tick before second chunk to allow downstream to flush first
+              await new Promise((r) => setTimeout(r, 15));
+              resolveSecondChunk();
+            } else {
+              await new Promise((r) => setTimeout(r, 5));
+            }
+          } else {
+            controller.close();
+          }
+        },
+      });
+      return new Response(stream as any, { headers: { "content-type": "text/event-stream" } });
+    }
+
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-key",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+            return streamingGeminiResponse();
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3.6-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const writes: string[] = [];
+    let writeHeadCalled = false;
+    const res: any = {
+      statusCode: 200,
+      headers: {} as Record<string, string>,
+      writeHead(status: number, headers?: Record<string, string>) {
+        writeHeadCalled = true;
+        this.statusCode = status;
+        if (headers) Object.assign(this.headers, headers);
+      },
+      write(chunk: string) {
+        writes.push(String(chunk));
+      },
+      end(chunk?: string) {
+        if (chunk) writes.push(String(chunk));
+        this._ended = true;
+      },
+      _ended: false,
+    };
+
+    const handlePromise = server.handle(
+      fakeReq("/v1/chat/completions", { model: "auto", stream: true, messages: [{ role: "user", content: "hi" }] }),
+      res
+    );
+
+    // Wait for first chunk to be available downstream before upstream completes
+    await secondChunkReady;
+    // Give proxy a tick to flush first downstream delta
+    await new Promise((r) => setTimeout(r, 10));
+    // At this point, with incremental fix, at least one downstream chunk should have been written
+    // With buffered impl, no writes happen until upstream fully completes (after second chunk)
+    const writesBeforeUpstreamDone = writes.join("").includes("Hello");
+
+    await handlePromise;
+
+    expect(outbound[0].url).toContain(":streamGenerateContent");
+    expect(outbound[0].url).toContain("alt=sse");
+    expect(writeHeadCalled).toBe(true);
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(writesBeforeUpstreamDone).toBe(true);
+    const all = writes.join("");
+    expect(all).toContain("Hello");
+    expect(all).toContain("World");
+    expect(all).toContain("data: [DONE]");
+  });
+
+  it("pipes native OpenAI Responses stream incrementally without buffering", async () => {
+    const sseChunks = [
+      `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello " })}\n\n`,
+      `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: "World" })}\n\n`,
+      `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", status: "completed", output: [] } })}\n\n`,
+    ];
+    function streamingResponsesResponse() {
+      let idx = 0;
+      const enc = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (idx < sseChunks.length) {
+            controller.enqueue(enc.encode(sseChunks[idx++]));
+            await new Promise((r) => setTimeout(r, 5));
+          } else controller.close();
+        },
+      });
+      return new Response(stream as any, { headers: { "content-type": "text/event-stream" } });
+    }
+
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () => streamingResponsesResponse(),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const writes: string[] = [];
+    const res: any = {
+      statusCode: 200,
+      headers: {} as Record<string, string>,
+      writeHead(s: number, h?: Record<string, string>) {
+        this.statusCode = s;
+        if (h) Object.assign(this.headers, h);
+      },
+      write(c: string) {
+        writes.push(String(c));
+      },
+      end(c?: string) {
+        if (c) writes.push(String(c));
+      },
+    };
+
+    await server.handle(
+      fakeReq("/v1/responses", { model: "auto", stream: true, input: "hi" }),
+      res
+    );
+
+    const all = writes.join("");
+    // Should have piped upstream events, not fabricated from buffered JSON
+    expect(all).toContain("Hello ");
+    expect(all).toContain("World");
+    expect(writes.length).toBeGreaterThan(1);
+  });
 });

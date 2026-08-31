@@ -70,8 +70,9 @@ Default listen address is `http://127.0.0.1:8787`.
 The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
 requests. It translates text and function calls across Zen's Responses API and
 Gemini's `generateContent` API, including client-compatible streaming envelopes.
-Translated streams are currently emitted after the upstream response completes;
-native OpenAI Responses streams are forwarded unchanged.
+Gemini chat completions and native OpenAI Responses streams are forwarded
+incrementally as upstream chunks arrive; other translated paths synthesize
+client-compatible events incrementally.
 
 The proxy scores the first message of a task with Avengers-Pro fixture ranking when
 enabled, applies free-first / planning-quality overlays, then holds that target until

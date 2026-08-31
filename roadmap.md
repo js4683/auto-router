@@ -48,8 +48,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 - [x] Reconstruct conservative `SessionState` signals from request messages, tools, and
       tool-call history
 - [x] Forward to the chosen upstream model
-- [ ] Stream translated upstream responses incrementally (translated paths are currently
-      buffered before client-compatible events are emitted)
+- [x] Stream translated and native upstream responses incrementally (Gemini chat completions and OpenAI Responses passthrough; other translated paths synthesize client-compatible events incrementally)
 - [x] Works with OpenCode, Claude Code, Codex, and other clients by setting `base_url`
 
 ## Phase 3 — eval
