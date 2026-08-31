@@ -40,7 +40,6 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-const ZEN_RESPONSE_MODELS = /muse-spark|gpt-5|grok-/i;
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
 const TEXT_MESSAGE_ROLES = new Set(["system", "developer", "user", "assistant"]);
 
@@ -196,19 +195,19 @@ function zenInput(body: any): unknown[] {
     if (message?.role === "tool") {
       return [{ type: "function_call_output", call_id: message.tool_call_id, output: messageText(message.content) ?? "" }];
     }
-    if (Array.isArray(message?.tool_calls)) {
-      return message.tool_calls
-        .filter((call: any) => call?.function?.name)
-        .map((call: any) => ({
-          type: "function_call",
-          call_id: call.id,
-          name: call.function.name,
-          arguments: call.function.arguments ?? "{}",
-        }));
-    }
     const content = messageText(message?.content);
-    if (!TEXT_MESSAGE_ROLES.has(message?.role) || content === undefined) return [];
-    return [{ role: message.role, content }];
+    const text = TEXT_MESSAGE_ROLES.has(message?.role) && content !== undefined ? [{ role: message.role, content }] : [];
+    const calls = Array.isArray(message?.tool_calls)
+      ? message.tool_calls
+          .filter((call: any) => call?.function?.name)
+          .map((call: any) => ({
+            type: "function_call",
+            call_id: call.id,
+            name: call.function.name,
+            arguments: call.function.arguments ?? "{}",
+          }))
+      : [];
+    return [...text, ...calls];
   });
 }
 
@@ -244,6 +243,56 @@ function parseToolArguments(raw: string | undefined): Record<string, unknown> {
   }
 }
 
+function anthropicRequestMessages(body: any): unknown[] {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  return messages.flatMap((message: any) => {
+    if (message?.role === "system" || message?.role === "developer") return [];
+    if (message?.role === "tool") {
+      return [{ role: "user", content: [{ type: "tool_result", tool_use_id: message.tool_call_id, content: messageText(message.content) ?? "" }] }];
+    }
+    if (message?.role !== "user" && message?.role !== "assistant") return [];
+    const content = messageText(message.content);
+    const textBlock = content === undefined ? [] : [{ type: "text", text: content }];
+    const toolBlocks = Array.isArray(message?.tool_calls)
+      ? message.tool_calls
+          .filter((call: any) => call?.function?.name)
+          .map((call: any) => ({
+            type: "tool_use",
+            id: call.id,
+            name: call.function.name,
+            input: parseToolArguments(call.function.arguments),
+          }))
+      : [];
+    const blocks = [...textBlock, ...toolBlocks];
+    if (!blocks.length) return [];
+    return [{ role: message.role, content: blocks.length === 1 && blocks[0].type === "text" ? content : blocks }];
+  });
+}
+
+function anthropicRequest(body: any, model: string): Record<string, unknown> {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const system = messages
+    .filter((message: any) => message?.role === "system" || message?.role === "developer")
+    .map((message: any) => messageText(message.content) ?? "")
+    .filter(Boolean)
+    .join("\n");
+  const tools = (Array.isArray(body?.tools) ? body.tools : [])
+    .filter((tool: any) => tool?.type === "function" && tool.function?.name)
+    .map((tool: any) => ({
+      name: tool.function.name,
+      description: tool.function.description,
+      input_schema: tool.function.parameters,
+    }));
+  const maxTokens = body?.max_completion_tokens ?? body?.max_tokens;
+  return {
+    model,
+    messages: anthropicRequestMessages(body),
+    ...(system ? { system } : {}),
+    ...(typeof maxTokens === "number" ? { max_tokens: maxTokens } : {}),
+    ...(tools.length ? { tools } : {}),
+  };
+}
+
 function geminiTools(body: any): unknown[] {
   const declarations = (Array.isArray(body?.tools) ? body.tools : [])
     .filter((tool: any) => tool?.type === "function" && tool.function?.name)
@@ -274,20 +323,19 @@ function geminiRequest(body: any): Record<string, unknown> {
       });
       continue;
     }
-    if (Array.isArray(message?.tool_calls)) {
-      contents.push({
-        role: "model",
-        parts: message.tool_calls
-          .filter((call: any) => call?.function?.name)
-          .map((call: any) => ({ functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } })),
-      });
-      continue;
-    }
     const content = messageText(message?.content);
-    if ((message?.role !== "user" && message?.role !== "assistant") || content === undefined) continue;
+    if (message?.role !== "user" && message?.role !== "assistant") continue;
+    const text = content === undefined ? [] : [{ text: content }];
+    const calls = Array.isArray(message?.tool_calls)
+      ? message.tool_calls
+          .filter((call: any) => call?.function?.name)
+          .map((call: any) => ({ functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } }))
+      : [];
+    const parts = [...text, ...calls];
+    if (!parts.length) continue;
     contents.push({
       role: message.role === "assistant" ? "model" : "user",
-      parts: [{ text: content }],
+      parts,
     });
   }
   const tools = geminiTools(body);
@@ -332,7 +380,16 @@ function upstreamRequest(
     const key = token ? `?key=${encodeURIComponent(token)}` : "";
     return { body: geminiRequest(normalizedBody), path: `/models/${model}:generateContent${key}`, translateResponse: true, useGemini: true };
   }
-  if (provider === "opencode" && ZEN_RESPONSE_MODELS.test(model)) {
+  if (provider === "anthropic") {
+    const native = protocol === "anthropic";
+    return {
+      body: native ? { ...originalBody, model } : anthropicRequest(normalizedBody, model),
+      path: "/v1/messages",
+      translateResponse: !native,
+      useGemini: false,
+    };
+  }
+  if (provider === "opencode") {
     return { body: zenRequest(normalizedBody, model), path: "/v1/responses", translateResponse: true, useGemini: false };
   }
 
@@ -388,6 +445,18 @@ function nativeResponse(payload: any, provider: string): { content: string; refu
     const parts = payload?.candidates?.[0]?.content?.parts;
     return { content: Array.isArray(parts) ? parts.map((part: any) => part?.text ?? "").join("") : "" };
   }
+  if (provider === "anthropic") {
+    const parts = Array.isArray(payload?.content) ? payload.content : [];
+    const content = parts
+      .filter((part: any) => part?.type === "text")
+      .map((part: any) => part.text ?? "")
+      .join("");
+    const refusal = parts
+      .filter((part: any) => part?.type === "refusal")
+      .map((part: any) => part.refusal ?? "")
+      .join("");
+    return { content, ...(refusal ? { refusal } : {}) };
+  }
 
   const output = Array.isArray(payload?.output) ? payload.output : [];
   const parts = output
@@ -404,7 +473,9 @@ function nativeResponse(payload: any, provider: string): { content: string; refu
   return { content, ...(refusal ? { refusal } : {}) };
 }
 
-function nativeFinishReason(payload: any, provider: string, refusal?: string, toolCalls: unknown[] = []): "stop" | "length" | "content_filter" | "tool_calls" {
+type ChatFinishReason = "stop" | "length" | "content_filter" | "tool_calls";
+
+function nativeFinishReason(payload: any, provider: string, refusal?: string, toolCalls: unknown[] = []): ChatFinishReason {
   if (toolCalls.length) return "tool_calls";
   if (provider === "openai") {
     const reason = payload?.choices?.[0]?.finish_reason;
@@ -418,11 +489,34 @@ function nativeFinishReason(payload: any, provider: string, refusal?: string, to
     if (reason === "MAX_TOKENS") return "length";
     return "content_filter";
   }
+  if (provider === "anthropic") {
+    const reason = payload?.stop_reason;
+    if (reason === "max_tokens") return "length";
+    if (reason === "refusal" || refusal) return "content_filter";
+    return "stop";
+  }
 
   if (refusal) return "content_filter";
   if (!payload?.status || payload.status === "completed") return "stop";
   if (payload.status === "incomplete" && payload?.incomplete_details?.reason === "max_output_tokens") return "length";
   return "content_filter";
+}
+
+type ResponseStatus = "completed" | "failed" | "in_progress" | "cancelled" | "queued" | "incomplete";
+const RESPONSE_STATUSES = new Set<ResponseStatus>(["completed", "failed", "in_progress", "cancelled", "queued", "incomplete"]);
+
+function nativeResponseStatus(payload: any, finishReason: ChatFinishReason): ResponseStatus {
+  if (RESPONSE_STATUSES.has(payload?.status)) return payload.status;
+  if (finishReason === "length" || finishReason === "content_filter") return "incomplete";
+  return "completed";
+}
+
+function nativeIncompleteDetails(payload: any, status: ResponseStatus, finishReason: ChatFinishReason): unknown {
+  if (status !== "incomplete") return undefined;
+  if (payload?.incomplete_details) return payload.incomplete_details;
+  if (finishReason === "length") return { reason: "max_output_tokens" };
+  if (finishReason === "content_filter") return { reason: "content_filter" };
+  return undefined;
 }
 
 function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
@@ -477,6 +571,12 @@ function nativeToolCalls(payload: any, provider: string): Array<{ id: string; na
       .map((call: any) => ({ id: call.id, name: call.function.name, arguments: call.function.arguments ?? "{}" }));
   }
   if (provider === "google") return geminiFunctionCalls(payload);
+  if (provider === "anthropic") {
+    const blocks = Array.isArray(payload?.content) ? payload.content : [];
+    return blocks
+      .filter((block: any) => block?.type === "tool_use" && block.id && block.name)
+      .map((block: any) => ({ id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}) }));
+  }
   if (provider === "opencode") return zenFunctionCalls(payload);
   return [];
 }
@@ -532,42 +632,62 @@ function responsesStreamEvents(response: any): Array<[string, unknown]> {
   let sequence = 0;
   const event = (type: string, data: Record<string, unknown>): [string, unknown] => [type, { type, sequence_number: sequence++, ...data }];
   const events = [event("response.created", { response: { ...response, status: "in_progress", output: [] } })];
-  response.output.forEach((item: any, outputIndex: number) => {
+  const output = Array.isArray(response.output) ? response.output : [];
+  output.forEach((item: any, outputIndex: number) => {
     events.push(event("response.output_item.added", { output_index: outputIndex, item: { ...item, status: "in_progress", ...(item.type === "message" ? { content: [] } : {}) } }));
     if (item.type === "message") {
-      const part = item.content[0];
-      events.push(event("response.content_part.added", { item_id: item.id, output_index: outputIndex, content_index: 0, part: { ...part, text: "" } }));
-      events.push(event("response.output_text.delta", { item_id: item.id, output_index: outputIndex, content_index: 0, delta: part.text ?? part.refusal ?? "" }));
-      events.push(event("response.output_text.done", { item_id: item.id, output_index: outputIndex, content_index: 0, text: part.text ?? part.refusal ?? "" }));
-      events.push(event("response.content_part.done", { item_id: item.id, output_index: outputIndex, content_index: 0, part }));
+      const parts = Array.isArray(item.content) ? item.content : [];
+      parts.forEach((part: any, contentIndex: number) => {
+        const refusal = part?.type === "refusal";
+        events.push(event("response.content_part.added", {
+          item_id: item.id,
+          output_index: outputIndex,
+          content_index: contentIndex,
+          part: refusal ? { type: "refusal", refusal: "" } : { ...part, text: "" },
+        }));
+        if (refusal) {
+          events.push(event("response.refusal.delta", { item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.refusal ?? "" }));
+          events.push(event("response.refusal.done", { item_id: item.id, output_index: outputIndex, content_index: contentIndex, refusal: part.refusal ?? "" }));
+        } else {
+          events.push(event("response.output_text.delta", { item_id: item.id, output_index: outputIndex, content_index: contentIndex, delta: part.text ?? "" }));
+          events.push(event("response.output_text.done", { item_id: item.id, output_index: outputIndex, content_index: contentIndex, text: part.text ?? "" }));
+        }
+        events.push(event("response.content_part.done", { item_id: item.id, output_index: outputIndex, content_index: contentIndex, part }));
+      });
     } else {
-      events.push(event("response.function_call_arguments.delta", { item_id: item.id, output_index: outputIndex, delta: item.arguments }));
-      events.push(event("response.function_call_arguments.done", { item_id: item.id, output_index: outputIndex, arguments: item.arguments }));
+      events.push(event("response.function_call_arguments.delta", { item_id: item.id, output_index: outputIndex, delta: item.arguments ?? "" }));
+      events.push(event("response.function_call_arguments.done", { item_id: item.id, output_index: outputIndex, arguments: item.arguments ?? "" }));
     }
     events.push(event("response.output_item.done", { output_index: outputIndex, item }));
   });
-  events.push(event("response.completed", { response }));
+  const terminalEvent = response.status === "incomplete" ? "response.incomplete" : response.status === "failed" ? "response.failed" : "response.completed";
+  events.push(event(terminalEvent, { response }));
   return events;
 }
 
 function writeResponsesPayload(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
   const { content, refusal } = nativeResponse(payload, provider);
   const toolCalls = nativeToolCalls(payload, provider);
+  const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
+  const status = nativeResponseStatus(payload, finishReason);
+  const incompleteDetails = nativeIncompleteDetails(payload, status, finishReason);
+  const outputStatus = status === "incomplete" ? "incomplete" : "completed";
   const id = String(payload?.id ?? `resp_${Date.now()}`);
   const output = [
     ...(content || refusal
-      ? [{ id: `msg_${id}`, type: "message", status: "completed", role: "assistant", content: [{ type: refusal ? "refusal" : "output_text", [refusal ? "refusal" : "text"]: refusal || content }] }]
+      ? [{ id: `msg_${id}`, type: "message", status: outputStatus, role: "assistant", content: [{ type: refusal ? "refusal" : "output_text", [refusal ? "refusal" : "text"]: refusal || content }] }]
       : []),
-    ...toolCalls.map((call) => ({ type: "function_call", id: call.id, call_id: call.id, name: call.name, arguments: call.arguments, status: "completed" })),
+    ...toolCalls.map((call) => ({ type: "function_call", id: call.id, call_id: call.id, name: call.name, arguments: call.arguments, status: outputStatus })),
   ];
   const response = {
     id,
     object: "response",
     created_at: Math.floor(Date.now() / 1000),
-    status: "completed",
+    status,
     model,
     output,
     usage: payload?.usage,
+    ...(incompleteDetails ? { incomplete_details: incompleteDetails } : {}),
   };
   if (!body?.stream) {
     json(res, 200, response);
@@ -664,7 +784,12 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const token = backend.apiKey ?? bearerToken(inboundAuthorization);
       const upstreamRequestPlan = upstreamRequest(protocol, body, normalizedBody, provider, bareModel, token, req.url);
       const headers: Record<string, string> = { "content-type": "application/json" };
-      if (!upstreamRequestPlan.useGemini && typeof authorization === "string" && authorization) headers.authorization = authorization;
+      if (provider === "anthropic") {
+        if (token) headers["x-api-key"] = token;
+        headers["anthropic-version"] = "2023-06-01";
+      } else if (!upstreamRequestPlan.useGemini && typeof authorization === "string" && authorization) {
+        headers.authorization = authorization;
+      }
       const fetchImpl = backend.fetchImpl ?? fetch;
       const upstream = await fetchImpl(`${backend.baseUrl}${upstreamRequestPlan.path}`, {
         method: req.method,

@@ -315,6 +315,43 @@ describe("proxy", () => {
     expect(outbound[0].model).toBe("gpt-5.4");
   });
 
+  it("routes every OpenCode target through Zen Responses", async () => {
+    const outbound: Array<{ url: string; body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+            return new Response(JSON.stringify({ id: "resp_ok", status: "completed", output: [] }));
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "opencode/claude-sonnet-4-5", messages: [{ role: "user", content: "hello" }] }),
+      collectRes() as never
+    );
+
+    expect(outbound[0]).toMatchObject({ url: "https://opencode.ai/zen/v1/responses", body: { model: "claude-sonnet-4-5" } });
+  });
+
   it("sends Gemini targets to Google generateContent with the backend key", async () => {
     const outbound: Array<{ url: string; body: any; key?: string }> = [];
     const server = createProxyServer({
@@ -455,7 +492,7 @@ describe("proxy", () => {
             { role: "user", content: "implement the feature" },
             {
               role: "assistant",
-              content: null,
+              content: "I will read it.",
               tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
             },
             { role: "tool", tool_call_id: "call_read", content: "auto-router" },
@@ -468,6 +505,7 @@ describe("proxy", () => {
 
     expect(outbound[0].body.tools).toEqual([{ type: "function", name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }]);
     expect(outbound[0].body.input).toEqual(expect.arrayContaining([
+      { role: "assistant", content: "I will read it." },
       { type: "function_call", call_id: "call_read", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
       { type: "function_call_output", call_id: "call_read", output: "auto-router" },
     ]));
@@ -525,7 +563,7 @@ describe("proxy", () => {
             { role: "user", content: "read the file" },
             {
               role: "assistant",
-              content: null,
+              content: "I will read it.",
               tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
             },
             { role: "tool", tool_call_id: "call_read", content: "auto-router" },
@@ -538,7 +576,7 @@ describe("proxy", () => {
 
     expect(outbound[0].body.tools).toEqual([{ functionDeclarations: [{ name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }] }]);
     expect(outbound[0].body.contents).toEqual(expect.arrayContaining([
-      { role: "model", parts: [{ functionCall: { name: "read_file", args: { path: "README.md" } } }] },
+      { role: "model", parts: [{ text: "I will read it." }, { functionCall: { name: "read_file", args: { path: "README.md" } } }] },
       { role: "user", parts: [{ functionResponse: { name: "read_file", response: { result: "auto-router" } } }] },
     ]));
     expect(JSON.parse(res.body)).toMatchObject({
@@ -549,6 +587,46 @@ describe("proxy", () => {
           tool_calls: [{ type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
         },
       }],
+    });
+  });
+
+  it("maps Gemini MAX_TOKENS to an incomplete Responses result", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-backend-key",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                candidates: [{ content: { parts: [{ text: "partial" }] }, finishReason: "MAX_TOKENS" }],
+              })
+            ),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3.6-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/responses", { model: "auto", input: "continue" }), res as never);
+    expect(JSON.parse(res.body)).toMatchObject({
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{ status: "incomplete" }],
     });
   });
 
@@ -726,6 +804,97 @@ describe("proxy", () => {
     expect(res.body).toContain("event: response.completed");
   });
 
+  it("streams Responses refusals as refusal events", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "resp_refusal",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "refusal", refusal: "I cannot help with that request." }] }],
+              })
+            ),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/responses", { model: "auto", input: "Make a restricted request.", stream: true }),
+      res as never
+    );
+
+    expect(res.body).toContain('"type":"response.refusal.delta"');
+    expect(res.body).toContain('"type":"response.refusal.done"');
+    expect(res.body).toContain('"part":{"type":"refusal","refusal":""}');
+    expect(res.body).not.toContain("event: response.output_text.delta");
+  });
+
+  it("preserves incomplete status for translated Responses", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "resp_incomplete",
+                status: "incomplete",
+                incomplete_details: { reason: "max_output_tokens" },
+                output: [{ type: "message", content: [{ type: "output_text", text: "partial" }] }],
+              })
+            ),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const jsonRes = collectRes();
+    await server.handle(fakeReq("/v1/responses", { model: "auto", input: "continue" }), jsonRes as never);
+    expect(JSON.parse(jsonRes.body)).toMatchObject({
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{ status: "incomplete" }],
+    });
+
+    const streamRes = collectRes();
+    await server.handle(fakeReq("/v1/responses", { model: "auto", input: "continue", stream: true }), streamRes as never);
+    expect(streamRes.body).toContain("event: response.incomplete");
+    expect(streamRes.body).not.toContain("event: response.completed");
+  });
+
   it("translates an OpenAI Chat Completions target back to Anthropic Messages", async () => {
     const outbound: Array<{ url: string; body: any }> = [];
     const server = createProxyServer({
@@ -764,6 +933,63 @@ describe("proxy", () => {
     expect(res.headers["content-type"]).toBe("text/event-stream");
     expect(res.body).toContain('"type":"text_delta","text":"OK"');
     expect(res.body).toContain("event: message_stop");
+  });
+
+  it("uses Anthropic Messages for explicit Anthropic targets", async () => {
+    const outbound: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "anthropic-backend-key",
+          fetchImpl: async (url, init) => {
+            outbound.push({ url: String(url), headers: init?.headers as Record<string, string>, body: JSON.parse(String(init?.body)) });
+            return new Response(
+              JSON.stringify({
+                id: "msg_ok",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "OK" }],
+                stop_reason: "end_turn",
+              })
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/chat/completions", {
+        model: "auto",
+        max_tokens: 32,
+        messages: [{ role: "system", content: "Be brief." }, { role: "user", content: "hello" }],
+      }),
+      res as never
+    );
+
+    expect(outbound[0]).toMatchObject({
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": "anthropic-backend-key", "anthropic-version": "2023-06-01" },
+      body: { model: "claude-sonnet-4-5", system: "Be brief.", max_tokens: 32, messages: [{ role: "user", content: "hello" }] },
+    });
+    expect(outbound[0].headers.authorization).toBeUndefined();
+    expect(JSON.parse(res.body)).toMatchObject({ choices: [{ message: { content: "OK" }, finish_reason: "stop" }] });
   });
 
   it("preserves native OpenAI Responses requests for OpenAI targets", async () => {
