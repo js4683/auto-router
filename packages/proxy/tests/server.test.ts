@@ -411,4 +411,149 @@ describe("proxy", () => {
     );
     expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
   });
+
+  it("translates Chat Completions tools to Zen Responses and back", async () => {
+    const outbound: Array<{ body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (_url, init) => {
+            outbound.push({ body: JSON.parse(String(init?.body)) });
+            return new Response(
+              JSON.stringify({
+                id: "resp_tool",
+                status: "completed",
+                output: [
+                  {
+                    type: "function_call",
+                    call_id: "call_read",
+                    name: "read_file",
+                    arguments: "{\"path\":\"README.md\"}",
+                  },
+                ],
+              })
+            );
+          },
+        },
+      },
+      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      select: selectModel,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq(
+        "/v1/chat/completions",
+        {
+          model: "openai/gpt-5.6-luna",
+          messages: [
+            { role: "user", content: "implement the feature" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
+            },
+            { role: "tool", tool_call_id: "call_read", content: "auto-router" },
+          ],
+          tools: [{ type: "function", function: { name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
+        }
+      ),
+      res as never
+    );
+
+    expect(outbound[0].body.tools).toEqual([{ type: "function", name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }]);
+    expect(outbound[0].body.input).toEqual(expect.arrayContaining([
+      { type: "function_call", call_id: "call_read", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
+      { type: "function_call_output", call_id: "call_read", output: "auto-router" },
+    ]));
+    expect(JSON.parse(res.body)).toMatchObject({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
+        },
+      }],
+    });
+  });
+
+  it("translates Chat Completions tools to Gemini generateContent and back", async () => {
+    const outbound: Array<{ body: any }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-backend-key",
+          fetchImpl: async (_url, init) => {
+            outbound.push({ body: JSON.parse(String(init?.body)) });
+            return new Response(
+              JSON.stringify({
+                candidates: [{
+                  content: {
+                    parts: [{ functionCall: { name: "read_file", args: { path: "README.md" } } }],
+                  },
+                  finishReason: "STOP",
+                }],
+              })
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3.6-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0.2,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(
+      fakeReq(
+        "/v1/chat/completions",
+        {
+          model: "google/gemini-3.6-flash",
+          messages: [
+            { role: "user", content: "read the file" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
+            },
+            { role: "tool", tool_call_id: "call_read", content: "auto-router" },
+          ],
+          tools: [{ type: "function", function: { name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
+        }
+      ),
+      res as never
+    );
+
+    expect(outbound[0].body.tools).toEqual([{ functionDeclarations: [{ name: "read_file", description: "Read a file", parameters: { type: "object", properties: { path: { type: "string" } } } }] }]);
+    expect(outbound[0].body.contents).toEqual(expect.arrayContaining([
+      { role: "model", parts: [{ functionCall: { name: "read_file", args: { path: "README.md" } } }] },
+      { role: "user", parts: [{ functionResponse: { name: "read_file", response: { result: "auto-router" } } }] },
+    ]));
+    expect(JSON.parse(res.body)).toMatchObject({
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          tool_calls: [{ type: "function", function: { name: "read_file", arguments: "{\"path\":\"README.md\"}" } }],
+        },
+      }],
+    });
+  });
 });

@@ -93,20 +93,121 @@ function lastUserText(messages: TextMessage[]): string {
   return "";
 }
 
-function geminiRequest(messages: TextMessage[]): Record<string, unknown> {
-  const systemParts = messages
-    .filter((message) => message.role === "system" || message.role === "developer")
-    .map((message) => ({ text: message.content }));
-  const contents = messages
-    .filter((message) => message.role === "user" || message.role === "assistant")
-    .map((message) => ({
-      role: message.role === "assistant" ? "model" : "user",
-      parts: [{ text: message.content }],
+function zenTools(body: any): unknown[] {
+  return (Array.isArray(body?.tools) ? body.tools : [])
+    .filter((tool: any) => tool?.type === "function" && tool.function?.name)
+    .map((tool: any) => ({
+      type: "function",
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
     }));
+}
+
+function zenInput(body: any): unknown[] {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  return messages.flatMap((message: any) => {
+    if (message?.role === "tool") {
+      return [{ type: "function_call_output", call_id: message.tool_call_id, output: messageText(message.content) ?? "" }];
+    }
+    if (Array.isArray(message?.tool_calls)) {
+      return message.tool_calls
+        .filter((call: any) => call?.function?.name)
+        .map((call: any) => ({
+          type: "function_call",
+          call_id: call.id,
+          name: call.function.name,
+          arguments: call.function.arguments ?? "{}",
+        }));
+    }
+    const content = messageText(message?.content);
+    if (!TEXT_MESSAGE_ROLES.has(message?.role) || content === undefined) return [];
+    return [{ role: message.role, content }];
+  });
+}
+
+function zenFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string }> {
+  return (Array.isArray(payload?.output) ? payload.output : [])
+    .filter((item: any) => item?.type === "function_call" && item.name)
+    .map((item: any) => ({
+      id: item.call_id ?? item.id,
+      name: item.name,
+      arguments: item.arguments ?? "{}",
+    }));
+}
+
+function parseToolArguments(raw: string | undefined): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : { result: raw ?? "" };
+  } catch {
+    return { result: raw ?? "" };
+  }
+}
+
+function geminiTools(body: any): unknown[] {
+  const declarations = (Array.isArray(body?.tools) ? body.tools : [])
+    .filter((tool: any) => tool?.type === "function" && tool.function?.name)
+    .map((tool: any) => ({
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
+    }));
+  return declarations.length ? [{ functionDeclarations: declarations }] : [];
+}
+
+function geminiRequest(body: any): Record<string, unknown> {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const systemParts = messages
+    .filter((message: any) => message?.role === "system" || message?.role === "developer")
+    .map((message: any) => ({ text: messageText(message.content) ?? "" }))
+    .filter((part: { text: string }) => part.text);
+  const contents: unknown[] = [];
+  for (const message of messages) {
+    if (message?.role === "system" || message?.role === "developer") continue;
+    if (message?.role === "tool") {
+      const name = messages
+        .flatMap((item: any) => item?.tool_calls ?? [])
+        .find((call: any) => call.id === message.tool_call_id)?.function?.name;
+      contents.push({
+        role: "user",
+        parts: [{ functionResponse: { name: name ?? "tool", response: { result: messageText(message.content) ?? "" } } }],
+      });
+      continue;
+    }
+    if (Array.isArray(message?.tool_calls)) {
+      contents.push({
+        role: "model",
+        parts: message.tool_calls
+          .filter((call: any) => call?.function?.name)
+          .map((call: any) => ({ functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } })),
+      });
+      continue;
+    }
+    const content = messageText(message?.content);
+    if ((message?.role !== "user" && message?.role !== "assistant") || content === undefined) continue;
+    contents.push({
+      role: message.role === "assistant" ? "model" : "user",
+      parts: [{ text: content }],
+    });
+  }
+  const tools = geminiTools(body);
   return {
     ...(systemParts.length ? { systemInstruction: { parts: systemParts } } : {}),
     contents,
+    ...(tools.length ? { tools } : {}),
   };
+}
+
+function geminiFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string }> {
+  const parts = payload?.candidates?.[0]?.content?.parts;
+  return (Array.isArray(parts) ? parts : [])
+    .filter((part: any) => part?.functionCall?.name)
+    .map((part: any, index: number) => ({
+      id: `call_${part.functionCall.name}_${index}`,
+      name: part.functionCall.name,
+      arguments: JSON.stringify(part.functionCall.args ?? {}),
+    }));
 }
 
 function sessionId(req: IncomingMessage, text: string): string {
@@ -164,7 +265,8 @@ function nativeResponse(payload: any, provider: string): { content: string; refu
   return { content, ...(refusal ? { refusal } : {}) };
 }
 
-function nativeFinishReason(payload: any, provider: string, refusal?: string): "stop" | "length" | "content_filter" {
+function nativeFinishReason(payload: any, provider: string, refusal?: string, toolCalls: unknown[] = []): "stop" | "length" | "content_filter" | "tool_calls" {
+  if (toolCalls.length) return "tool_calls";
   if (provider === "google") {
     const reason = payload?.candidates?.[0]?.finishReason ?? payload?.promptFeedback?.blockReason;
     if (!reason || reason === "STOP") return "stop";
@@ -182,8 +284,17 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
   const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
   const created = Math.floor(Date.now() / 1000);
   const { content, refusal } = nativeResponse(payload, provider);
-  const finishReason = nativeFinishReason(payload, provider, refusal);
-  const message = refusal ? { role: "assistant", content: content || null, refusal } : { role: "assistant", content };
+  const toolCalls = provider === "google" ? geminiFunctionCalls(payload) : provider === "opencode" ? zenFunctionCalls(payload) : [];
+  const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
+  const message = refusal
+    ? { role: "assistant", content: content || null, refusal }
+    : toolCalls.length
+      ? {
+          role: "assistant",
+          content: content || null,
+          tool_calls: toolCalls.map((call) => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })),
+        }
+      : { role: "assistant", content };
 
   if (!body?.stream) {
     json(res, 200, {
@@ -289,9 +400,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const useZenResponses = provider === "opencode" && ZEN_RESPONSE_MODELS.test(bareModel);
       const useGemini = provider === "google";
       const outbound = useGemini
-        ? geminiRequest(messages)
+        ? geminiRequest(body)
         : useZenResponses
-          ? { model: bareModel, input: messages }
+          ? { model: bareModel, input: zenInput(body), ...(zenTools(body).length ? { tools: zenTools(body) } : {}) }
           : { ...body, model: provider === "opencode" ? bareModel : result.modelId };
       const path = useGemini
         ? `/models/${bareModel}:generateContent${token ? `?key=${encodeURIComponent(token)}` : ""}`
