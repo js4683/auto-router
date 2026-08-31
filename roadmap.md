@@ -23,10 +23,10 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 - [x] Context-fit guard: refuse downgrade if session won't fit target window + margin
 - [x] Task-boundary detection + confidence gate (route only on confident new task)
 - [x] Stickiness: hold model within a task
-- [ ] Task-type resolution (review / run_tests / monitoring / planning / implement / debug):
+- [x] Task-type resolution (review / run_tests / monitoring / planning / implement / debug):
       **v1 = explicit** (user tag or opencode agent/mode -> task type). Auto-detection
       is narrow for verification and planning, and gated elsewhere.
-- [ ] Task policies: verification free/lowest-cost; planning quality-first with floor 85
+- [x] Task policies: verification free/lowest-cost; planning quality-first with floor 85
 - [x] Two-axis `selectModel`: task-type map first, else free-first within tier, guarded
 - [x] Unit tests for scorer + guards + anti-thrash + task-type override
 
@@ -34,7 +34,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 
 - [x] Plugin scaffold (`@opencode-ai/plugin`), context hook wiring
 - [x] Map opencode session -> `SessionState`
-- [ ] Lock one target per task and emit at most one recommendation per task
+- [x] Lock one target per task and emit at most one recommendation per task
 - [x] Config surface in `opencode.json` (tier/task policy, stickiness, guards)
 - [x] Live connected-provider discovery with bounded fallback
 - [x] Decision logging (target model and actual runtime model)
@@ -43,10 +43,14 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 
 ## Phase 2 — proxy adapter
 
-- [ ] OpenAI-compatible server wrapping `router-core`
-- [ ] Reconstruct `SessionState` from request payload (messages, tools)
-- [ ] Forward to chosen upstream model; stream back
-- [ ] Works with any harness by setting base_url
+- [x] OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages server wrapping
+      `router-core`
+- [x] Reconstruct conservative `SessionState` signals from request messages, tools, and
+      tool-call history
+- [x] Forward to the chosen upstream model
+- [ ] Stream translated upstream responses incrementally (translated paths are currently
+      buffered before client-compatible events are emitted)
+- [x] Works with OpenCode, Claude Code, Codex, and other clients by setting `base_url`
 
 ## Phase 3 — eval
 

@@ -27,6 +27,9 @@ policy, integration behavior, scope, or verification evidence changes.
 - For planning and architecture tasks, use a high quality floor and quality-first
   ordering so Sol, Fable, Opus, or equivalent frontier models win when connected.
 - Log one task-level recommendation when OpenCode's actual model differs from the target.
+- Apply the selected target through the local OpenAI/Anthropic-compatible proxy.
+- Reconstruct conservative routing signals from normalized request messages, tool
+  schemas, and tool-call history.
 - Keep unit, integration, build, deployment, and smoke-test evidence current.
 
 ### Out of scope
@@ -120,6 +123,19 @@ requirements. Any connected model with equivalent or better quality may win.
 - One-shot task-level recommendation logging.
 - Tool, diff, token, and error signal collection.
 
+### Proxy adapter
+
+`packages/proxy` owns:
+
+- OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages ingress.
+- Conservative `SessionState` reconstruction from the normalized request context.
+- Task-target selection and locking through `router-core`.
+- Provider routing, credential isolation, and request/response translation.
+
+The proxy estimates full-context tokens from normalized messages and tool schemas. Tool
+history contributes tool depth, file and patch hints, and prior-error signals. Signals a
+standard API request cannot expose remain at safe zero defaults.
+
 The installed global adapter at
 `~/.config/opencode/plugins/auto-router.ts` must stay behaviorally synchronized with the
 repository adapter. Its compiled core is deployed under
@@ -206,6 +222,15 @@ Supported strategies:
   - [x] Verify follow-up messages do not produce additional task recommendations.
   - [x] Record final test counts and runtime evidence below.
 
+### 6. Proxy apply path
+
+- [x] Add OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages ingress.
+- [x] Select and lock one routed target per task.
+- [x] Forward requests to OpenAI, OpenCode Zen, Gemini, or Anthropic backends.
+- [x] Translate text, tools, terminal states, and client-compatible response envelopes.
+- [x] Reconstruct request-derived context, tool, file, diff, and error signals.
+- [ ] Stream translated upstream responses incrementally instead of buffering them.
+
 ## Acceptance Criteria
 
 - A prompt such as `Run no-mistakes and report failures` resolves to `run_tests` and
@@ -218,6 +243,8 @@ Supported strategies:
 - `chat.params` never receives unsupported model mutation fields.
 - The task log uses provider-qualified target IDs and distinguishes recommendation from
   actual runtime model.
+- Proxy routing uses the complete normalized request context rather than only the latest
+  user message.
 - Build and all tests pass.
 - Repository and installed global plugin behavior match.
 
@@ -234,6 +261,8 @@ Supported strategies:
 - **2026-08-29, planning smoke (stale config):** first run classified `planning` but selected `via=free-first` because global inline `opencode.json` lacked the planning policy.
 - **2026-08-29, planning smoke (after merge):** `plan the architecture...` → `TASK SELECT taskType=planning via=quality source=live target=openai/gpt-5.6-sol` and one `TASK RECOMMEND` from Muse.
 - **2026-08-30, Avengers-Pro + proxy:** `npm test` — 10 files, 58 tests passed (9 core + 1 proxy).
+- **2026-08-31, proxy request state:** `npm run build && npm test` — 10 files,
+  81 tests passed (56 core + 25 proxy).
 
 ## Decision Log
 
@@ -265,6 +294,9 @@ Supported strategies:
 - **2026-08-30:** Avengers-Pro scores the first message of a task. Overlap models join
   through LLMRouterBench (`source: "bench"`). Muse / Grok / Luna-class IDs use an
   explicit `source: "hand"` bootstrap until we have our own labels.
+- **2026-08-31:** Proxy `SessionState` uses the normalized message and tool payload for a
+  conservative context estimate. Standard tool-call arguments provide tool-depth,
+  file, patch-hunk, and prior-error hints; unavailable harness signals stay at zero.
 
 ## Supporting Documents
 

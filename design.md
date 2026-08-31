@@ -30,6 +30,11 @@ Two adapters deliver "opencode **or any harness**":
 `router-core` has zero harness dependencies. Both adapters call the same
 `classify()` + policy engine.
 
+The proxy reconstructs a conservative `SessionState` from each normalized request. It
+estimates context from messages and tool schemas, then derives tool depth, file hints,
+patch hunks, and prior errors from tool-call history. Signals unavailable through the
+wire protocol remain zero rather than being guessed.
+
 ---
 
 ## The two hard problems (the real differentiators)

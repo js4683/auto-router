@@ -75,7 +75,9 @@ native OpenAI Responses streams are forwarded unchanged.
 
 The proxy scores the first message of a task with Avengers-Pro fixture ranking when
 enabled, applies free-first / planning-quality overlays, then holds that target until
-a confirmed boundary.
+a confirmed boundary. Routing state is reconstructed conservatively from normalized
+messages, tool schemas, and tool-call history so context size, tool depth, file/patch
+hints, and prior tool errors inform selection when the request exposes them.
 
 ## Docs
 

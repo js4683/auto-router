@@ -42,6 +42,53 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
 const TEXT_MESSAGE_ROLES = new Set(["system", "developer", "user", "assistant"]);
+const CODEX_AUTO_MODEL = {
+  slug: "auto",
+  display_name: "Auto Router",
+  description: "Task-aware model routing",
+  default_reasoning_level: "none",
+  supported_reasoning_levels: [],
+  shell_type: "shell_command",
+  visibility: "list",
+  supported_in_api: true,
+  priority: 1,
+  additional_speed_tiers: [],
+  service_tiers: [],
+  availability_nux: null,
+  upgrade: null,
+  model_messages: {
+    instructions_template: "",
+    instructions_variables: { personality_default: "", personality_friendly: "", personality_pragmatic: "" },
+    approvals: null,
+    collaboration_modes: null,
+    auto_review: null,
+    permissions: null,
+  },
+  include_skills_usage_instructions: false,
+  include_plugin_usage_instructions: false,
+  include_apps_usage_instructions: false,
+  default_reasoning_summary: "none",
+  support_verbosity: false,
+  default_verbosity: "low",
+  apply_patch_tool_type: "freeform",
+  web_search_tool_type: "text_and_image",
+  truncation_policy: { mode: "tokens", limit: 10000 },
+  context_window: 272000,
+  max_context_window: 272000,
+  comp_hash: "auto-router-v1",
+  effective_context_window_percent: 95,
+  experimental_supported_tools: [],
+  input_modalities: ["text"],
+  supports_parallel_tool_calls: true,
+  supports_image_detail_original: false,
+  supports_search_tool: false,
+  use_responses_lite: true,
+  tool_mode: "code_mode_only",
+  multi_agent_version: "v2",
+  base_instructions: "",
+  auto_compact_token_limit: 244800,
+  supports_reasoning_summaries: false,
+};
 
 interface TextMessage {
   role: "system" | "developer" | "user" | "assistant";
@@ -313,16 +360,70 @@ function anthropicRequest(body: any, model: string): Record<string, unknown> {
   };
 }
 
+const GEMINI_SCHEMA_ALLOW = new Set([
+  "type",
+  "description",
+  "properties",
+  "required",
+  "enum",
+  "items",
+  "format",
+  "nullable",
+  "default",
+  "example",
+  "minimum",
+  "maximum",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "maxItems",
+  "minItems",
+  "propertyOrdering",
+  "title",
+]);
+
+function geminiSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(geminiSchema);
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (!GEMINI_SCHEMA_ALLOW.has(key)) continue;
+    if (key === "properties" && child && typeof child === "object" && !Array.isArray(child)) {
+      const props: Record<string, unknown> = {};
+      for (const [pKey, pVal] of Object.entries(child as Record<string, unknown>)) {
+        props[pKey] = geminiSchema(pVal);
+      }
+      out[key] = props;
+    } else if (key === "items" && child && typeof child === "object") {
+      out[key] = geminiSchema(child);
+    } else if (key === "properties" || key === "required" || key === "enum" || key === "propertyOrdering") {
+      out[key] = child;
+    } else if (typeof child === "object" && child !== null) {
+      // for nested schema objects, recurse but only if they look like schema
+      // if child is plain string/value, keep as is
+      const sanitized = geminiSchema(child);
+      // Only keep if sanitized is object with allowed keys or primitive
+      if (sanitized && typeof sanitized === "object" && Object.keys(sanitized as object).length === 0) continue;
+      out[key] = sanitized;
+    } else {
+      out[key] = child;
+    }
+  }
+  return out;
+}
+
 function geminiTools(body: any): unknown[] {
   const declarations = (Array.isArray(body?.tools) ? body.tools : [])
     .filter((tool: any) => tool?.type === "function" && tool.function?.name)
     .map((tool: any) => ({
       name: tool.function.name,
       description: tool.function.description,
-      parameters: tool.function.parameters,
+      parameters: geminiSchema(tool.function.parameters),
     }));
   return declarations.length ? [{ functionDeclarations: declarations }] : [];
 }
+
+const geminiThoughtSignatures = new Map<string, string>();
 
 function geminiRequest(body: any): Record<string, unknown> {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
@@ -349,7 +450,18 @@ function geminiRequest(body: any): Record<string, unknown> {
     const calls = Array.isArray(message?.tool_calls)
       ? message.tool_calls
           .filter((call: any) => call?.function?.name)
-          .map((call: any) => ({ functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } }))
+          .map((call: any) => {
+            const sig =
+              (call as any).thoughtSignature ??
+              (call as any).thought_signature ??
+              (call as any).function?.thoughtSignature ??
+              (call as any).function?.thought_signature ??
+              geminiThoughtSignatures.get(call.id);
+            const fc: Record<string, unknown> = { name: call.function.name, args: parseToolArguments(call.function.arguments) };
+            if ((call as any).id) (fc as any).id = (call as any).id;
+            if (sig) return { functionCall: fc, thoughtSignature: sig } as unknown;
+            return { functionCall: fc };
+          })
       : [];
     const parts = [...text, ...calls];
     if (!parts.length) continue;
@@ -366,15 +478,21 @@ function geminiRequest(body: any): Record<string, unknown> {
   };
 }
 
-function geminiFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string }> {
+function geminiFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }> {
   const parts = payload?.candidates?.[0]?.content?.parts;
   return (Array.isArray(parts) ? parts : [])
     .filter((part: any) => part?.functionCall?.name)
-    .map((part: any, index: number) => ({
-      id: `call_${part.functionCall.name}_${index}`,
-      name: part.functionCall.name,
-      arguments: JSON.stringify(part.functionCall.args ?? {}),
-    }));
+    .map((part: any, index: number) => {
+      const sig = part.thoughtSignature ?? part.thought_signature ?? part.functionCall?.thoughtSignature ?? part.functionCall?.thought_signature;
+      const id = part.functionCall?.id ?? `call_${part.functionCall.name}_${index}`;
+      if (sig) geminiThoughtSignatures.set(id, sig);
+      return {
+        id,
+        name: part.functionCall.name,
+        arguments: JSON.stringify(part.functionCall.args ?? {}),
+        ...(sig ? { thoughtSignature: sig } : {}),
+      };
+    });
 }
 
 interface UpstreamRequest {
@@ -430,17 +548,58 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-function sessionState(text: string, isNewSession: boolean): SessionState {
+function addFileHints(args: Record<string, unknown>, files: Set<string>): void {
+  for (const key of ["path", "file", "filePath"]) {
+    const value = args[key];
+    if (typeof value === "string" && value) files.add(value);
+  }
+  const listed = args.files;
+  if (Array.isArray(listed)) {
+    for (const value of listed) if (typeof value === "string" && value) files.add(value);
+  }
+  const patch = args.patchText ?? args.patch;
+  if (typeof patch !== "string") return;
+  for (const match of patch.matchAll(/^\*\*\* (?:Add|Delete|Update) File: (.+)$/gm)) files.add(match[1]);
+}
+
+function requestSignals(body: any): { filesTouched: number; diffHunks: number; toolDepth: number; priorErrors: number } {
+  const files = new Set<string>();
+  let diffHunks = 0;
+  let toolDepth = 0;
+  let priorErrors = 0;
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+
+  for (const message of messages) {
+    const calls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    toolDepth += calls.length;
+    for (const call of calls) {
+      const args = parseToolArguments(call?.function?.arguments);
+      addFileHints(args, files);
+      const patch = args.patchText ?? args.patch;
+      if (typeof patch === "string") diffHunks += patch.match(/^@@/gm)?.length ?? 0;
+    }
+    if (message?.role === "tool" && /error|failed|exception|not found/i.test(messageText(message.content) ?? "")) priorErrors += 1;
+  }
+
+  return { filesTouched: files.size, diffHunks, toolDepth, priorErrors };
+}
+
+function sessionState(body: any, text: string, isNewSession: boolean): SessionState {
   const promptTokens = estimateTokens(text);
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const tools = Array.isArray(body?.tools) ? body.tools : [];
+  const taskTokens = estimateTokens(JSON.stringify({ messages, tools }));
+  const signals = requestSignals(body);
   return {
-    lifetimeTokens: promptTokens,
+    lifetimeTokens: taskTokens,
     currentTask: {
       promptTokens,
-      taskTokens: promptTokens,
-      filesTouched: 0,
-      diffHunks: 0,
-      toolDepth: 0,
+      taskTokens,
+      filesTouched: signals.filesTouched,
+      diffHunks: signals.diffHunks,
+      toolDepth: signals.toolDepth,
       lastUserMessage: text,
+      priorErrors: signals.priorErrors,
     },
     isNewSession,
   };
@@ -723,11 +882,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   close(): void;
 } {
-  function decide(req: IncomingMessage, text: string): SelectionResult {
+  function decide(req: IncomingMessage, body: any, text: string): SelectionResult {
     const id = sessionId(req, text);
     const stored = opts.sessions.get(id);
     const isNewSession = !stored.taskTarget;
-    const state = sessionState(text, isNewSession);
+    const state = sessionState(body, text, isNewSession);
     const boundary = detectBoundary(state, undefined, stored.prevMessage);
     if (stored.taskTarget && !boundary.isBoundary) {
       return {
@@ -779,6 +938,14 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         json(res, 200, { ok: true });
         return;
       }
+      if (req.method === "GET" && path === "/v1/models") {
+        json(res, 200, {
+          object: "list",
+          data: [{ id: "auto", object: "model", created: 0, owned_by: "auto-router" }],
+          models: [CODEX_AUTO_MODEL],
+        });
+        return;
+      }
       if (req.method === "HEAD" && path === "/api/hello") {
         if (typeof res.writeHead === "function") res.writeHead(200);
         else res.statusCode = 200;
@@ -792,7 +959,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const normalizedBody = normalizeIngress(body, protocol);
       const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
-      const result = decide(req, text);
+      const result = decide(req, normalizedBody, text);
 
       if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
@@ -814,6 +981,8 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       if (provider === "anthropic") {
         if (token) headers["x-api-key"] = token;
         headers["anthropic-version"] = "2023-06-01";
+        const beta = req.headers["anthropic-beta"];
+        if (protocol === "anthropic" && typeof beta === "string") headers["anthropic-beta"] = beta;
       } else if (!upstreamRequestPlan.useGemini && typeof authorization === "string" && authorization) {
         headers.authorization = authorization;
       }
