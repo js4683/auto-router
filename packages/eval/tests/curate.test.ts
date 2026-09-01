@@ -43,6 +43,30 @@ describe("curateRecording", () => {
     expect(dataset.sessions[0].turns[0].observed).toMatchObject({ modelId: "provider/cheap", usageSource: "estimated", output: "completed" });
   });
 
+  it("redacts credentials in retained session state while preserving routing numbers", () => {
+    const turn = fixtureTurn();
+    const path = writeLines([
+      {
+        ...recording("session-1", "turn-1"),
+        sessionState: {
+          ...turn.sessionState,
+          userTag: "api_key=private-state-key",
+          activeAgent: "Bearer private-agent-token",
+          currentTask: { ...turn.sessionState.currentTask, lastUserMessage: "sk-ant-private-state-token" },
+        },
+      },
+    ]);
+
+    const state = curateRecording(path, fixtureDataset()).sessions[0].turns[0].sessionState;
+
+    expect(state.currentTask.promptTokens).toBe(20);
+    expect(state.currentTask.taskTokens).toBe(1000);
+    expect(state.currentTask.lastUserMessage).toBe("[REDACTED]");
+    expect(state.userTag).toBe("api_key=[REDACTED]");
+    expect(state.activeAgent).toBe("Bearer [REDACTED]");
+    expect(JSON.stringify(state)).not.toContain("private-state");
+  });
+
   it("rejects malformed, unsupported, and duplicate recording lines", () => {
     const directory = mkdtempSync(join(tmpdir(), "auto-router-curate-"));
     const malformed = join(directory, "malformed.jsonl");

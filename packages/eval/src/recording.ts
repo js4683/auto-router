@@ -10,6 +10,8 @@ export interface JsonlRecorderOptions {
   now?: () => Date;
 }
 
+const REDACTED_PROMPT = "[REDACTED]";
+
 function redactString(value: string): string {
   return value
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
@@ -36,6 +38,13 @@ export function redactContent(value: unknown): unknown {
   return redact(value, 0, new WeakSet());
 }
 
+function metadataSessionState(input: EvalRecordInput["sessionState"]): EvalRecordInput["sessionState"] {
+  return {
+    ...input,
+    currentTask: { ...input.currentTask, lastUserMessage: REDACTED_PROMPT },
+  };
+}
+
 function prune(directory: string, retentionDays: number, now: Date): void {
   const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
   for (const name of readdirSync(directory)) {
@@ -55,7 +64,7 @@ function persistedInput(input: EvalRecordInput, mode: Exclude<RecordingMode, "of
     durationMs: input.durationMs,
     status: input.status,
     selection: input.selection,
-    sessionState: input.sessionState,
+    sessionState: mode === "metadata" ? metadataSessionState(input.sessionState) : input.sessionState,
     usageSource: input.usageSource,
     usage: input.usage,
     ...(input.contentTruncated ? { contentTruncated: true } : {}),

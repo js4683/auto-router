@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { planLiveEvaluation, runLiveEvaluation, type JudgeClientConfig } from "../src/live.js";
 import { replayDataset } from "../src/replay.js";
-import { buildLiveReport, stableJson } from "../src/report.js";
+import { buildLiveReport, renderMarkdown, stableJson } from "../src/report.js";
 import { fixtureDataset, fixtureTurn } from "./fixtures.js";
 
 function response(content: string, status = 200): Response {
@@ -67,7 +67,51 @@ describe("live evaluation orchestration", () => {
     const report = buildLiveReport(dataset, replay, result);
     expect(report.mode).toBe("live");
     expect(report.gates.liveQuality).toMatchObject({ passed: false, reason: "requires at least 30 complete live cases" });
+    expect(report.strategies.router.metrics).toMatchObject({ isEstimated: true, totalCostUsd: 0.0012 });
+    expect(report.strategies.router.live).toMatchObject({
+      sampleSize: 1,
+      quality: { deterministic: null, judge: 0.8, composite: 0.8 },
+      providerObserved: {
+        usageSource: "provider",
+        costSource: "provider-usage-priced-from-dataset",
+        sampleSize: 1,
+        totalUsage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        totalCostUsd: 0.00014,
+        incompleteReasons: [],
+      },
+    });
+    expect(renderMarkdown(report)).toContain("Provider-observed live metrics");
+    expect(renderMarkdown(report)).toContain("0.000140");
     expect(stableJson(report)).not.toContain("live/cheap-answer");
+  });
+
+  it("keeps a live strategy aggregate incomplete when provider usage is absent", async () => {
+    const dataset = liveFixture();
+    const replay = replayDataset(dataset);
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "live/judge") {
+        const request = JSON.parse(body.messages[1].content);
+        const scores = Object.fromEntries(request.responses.map((item: any) => [item.label, 80]));
+        return response(JSON.stringify({ scores }));
+      }
+      if (body.model === "live/cheap") {
+        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "cheap" } }] }), { status: 200 });
+      }
+      return response(`${body.model}-answer`);
+    };
+
+    const result = await runLiveEvaluation(dataset, replay, config, fetchImpl);
+    const report = buildLiveReport(dataset, replay, result);
+
+    expect(report.strategies.router.live?.providerObserved).toMatchObject({
+      usageSource: "provider",
+      sampleSize: 0,
+      totalUsage: null,
+      totalCostUsd: null,
+    });
+    expect(report.strategies.router.live?.providerObserved.incompleteReasons).toContain("missing provider usage for router in case session-1\u0000turn-1");
+    expect(report.strategies["always-frontier"].live?.providerObserved.totalCostUsd).toBe(0.0016);
   });
 
   it("preserves failed generations and skips judging incomplete cases", async () => {

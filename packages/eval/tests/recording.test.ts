@@ -70,6 +70,10 @@ describe("JSONL recorder", () => {
     expect(metadataLine.messages).toBeUndefined();
     expect(metadataLine.output).toBeUndefined();
     expect(metadataLine.usageSource).toBe("estimated");
+    expect(metadataLine.sessionState.currentTask.lastUserMessage).toBe("[REDACTED]");
+    expect(metadataLine.sessionState.currentTask.promptTokens).toBe(20);
+    expect(metadataLine.sessionState.currentTask.taskTokens).toBe(1000);
+    expect(JSON.stringify(metadataLine)).not.toContain("Implement the fixture");
 
     const contentDirectory = mkdtempSync(join(tmpdir(), "auto-router-recording-"));
     const content = createJsonlRecorder({ mode: "content", directory: contentDirectory, retentionDays: 30 });

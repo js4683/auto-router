@@ -1,5 +1,17 @@
-import { calculateCost, calculateStrategyMetrics, qualityRetained } from "./metrics.js";
-import type { EvalDatasetV1, EvalReportV1, LiveEvalResult, ReplayResult, StrategyName, StrategyReport } from "./types.js";
+import { calculateCost, calculateStrategyMetrics, qualityRetained, weightedMean } from "./metrics.js";
+import type {
+  EvalDatasetV1,
+  EvalReportV1,
+  EvalUsage,
+  LiveEvalResult,
+  LiveStrategyMetrics,
+  ProviderObservedMetrics,
+  ReplayResult,
+  StrategyName,
+  StrategyReport,
+} from "./types.js";
+
+const STRATEGIES = ["router", "always-frontier", "always-cheap"] as const;
 
 function strategyReport(dataset: EvalDatasetV1, replay: ReplayResult, name: StrategyName): StrategyReport {
   const strategy = replay.strategies[name];
@@ -61,12 +73,84 @@ export function buildReplayReport(dataset: EvalDatasetV1, replay: ReplayResult):
   };
 }
 
+function emptyUsage(): EvalUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+}
+
+function addUsage(total: EvalUsage, usage: EvalUsage): void {
+  total.inputTokens += usage.inputTokens;
+  total.outputTokens += usage.outputTokens;
+  total.cacheReadInputTokens += usage.cacheReadInputTokens;
+  total.cacheWriteInputTokens += usage.cacheWriteInputTokens;
+}
+
+function providerObservedLiveMetrics(live: LiveEvalResult, name: StrategyName): ProviderObservedMetrics {
+  const totalUsage = emptyUsage();
+  let sampleSize = 0;
+  let totalCostUsd = 0;
+  const incompleteReasons: string[] = [];
+
+  for (const item of live.cases) {
+    if (!item.complete) {
+      incompleteReasons.push(`incomplete live case ${item.id}`);
+      continue;
+    }
+    const usage = item.usage?.[name];
+    if (!usage) {
+      incompleteReasons.push(`missing provider usage for ${name} in case ${item.id}`);
+      continue;
+    }
+    sampleSize += 1;
+    addUsage(totalUsage, usage);
+    const cost = item.observedCostUsd?.[name];
+    if (cost === undefined) incompleteReasons.push(`missing provider cost for ${name} in case ${item.id}`);
+    else totalCostUsd += cost;
+  }
+
+  if (!sampleSize) incompleteReasons.push(`no provider-observed usage for ${name}`);
+  return {
+    usageSource: "provider",
+    costSource: "provider-usage-priced-from-dataset",
+    sampleSize,
+    totalUsage: sampleSize ? totalUsage : null,
+    totalCostUsd: incompleteReasons.length ? null : totalCostUsd,
+    incompleteReasons,
+  };
+}
+
+function liveQuality(live: LiveEvalResult, name: StrategyName): LiveStrategyMetrics["quality"] {
+  const deterministic: Array<{ score: number; weight: number }> = [];
+  const judge: Array<{ score: number; weight: number }> = [];
+  const composite: Array<{ score: number; weight: number }> = [];
+  for (const item of live.cases) {
+    const scores = item.complete ? item.scores?.[name] : undefined;
+    if (!scores) continue;
+    const weight = item.weight;
+    if (scores.deterministic !== null) deterministic.push({ score: scores.deterministic, weight });
+    judge.push({ score: scores.judge, weight });
+    composite.push({ score: scores.composite, weight });
+  }
+  return { deterministic: weightedMean(deterministic), judge: weightedMean(judge), composite: weightedMean(composite) };
+}
+
+function liveStrategyMetrics(live: LiveEvalResult, name: StrategyName): LiveStrategyMetrics {
+  return {
+    sampleSize: live.cases.filter((item) => item.complete && item.scores?.[name]).length,
+    quality: liveQuality(live, name),
+    providerObserved: providerObservedLiveMetrics(live, name),
+  };
+}
+
 export function buildLiveReport(dataset: EvalDatasetV1, replay: ReplayResult, live: LiveEvalResult): EvalReportV1 {
   const report = buildReplayReport(dataset, replay);
+  const strategies = Object.fromEntries(
+    STRATEGIES.map((name) => [name, { ...report.strategies[name], live: liveStrategyMetrics(live, name) }])
+  ) as Record<StrategyName, StrategyReport>;
   return {
     ...report,
     mode: "live",
     sampleSize: live.cases.length,
+    strategies,
     live,
     gates: {
       ...report.gates,
@@ -108,12 +192,30 @@ export function renderMarkdown(report: EvalReportV1): string {
     "| Strategy | Estimated cost USD | Quality proxy | Switches | Cache misses |",
     "|---|---:|---:|---:|---:|",
   ];
-  for (const name of ["router", "always-frontier", "always-cheap"] as const) {
+  for (const name of STRATEGIES) {
     const metrics = report.strategies[name].metrics;
     lines.push(`| ${name} | ${decimal(metrics.totalCostUsd)} | ${decimal(metrics.qualityProxy)} | ${metrics.switchCount} | ${metrics.cacheMissTokens} |`);
   }
+  if (report.mode === "live") {
+    lines.push(
+      "",
+      "## Provider-observed live metrics",
+      "",
+      "| Strategy | Complete cases | Deterministic quality | Judge quality | Composite quality | Provider cases | Input tokens | Output tokens | Cache read | Cache write | Provider cost USD | Usage source | Cost source |",
+      "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|"
+    );
+    for (const name of STRATEGIES) {
+      const live = report.strategies[name].live;
+      if (!live) continue;
+      const provider = live.providerObserved;
+      const usage = provider.totalUsage;
+      lines.push(
+        `| ${name} | ${live.sampleSize} | ${decimal(live.quality.deterministic)} | ${decimal(live.quality.judge)} | ${decimal(live.quality.composite)} | ${provider.sampleSize} | ${usage?.inputTokens ?? "incomplete"} | ${usage?.outputTokens ?? "incomplete"} | ${usage?.cacheReadInputTokens ?? "incomplete"} | ${usage?.cacheWriteInputTokens ?? "incomplete"} | ${decimal(provider.totalCostUsd)} | ${provider.usageSource} | ${provider.costSource} |`
+      );
+    }
+  }
   lines.push("", "## Selections", "", "| Strategy | Session | Turn | Model | Via | Reason |", "|---|---|---|---|---|---|");
-  for (const name of ["router", "always-frontier", "always-cheap"] as const) {
+  for (const name of STRATEGIES) {
     for (const turn of report.strategies[name].turns) {
       lines.push(
         `| ${name} | ${markdownCell(turn.sessionId)} | ${markdownCell(turn.turnId)} | ${markdownCell(turn.modelId)} | ${markdownCell(turn.via)} | ${markdownCell(turn.reason)} |`

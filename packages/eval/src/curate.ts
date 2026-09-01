@@ -51,9 +51,10 @@ function parseLine(line: string, index: number): RecordedTurn {
 function evalTurn(record: RecordedTurn): EvalTurnV1 {
   const messages = record.messages === undefined ? undefined : (redactContent(record.messages) as EvalMessage[]);
   const output = record.output === undefined ? undefined : redactContent(record.output);
+  const sessionState = redactContent(record.sessionState) as EvalTurnV1["sessionState"];
   return {
     id: record.turnId,
-    sessionState: record.sessionState,
+    sessionState,
     usage: record.usage,
     ...(messages ? { messages } : {}),
     observed: {

@@ -99,6 +99,25 @@ export interface StrategyMetrics {
   incompleteReasons: string[];
 }
 
+export interface ProviderObservedMetrics {
+  usageSource: "provider";
+  costSource: "provider-usage-priced-from-dataset";
+  sampleSize: number;
+  totalUsage: EvalUsage | null;
+  totalCostUsd: number | null;
+  incompleteReasons: string[];
+}
+
+export interface LiveStrategyMetrics {
+  sampleSize: number;
+  quality: {
+    deterministic: number | null;
+    judge: number | null;
+    composite: number | null;
+  };
+  providerObserved: ProviderObservedMetrics;
+}
+
 export interface ReportGate {
   passed: boolean;
   reason: string;
@@ -107,6 +126,7 @@ export interface ReportGate {
 export interface StrategyReport {
   metrics: StrategyMetrics;
   turns: Array<Omit<ReplayTurnResult, "usage">>;
+  live?: LiveStrategyMetrics;
 }
 
 export interface EvalReportV1 {
