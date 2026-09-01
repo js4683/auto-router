@@ -30,6 +30,13 @@ policy, integration behavior, scope, or verification evidence changes.
 - Apply the selected target through the local OpenAI/Anthropic-compatible proxy.
 - Reconstruct conservative routing signals from normalized request messages, tool
   schemas, and tool-call history.
+- Replay versioned datasets against router, always-frontier, and always-cheap strategies.
+- Report deterministic cost, quality-proxy, switching, cache-impact, and completeness
+  evidence without provider access.
+- Support explicitly confirmed live generation and blinded judging without making live
+  calls a required local or CI gate.
+- Record proxy turns only through disabled-by-default metadata/content modes and require
+  manual privacy review after curation.
 - Keep unit, integration, build, deployment, and smoke-test evidence current.
 
 ### Out of scope
@@ -229,7 +236,25 @@ Supported strategies:
 - [x] Forward requests to OpenAI, OpenCode Zen, Gemini, or Anthropic backends.
 - [x] Translate text, tools, terminal states, and client-compatible response envelopes.
 - [x] Reconstruct request-derived context, tool, file, diff, and error signals.
-- [x] Stream translated and native upstream responses incrementally (Gemini chat completions and OpenAI Responses passthrough).
+- [x] Stream Gemini chat completions and native OpenAI Responses incrementally; request
+  buffered upstream JSON before synthesizing SSE for other cross-protocol translations.
+
+### 7. Eval harness
+
+- [x] Add a separate `packages/eval` workspace with versioned, bounded dataset schemas.
+- [x] Replay ordered sessions through router, always-frontier, and always-cheap using one
+  frozen catalog, price snapshot, capabilities, and context eligibility rules.
+- [x] Report deterministic cost, quality proxy, switch, cache-impact, completeness, and
+  gate evidence as stable JSON and escaped Markdown.
+- [x] Add bounded OpenAI-compatible live generation, deterministic checks, seeded blinded
+  judging, and bootstrap confidence intervals behind `--confirm-live`.
+- [x] Add opt-in proxy recording with header exclusion, redaction, serialized `0600`
+  writes, bounded output capture, retention pruning, and fail-open behavior.
+- [x] Add atomic recording curation with schema validation and a mandatory manual-review
+  warning.
+- [x] Add synthetic fixture/golden reports and mock-provider integration coverage.
+- [ ] Pass the external benchmark gate with at least 30 complete live cases, quality
+  retention `>= 0.95`, estimated cost savings `>= 0.50`, and a seeded interval.
 
 ## Acceptance Criteria
 
@@ -245,6 +270,12 @@ Supported strategies:
   actual runtime model.
 - Proxy routing uses the complete normalized request context rather than only the latest
   user message.
+- Offline eval reports are byte-for-byte deterministic for identical inputs and complete
+  all three strategies for every required fixture turn.
+- Live quality claims require at least 30 complete cases and cannot use offline catalog
+  quality proxies.
+- Proxy recording remains off by default, never records headers, and curated content is
+  not considered commit-safe without manual review.
 - Build and all tests pass.
 - Repository and installed global plugin behavior match.
 
@@ -264,6 +295,13 @@ Supported strategies:
 - **2026-08-31, proxy request state:** `npm run build && npm test` — 10 files,
   81 tests passed (56 core + 25 proxy).
 - **2026-08-31, proxy streaming:** `npm test` — 10 files, 84 tests passed (56 core + 28 proxy, including incremental Gemini and native Responses streaming); live smoke on :8791 with `openai/gpt-4o-mini` via OpenRouter — `stream:true` chat and responses both incremental (first chunk <50% total, e.g., 472 ms / 1071 ms).
+- **2026-08-31, Phase 3 eval harness:** `npm run build && npm test` passed 22 files
+  and 144 tests (53 eval + 35 proxy + 56 core); `npm audit --audit-level=high` found
+  zero vulnerabilities. Two offline replays matched each other and the checked-in
+  golden reports byte-for-byte: JSON SHA-256
+  `f495548071570fae90643fec44f62bcb55c028bc0236aea5efcedda33649943a`, Markdown
+  SHA-256 `4d57019c57331d1d40640362452dac518328e0b73690e4b485ab7ec3a4959f81`.
+  External benchmark acceptance remains unproven pending a complete 30-case live run.
 
 ## Decision Log
 
@@ -298,9 +336,22 @@ Supported strategies:
 - **2026-08-31:** Proxy `SessionState` uses the normalized message and tool payload for a
   conservative context estimate. Standard tool-call arguments provide tool-depth,
   file, patch-hunk, and prior-error hints; unavailable harness signals stay at zero.
-- **2026-08-31:** Proxy streams incrementally: Gemini `streamGenerateContent` with `alt=sse` and native OpenAI Responses are piped as upstream SSE arrives; other translated paths synthesize client-compatible events incrementally.
+- **2026-08-31:** Proxy streams Gemini Chat translation and native OpenAI Responses as
+  upstream SSE arrives. Cross-protocol paths without an incremental translator request
+  buffered upstream JSON before synthesizing the downstream event stream.
+- **2026-08-31:** Required eval validation is deterministic offline replay. Live
+  generation and blinded judging are opt-in and explicitly confirmed; only complete live
+  cases can support a quality-retention claim.
+- **2026-08-31:** All replay strategies share one frozen catalog, price snapshot,
+  capabilities, and context eligibility constraints. Always-cheap intentionally omits
+  router task-quality floors while still respecting hard eligibility.
+- **2026-08-31:** Proxy recording is disabled by default. Content mode is explicit,
+  local, bounded, redacted, access-restricted, retention-limited, and never considered
+  safe to commit without manual review.
 
 ## Supporting Documents
 
 - `design.md`: architecture rationale and selection model.
 - `roadmap.md`: broader project phases beyond the current change.
+- `docs/plans/2026-08-31-phase-3-eval-harness-design.md`: accepted eval architecture,
+  data contracts, trust boundaries, and acceptance gates.

@@ -1,6 +1,10 @@
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { IncomingMessage } from "node:http";
 import { Socket } from "node:net";
-import { describe, expect, it } from "vitest";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { createJsonlRecorder, type EvalRecordInput, type EvalRecorder } from "@auto-router/eval";
 import { selectModel, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
 import { createProxyServer } from "../src/server.js";
 import { memorySessions } from "../src/session.js";
@@ -81,10 +85,48 @@ function collectRes() {
     setHeader(name: string, value: string) {
       this.headers[name] = value;
     },
+    write(chunk: string | Buffer) {
+      body += String(chunk);
+    },
     end(chunk?: string | Buffer) {
       if (chunk) body += String(chunk);
     },
   };
+}
+
+function recordingServer(recorder: EvalRecorder, output = "Hello") {
+  return createProxyServer({
+    catalog,
+    config,
+    sessions: memorySessions(),
+    recorder,
+    backends: {
+      opencode: {
+        baseUrl: "https://opencode.ai/zen",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              id: "resp_1",
+              status: "completed",
+              output: [{ type: "message", content: [{ type: "output_text", text: output }] }],
+            }),
+            { headers: { "content-type": "application/json" } }
+          ),
+      },
+    },
+    select: () =>
+      ({
+        modelId: "opencode/muse-spark-1.2-contributor-free",
+        tier: "simple",
+        taskType: null,
+        confidence: 1,
+        reason: "fixture",
+        via: "force",
+        catalogSource: "live",
+        score: 0,
+        boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+      }) as never,
+  });
 }
 
 describe("proxy", () => {
@@ -632,6 +674,23 @@ describe("proxy", () => {
       res as never
     );
     expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
+  });
+
+  it("enables proxy recording only through explicit environment configuration", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
+    vi.stubEnv("AUTO_ROUTER_EVAL_RECORD_MODE", "metadata");
+    vi.stubEnv("AUTO_ROUTER_EVAL_RECORD_DIR", directory);
+    vi.stubEnv("AUTO_ROUTER_EVAL_RETENTION_DAYS", "7");
+    try {
+      const { bootstrapProxyOptions } = await import("../src/server.js");
+      const opts = bootstrapProxyOptions();
+
+      expect(opts.recorder?.mode).toBe("metadata");
+      await opts.recorder?.flush();
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("translates Chat Completions tools to Zen Responses and back", async () => {
@@ -1394,6 +1453,237 @@ describe("proxy", () => {
     expect(outboundZen).toHaveLength(1);
     expect(outboundZen[0].headers.authorization).toBeUndefined();
     expect(outboundZen[0].headers["x-api-key"]).toBeUndefined();
+  });
+
+  it("requests buffered Zen output when chat stream translation is unavailable", async () => {
+    let upstreamBody: any;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (_url, init) => {
+            upstreamBody = JSON.parse(String(init?.body));
+            return new Response(
+              JSON.stringify({
+                id: "resp_1",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "output_text", text: "Hello" }] }],
+              }),
+              { headers: { "content-type": "application/json" } }
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", {
+        model: "auto",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never
+    );
+
+    expect(upstreamBody.stream).toBe(false);
+    expect(res.body).toContain("data:");
+    expect(res.body).toContain("Hello");
+    expect(res.body).toContain("data: [DONE]");
+  });
+
+  it("records a completed proxy turn without exposing request headers", async () => {
+    const records: EvalRecordInput[] = [];
+    const server = recordingServer({
+      mode: "content",
+      async record(input) {
+        records.push(input);
+      },
+      async flush() {},
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq(
+        "/v1/chat/completions",
+        { model: "auto", messages: [{ role: "user", content: "hello" }] },
+        { authorization: "Bearer inbound-secret", "x-turn-id": "turn-recorded" }
+      ),
+      res as never
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ sessionId: "ses_test", turnId: "turn-recorded", status: "completed", usageSource: "estimated" });
+    expect(records[0].messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(records[0].output).toContain("Hello");
+    expect(JSON.stringify(records[0])).not.toContain("inbound-secret");
+    expect(records[0]).not.toHaveProperty("headers");
+  });
+
+  it("fails open when eval recording fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const server = recordingServer({
+      mode: "content",
+      async record() {
+        throw new Error("sensitive recorder failure");
+      },
+      async flush() {},
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hello" }] }),
+      res as never
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("Hello");
+    expect(warn).toHaveBeenCalledWith("[auto-router] eval recording failed");
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("sensitive recorder failure"));
+    warn.mockRestore();
+  });
+
+  it("bounds recorded response content and marks truncation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
+    const recorder = createJsonlRecorder({ mode: "content", directory, retentionDays: 30 });
+    const server = recordingServer(recorder, "x".repeat(1024 * 1024 + 1));
+    const res = collectRes();
+
+    try {
+      await server.handle(
+        fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hello" }] }),
+        res as never
+      );
+      await recorder.flush();
+      const line = JSON.parse(readFileSync(join(directory, readdirSync(directory)[0]), "utf8"));
+
+      expect(line.contentTruncated).toBe(true);
+      expect(Buffer.byteLength(String(line.output))).toBeLessThanOrEqual(512 * 1024);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requests buffered Gemini output when Anthropic stream translation is unavailable", async () => {
+    let upstreamUrl = "";
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-key",
+          fetchImpl: async (url) => {
+            upstreamUrl = String(url);
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Hello" }] } }] }), {
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3.6-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/messages", {
+        model: "auto",
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never
+    );
+
+    expect(upstreamUrl).toContain(":generateContent");
+    expect(upstreamUrl).not.toContain(":streamGenerateContent");
+    expect(res.body).toContain("event: content_block_delta");
+    expect(res.body).toContain("Hello");
+    expect(res.body).toContain("event: message_stop");
+  });
+
+  it("requests buffered Anthropic output when chat stream translation is unavailable", async () => {
+    let upstreamBody: any;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "anthropic-key",
+          fetchImpl: async (_url, init) => {
+            upstreamBody = JSON.parse(String(init?.body));
+            return new Response(
+              JSON.stringify({
+                id: "msg_1",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "Hello" }],
+                stop_reason: "end_turn",
+              }),
+              { headers: { "content-type": "application/json" } }
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", {
+        model: "auto",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never
+    );
+
+    expect(upstreamBody.stream).toBe(false);
+    expect(res.body).toContain("data:");
+    expect(res.body).toContain("Hello");
+    expect(res.body).toContain("data: [DONE]");
   });
 
   it("streams translated Gemini chat completions incrementally from upstream SSE", async () => {

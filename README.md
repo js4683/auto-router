@@ -71,14 +71,78 @@ The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Respon
 requests. It translates text and function calls across Zen's Responses API and
 Gemini's `generateContent` API, including client-compatible streaming envelopes.
 Gemini chat completions and native OpenAI Responses streams are forwarded
-incrementally as upstream chunks arrive; other translated paths synthesize
-client-compatible events incrementally.
+incrementally as upstream chunks arrive. Cross-protocol paths without an incremental
+translator request buffered upstream JSON, then synthesize a client-compatible event
+stream instead of attempting to parse upstream SSE as JSON.
 
 The proxy scores the first message of a task with Avengers-Pro fixture ranking when
 enabled, applies free-first / planning-quality overlays, then holds that target until
 a confirmed boundary. Routing state is reconstructed conservatively from normalized
 messages, tool schemas, and tool-call history so context size, tool depth, file/patch
 hints, and prior tool errors inform selection when the request exposes them.
+
+## Evaluation
+
+Run the required deterministic replay without provider credentials:
+
+```bash
+npm run eval -- replay \
+  --dataset packages/eval/fixtures/phase-3-smoke.v1.json \
+  --output phase-3.eval-report.local
+```
+
+The report compares `router`, `always-frontier`, and `always-cheap` against the same
+frozen catalog, prices, capabilities, and context constraints. JSON and Markdown output
+exclude recorded prompts and model responses.
+
+Live generation and blinded judging are optional and billable. Update the dataset's
+`liveModelAliases`, then explicitly confirm the run:
+
+```bash
+export AUTO_ROUTER_EVAL_BASE_URL="https://openrouter.ai/api/v1"
+export AUTO_ROUTER_EVAL_API_KEY="..."
+export AUTO_ROUTER_EVAL_JUDGE_MODEL="provider/judge-model"
+npm run eval -- live \
+  --dataset path/to/live-dataset.json \
+  --output phase-3-live.eval-report.local \
+  --confirm-live
+```
+
+Optional live limits are `AUTO_ROUTER_EVAL_TIMEOUT_MS` and
+`AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS`. The CLI prints planned generation and judge call
+counts before execution. Do not claim quality retention from offline catalog proxies.
+The benchmark gate requires at least 30 complete live cases, 95% router quality
+retention, 50% estimated cost savings, and a seeded bootstrap interval.
+
+### Recording and curation
+
+Proxy recording is off by default. `metadata` excludes request and response content;
+`content` adds bounded, automatically redacted content and therefore requires explicit
+opt-in:
+
+```bash
+AUTO_ROUTER_EVAL_RECORD_MODE=metadata npm start --workspace=@auto-router/proxy
+AUTO_ROUTER_EVAL_RECORD_MODE=content npm start --workspace=@auto-router/proxy
+```
+
+Records default to the ignored `.eval-recordings/` directory with `0600` file
+permissions and 30-day retention. Override these with
+`AUTO_ROUTER_EVAL_RECORD_DIR` and `AUTO_ROUTER_EVAL_RETENTION_DAYS`.
+Proxy-derived token usage is labeled `estimated`; only usage explicitly labeled
+`provider` contributes to the report's separate provider-observed cost.
+
+Curate JSON Lines into a validated dataset using an existing dataset as the frozen
+catalog, policy, price, and capability base:
+
+```bash
+npm run eval -- curate \
+  --input .eval-recordings/auto-router-eval-<timestamp>.jsonl \
+  --base-dataset packages/eval/fixtures/phase-3-smoke.v1.json \
+  --output curated.eval-dataset.local.json
+```
+
+Automatic redaction cannot guarantee anonymity. Manually review every curated file for
+credentials, personal data, and proprietary content before committing it.
 
 ## Docs
 
@@ -87,6 +151,7 @@ hints, and prior tool errors inform selection when the request exposes them.
 | [PLAN.md](./PLAN.md) | Canonical scope, implementation status, acceptance criteria, and decision log |
 | [design.md](./design.md) | Architecture, the two hard problems, classification tiers |
 | [roadmap.md](./roadmap.md) | Phased plan, effort, checklist |
+| [Phase 3 eval design](./docs/plans/2026-08-31-phase-3-eval-harness-design.md) | Accepted offline/live evaluation, recording, metrics, and trust-boundary design |
 
 ## Why this is a strong fit
 

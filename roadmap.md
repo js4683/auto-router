@@ -48,15 +48,23 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 - [x] Reconstruct conservative `SessionState` signals from request messages, tools, and
       tool-call history
 - [x] Forward to the chosen upstream model
-- [x] Stream translated and native upstream responses incrementally (Gemini chat completions and OpenAI Responses passthrough; other translated paths synthesize client-compatible events incrementally)
+- [x] Stream Gemini chat completions and native OpenAI Responses incrementally; request
+      buffered upstream JSON before synthesizing SSE for other cross-protocol translations
 - [x] Works with OpenCode, Claude Code, Codex, and other clients by setting `base_url`
 
 ## Phase 3 — eval
 
-- [ ] Record/replay real sessions
-- [ ] Metrics: cost saved, quality retained, switch count, cache-hit impact
-- [ ] Compare against always-frontier and always-cheap baselines
-- [ ] Bar: approach ~95% quality at a large cost cut (RouteLLM reference)
+- [x] Versioned offline replay with deterministic JSON and Markdown reports
+- [x] Metrics: estimated cost saved, quality components, switch count, and cache impact
+- [x] Compare against always-frontier and always-cheap with shared eligibility rules
+- [x] Opt-in proxy recording, redaction, retention, and manual-review curation flow
+- [x] Explicitly confirmed live generation with blinded judging and confidence intervals
+- [ ] Benchmark gate: at least 30 complete live cases, >=95% quality retention, >=50%
+      estimated cost savings, and a seeded bootstrap interval
+
+The implementation can ship with deterministic and mock-live verification while
+provider quota is unavailable. The live quality/cost bar remains unproven until the
+unchecked benchmark gate passes.
 
 ## Stretch
 

@@ -9,3 +9,7 @@ dist/
 .opencode/plugins/*.d.ts
 .DS_Store
 docs/superpowers/
+.eval-recordings/
+*.eval-report.local.json
+*.eval-report.local.md
+*.eval-dataset.local.json

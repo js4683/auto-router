@@ -1,16 +1,17 @@
 {
-  "name": "@auto-router/proxy",
+  "name": "@auto-router/eval",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "pretest": "npm run build --workspace=@auto-router/router-core && npm run build --workspace=@auto-router/eval",
+    "pretest": "npm run build --workspace=@auto-router/router-core",
     "test": "vitest run",
-    "start": "node dist/src/server.js"
+    "eval": "node dist/src/cli.js"
   },
   "dependencies": {
-    "@auto-router/eval": "*",
     "@auto-router/router-core": "*"
   },
   "devDependencies": {

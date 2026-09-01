@@ -14,6 +14,8 @@ import {
   type SelectionResult,
   type SessionState,
 } from "@auto-router/router-core";
+import type { EvalRecorder } from "@auto-router/eval";
+import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 
 export interface ProxyBackend {
@@ -29,6 +31,7 @@ export interface CreateProxyServerOptions {
   sessions: ProxySessionStore;
   backends: Record<string, ProxyBackend>;
   rankAvengers?: (text: string) => { paperIds: string[] };
+  recorder?: EvalRecorder;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -515,7 +518,7 @@ function upstreamRequest(
     return { body: { ...originalBody, model }, path: "/v1/responses", translateResponse: false, useGemini: false };
   }
   if (provider === "google") {
-    const isStream = !!normalizedBody.stream;
+    const isStream = !!normalizedBody.stream && protocol === "chat";
     const key = token ? `?key=${encodeURIComponent(token)}` : "";
     const alt = isStream ? (key ? "&alt=sse" : "?alt=sse") : "";
     const action = isStream ? "streamGenerateContent" : "generateContent";
@@ -526,13 +529,11 @@ function upstreamRequest(
     if (native) {
       return { body: { ...originalBody, model }, path: "/v1/messages", translateResponse: !native, useGemini: false };
     }
-    const body: any = anthropicRequest(normalizedBody, model);
-    if (normalizedBody.stream) body.stream = true;
+    const body: any = { ...anthropicRequest(normalizedBody, model), stream: false };
     return { body, path: "/v1/messages", translateResponse: !native, useGemini: false };
   }
   if (provider === "opencode") {
-    const body: any = zenRequest(normalizedBody, model);
-    if (normalizedBody.stream) body.stream = true;
+    const body: any = { ...zenRequest(normalizedBody, model), stream: false };
     return { body, path: "/v1/responses", translateResponse: true, useGemini: false };
   }
 
@@ -938,6 +939,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
   return {
     async handle(req, res) {
+      const startedAt = Date.now();
       const path = req.url?.split("?", 1)[0];
       if (path === "/health") {
         json(res, 200, { ok: true });
@@ -964,11 +966,26 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const normalizedBody = normalizeIngress(body, protocol);
       const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
+      const id = sessionId(req, text);
+      const state = sessionState(normalizedBody, text, !opts.sessions.get(id).taskTarget);
       const result = decide(req, normalizedBody, text);
 
       if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
         return;
+      }
+
+      if (opts.recorder && opts.recorder.mode !== "off") {
+        const headerTurnId = req.headers["x-turn-id"];
+        const turnId = typeof headerTurnId === "string" && headerTurnId ? headerTurnId : `${id}-${startedAt}`;
+        recordProxyResponse(res, opts.recorder, {
+          sessionId: id,
+          turnId,
+          startedAt,
+          selection: { modelId: result.modelId, via: result.via, reason: result.reason },
+          sessionState: state,
+          ...(Array.isArray(normalizedBody.messages) ? { messages: normalizedBody.messages } : {}),
+        });
       }
 
       const { provider, bareModel } = resolveProvider(result.modelId);
@@ -1105,7 +1122,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       else res.statusCode = upstream.status;
       res.end(payload);
     },
-    close() {},
+    close() {
+      void opts.recorder?.flush().catch(() => {
+        console.warn("[auto-router] eval recording flush failed");
+      });
+    },
   };
 }
 
@@ -1145,6 +1166,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
       },
     },
     rankAvengers,
+    recorder: createProxyRecorderFromEnv(),
   };
 }
 
