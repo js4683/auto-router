@@ -296,7 +296,7 @@ Supported strategies:
   81 tests passed (56 core + 25 proxy).
 - **2026-08-31, proxy streaming:** `npm test` — 10 files, 84 tests passed (56 core + 28 proxy, including incremental Gemini and native Responses streaming); live smoke on :8791 with `openai/gpt-4o-mini` via OpenRouter — `stream:true` chat and responses both incremental (first chunk <50% total, e.g., 472 ms / 1071 ms).
 - **2026-08-31, Phase 3 eval harness:** `npm run build && npm test` passed 22 files
-  and 144 tests (53 eval + 35 proxy + 56 core); `npm audit --audit-level=high` found
+  and 146 tests (55 eval + 35 proxy + 56 core); `npm audit --audit-level=high` found
   zero vulnerabilities. Two offline replays matched each other and the checked-in
   golden reports byte-for-byte: JSON SHA-256
   `f495548071570fae90643fec44f62bcb55c028bc0236aea5efcedda33649943a`, Markdown
