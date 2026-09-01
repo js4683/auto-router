@@ -12,10 +12,12 @@ interface RecordedTurn {
   status: "completed" | "incomplete" | "failed";
   selection: { modelId: string; via: string; reason: string };
   sessionState: EvalTurnV1["sessionState"];
+  requiredCapabilities: string[];
   usageSource: UsageSource;
   usage: EvalTurnV1["usage"];
   messages?: EvalMessage[];
   output?: unknown;
+  contentTruncated?: boolean;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -45,6 +47,12 @@ function parseLine(line: string, index: number): RecordedTurn {
     throw new Error(`recording line ${index} has invalid selection`);
   }
   if (!["provider", "estimated"].includes(String(value.usageSource))) throw new Error(`recording line ${index} has invalid usageSource`);
+  if (!Array.isArray(value.requiredCapabilities) || value.requiredCapabilities.some((item) => typeof item !== "string" || !item)) {
+    throw new Error(`recording line ${index} has invalid requiredCapabilities`);
+  }
+  if (value.contentTruncated !== undefined && typeof value.contentTruncated !== "boolean") {
+    throw new Error(`recording line ${index} has invalid contentTruncated`);
+  }
   return raw as RecordedTurn;
 }
 
@@ -56,6 +64,9 @@ function evalTurn(record: RecordedTurn): EvalTurnV1 {
     id: record.turnId,
     sessionState,
     usage: record.usage,
+    terminalState: record.status,
+    contentTruncated: record.contentTruncated ?? false,
+    requiredCapabilities: record.requiredCapabilities,
     ...(messages ? { messages } : {}),
     observed: {
       modelId: record.selection.modelId,
@@ -78,7 +89,11 @@ export function curateRecording(path: string, baseDataset: EvalDatasetV1): EvalD
     const key = `${record.sessionId}/${record.turnId}`;
     if (seen.has(key)) throw new Error(`duplicate recorded turn ${key}`);
     seen.add(key);
-    const session = sessions.get(record.sessionId) ?? { id: record.sessionId, turns: [] };
+    const existing = sessions.get(record.sessionId);
+    if (!existing && record.sessionState.isNewSession !== true) {
+      throw new Error(`recording session ${record.sessionId} must begin with isNewSession=true`);
+    }
+    const session = existing ?? { id: record.sessionId, turns: [] };
     session.turns.push(evalTurn(record));
     sessions.set(record.sessionId, session);
   });

@@ -274,6 +274,8 @@ Supported strategies:
   all three strategies for every required fixture turn.
 - Live quality claims require at least 30 complete cases and cannot use offline catalog
   quality proxies.
+- Recorded terminal state, truncation, and hard capabilities remain visible in replay;
+  incomplete or truncated records fail the completeness gate.
 - Proxy recording remains off by default, never records headers, and curated content is
   not considered commit-safe without manual review.
 - Build and all tests pass.

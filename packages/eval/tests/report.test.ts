@@ -61,4 +61,13 @@ describe("offline reports", () => {
     const estimatedReport = buildReplayReport(estimatedDataset, replayDataset(estimatedDataset));
     expect(estimatedReport.providerObserved).toMatchObject({ sampleSize: 0, totalCostUsd: null });
   });
+
+  it("fails the completeness gate for incomplete or truncated replay turns", () => {
+    const dataset = fixtureDataset([fixtureTurn({ terminalState: "failed", contentTruncated: true })]);
+    const report = buildReplayReport(dataset, replayDataset(dataset));
+
+    expect(report.gates.completeness).toMatchObject({ passed: false });
+    expect(report.gates.estimatedCost.passed).toBe(false);
+    expect(report.strategies.router.turns[0]).toMatchObject({ terminalState: "failed", contentTruncated: true });
+  });
 });

@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import {
@@ -14,10 +15,17 @@ export interface ProxyEvalRecordContext {
   startedAt: number;
   selection: EvalRecordInput["selection"];
   sessionState: EvalRecordInput["sessionState"];
+  requiredCapabilities: string[];
   messages?: EvalMessage[];
 }
 
 const MAX_RECORDED_RESPONSE_BYTES = 512 * 1024;
+const RECORDING_ID_SECRET = randomBytes(32);
+
+function opaqueRecordingId(kind: "session" | "turn", value: string): string {
+  const digest = createHmac("sha256", RECORDING_ID_SECRET).update(`${kind}\0${value}`).digest("hex");
+  return `${kind}-${digest}`;
+}
 
 function estimateTokens(text: string): number {
   return text ? Math.ceil(text.length / 4) : 0;
@@ -70,13 +78,14 @@ function tapResponse(res: ServerResponse, complete: (output: string, truncated: 
 export function recordProxyResponse(res: ServerResponse, recorder: EvalRecorder, context: ProxyEvalRecordContext): void {
   tapResponse(res, async (output, contentTruncated) => {
     await recorder.record({
-      sessionId: context.sessionId,
-      turnId: context.turnId,
+      sessionId: opaqueRecordingId("session", context.sessionId),
+      turnId: opaqueRecordingId("turn", context.turnId),
       recordedAt: new Date().toISOString(),
       durationMs: Math.max(0, Date.now() - context.startedAt),
       status: recordedStatus(res.statusCode, output),
       selection: context.selection,
       sessionState: context.sessionState,
+      requiredCapabilities: context.requiredCapabilities,
       usageSource: "estimated",
       usage: {
         inputTokens: context.sessionState.currentTask.taskTokens,

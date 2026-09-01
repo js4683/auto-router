@@ -18,6 +18,7 @@ function record(id: string): EvalRecordInput {
     sessionState: turn.sessionState,
     usageSource: "estimated",
     usage: turn.usage,
+    requiredCapabilities: ["text"],
     messages: [{ role: "user", content: "Bearer token-value" }],
     output: "key sk-ant-api-value",
   };
@@ -70,6 +71,7 @@ describe("JSONL recorder", () => {
     expect(metadataLine.messages).toBeUndefined();
     expect(metadataLine.output).toBeUndefined();
     expect(metadataLine.usageSource).toBe("estimated");
+    expect(metadataLine.requiredCapabilities).toEqual(["text"]);
     expect(metadataLine.sessionState.currentTask.lastUserMessage).toBe("[REDACTED]");
     expect(metadataLine.sessionState.currentTask.promptTokens).toBe(20);
     expect(metadataLine.sessionState.currentTask.taskTokens).toBe(1000);

@@ -38,6 +38,10 @@ function optionalBoolean(value: unknown, label: string): void {
   if (value !== undefined && typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
 }
 
+function stringArray(value: unknown, label: string): void {
+  for (const item of array(value, label)) string(item, `${label} item`);
+}
+
 function usage(value: unknown): EvalUsage {
   const item = record(value, "usage");
   const parsed = {
@@ -185,13 +189,15 @@ function validateTurn(value: unknown, seen: Set<string>): void {
   seen.add(id);
   validateSessionState(turn.sessionState);
   usage(turn.usage);
+  if (!["completed", "incomplete", "failed"].includes(String(turn.terminalState))) throw new Error("turn.terminalState is invalid");
+  boolean(turn.contentTruncated, "turn.contentTruncated");
   optionalString(turn.prevAgent, "turn.prevAgent");
   optionalString(turn.prevMessage, "turn.prevMessage");
   optionalString(turn.judgeRubric, "turn.judgeRubric");
   if (turn.weight !== undefined) nonNegative(turn.weight, "turn.weight");
   if (turn.messages !== undefined) validateMessages(turn.messages);
   if (turn.checks !== undefined) validateChecks(turn.checks);
-  if (turn.requiredCapabilities !== undefined) for (const item of array(turn.requiredCapabilities, "requiredCapabilities")) string(item, "capability");
+  stringArray(turn.requiredCapabilities, "requiredCapabilities");
   if (turn.observed !== undefined) {
     const observed = record(turn.observed, "observed");
     string(observed.modelId, "observed.modelId");

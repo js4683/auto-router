@@ -132,6 +132,8 @@
             "cacheWriteInputTokens": 600
           },
           "requiredCapabilities": ["tools"],
+          "terminalState": "completed",
+          "contentTruncated": false,
           "checks": [{ "type": "includes", "expected": ["passed"] }],
           "judgeRubric": "The answer accurately reports the supplied verification result.",
           "weight": 1
@@ -165,6 +167,8 @@
             "cacheWriteInputTokens": 2000
           },
           "requiredCapabilities": ["text"],
+          "terminalState": "completed",
+          "contentTruncated": false,
           "judgeRubric": "The plan identifies failure modes and explains concrete trade-offs.",
           "weight": 2
         }
@@ -197,6 +201,8 @@
             "cacheWriteInputTokens": 1000
           },
           "requiredCapabilities": ["tools"],
+          "terminalState": "completed",
+          "contentTruncated": false,
           "checks": [{ "type": "recorded-outcome", "passed": true }],
           "judgeRubric": "The implementation response is direct and complete.",
           "weight": 1
@@ -229,6 +235,8 @@
             "cacheWriteInputTokens": 0
           },
           "requiredCapabilities": ["tools"],
+          "terminalState": "completed",
+          "contentTruncated": false,
           "checks": [{ "type": "recorded-outcome", "passed": true }],
           "judgeRubric": "The response adds a focused test without changing unrelated behavior.",
           "weight": 1

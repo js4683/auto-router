@@ -1,10 +1,14 @@
 {
   "comparisons": {
     "routerCostSavedVsFrontier": 0.5556805399325084,
-    "routerQualityProxyRetainedVsFrontier": 0.7631578947368421
+    "routerQualityProxyRetainedVsFrontier": 0.8105263157894738
   },
   "datasetId": "phase-3-smoke",
   "gates": {
+    "completeness": {
+      "passed": true,
+      "reason": "all replay turns are complete"
+    },
     "estimatedCost": {
       "passed": true,
       "reason": "router cost savings 55.57%"
@@ -38,43 +42,55 @@
       "turns": [
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "lowest eligible blended price",
           "sessionId": "verification-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "verification-1",
-          "via": "always-cheap"
+          "via": "always-cheap",
+          "weight": 1
         },
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "lowest eligible blended price",
           "sessionId": "planning-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "planning-1",
-          "via": "always-cheap"
+          "via": "always-cheap",
+          "weight": 2
         },
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "lowest eligible blended price",
           "sessionId": "implementation-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "implementation-1",
-          "via": "always-cheap"
+          "via": "always-cheap",
+          "weight": 1
         },
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "lowest eligible blended price",
           "sessionId": "implementation-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "implementation-2",
-          "via": "always-cheap"
+          "via": "always-cheap",
+          "weight": 1
         }
       ]
     },
@@ -91,43 +107,55 @@
       "turns": [
         {
           "codingIndex": 95,
+          "contentTruncated": false,
           "modelId": "fixture/frontier",
           "reason": "highest eligible coding index",
           "sessionId": "verification-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "verification-1",
-          "via": "always-frontier"
+          "via": "always-frontier",
+          "weight": 1
         },
         {
           "codingIndex": 95,
+          "contentTruncated": false,
           "modelId": "fixture/frontier",
           "reason": "highest eligible coding index",
           "sessionId": "planning-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "planning-1",
-          "via": "always-frontier"
+          "via": "always-frontier",
+          "weight": 2
         },
         {
           "codingIndex": 95,
+          "contentTruncated": false,
           "modelId": "fixture/frontier",
           "reason": "highest eligible coding index",
           "sessionId": "implementation-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "implementation-1",
-          "via": "always-frontier"
+          "via": "always-frontier",
+          "weight": 1
         },
         {
           "codingIndex": 95,
+          "contentTruncated": false,
           "modelId": "fixture/frontier",
           "reason": "highest eligible coding index",
           "sessionId": "implementation-session",
           "taskType": null,
+          "terminalState": "completed",
           "tier": null,
           "turnId": "implementation-2",
-          "via": "always-frontier"
+          "via": "always-frontier",
+          "weight": 1
         }
       ]
     },
@@ -137,50 +165,62 @@
         "cacheReadTokens": 2200,
         "incompleteReasons": [],
         "isEstimated": true,
-        "qualityProxy": 0.725,
+        "qualityProxy": 0.77,
         "switchCount": 0,
         "totalCostUsd": 0.0632
       },
       "turns": [
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "free-first free for tier simple",
           "sessionId": "verification-session",
           "taskType": "run_tests",
+          "terminalState": "completed",
           "tier": "simple",
           "turnId": "verification-1",
-          "via": "free-first"
+          "via": "free-first",
+          "weight": 1
         },
         {
           "codingIndex": 95,
+          "contentTruncated": false,
           "modelId": "fixture/frontier",
           "reason": "quality frontier for tier medium",
           "sessionId": "planning-session",
           "taskType": "planning",
+          "terminalState": "completed",
           "tier": "medium",
           "turnId": "planning-1",
-          "via": "quality"
+          "via": "quality",
+          "weight": 2
         },
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "free-first free for tier simple",
           "sessionId": "implementation-session",
           "taskType": "implement",
+          "terminalState": "completed",
           "tier": "simple",
           "turnId": "implementation-1",
-          "via": "free-first"
+          "via": "free-first",
+          "weight": 1
         },
         {
           "codingIndex": 65,
+          "contentTruncated": false,
           "modelId": "fixture/free",
           "reason": "free-first free for tier simple",
           "sessionId": "implementation-session",
           "taskType": "implement",
+          "terminalState": "completed",
           "tier": "simple",
           "turnId": "implementation-2",
-          "via": "free-first"
+          "via": "free-first",
+          "weight": 1
         }
       ]
     }

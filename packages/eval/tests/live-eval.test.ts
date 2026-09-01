@@ -11,6 +11,13 @@ function response(content: string, status = 200): Response {
   );
 }
 
+function responseWithFinishReason(content: string, finishReason: string): Response {
+  return new Response(
+    JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: finishReason }], usage: { prompt_tokens: 100, completion_tokens: 20 } }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
 function liveFixture() {
   const dataset = fixtureDataset([
     fixtureTurn({
@@ -130,6 +137,44 @@ describe("live evaluation orchestration", () => {
     expect(calls).toBe(3);
     expect(result.cases[0].complete).toBe(false);
     expect(result.cases[0].errors.join("\n")).toContain("always-frontier: provider returned HTTP 503");
+    expect(result.qualityGate.sampleSize).toBe(0);
+  });
+
+  it("does not count a generated incomplete terminal state as a complete case", async () => {
+    const dataset = liveFixture();
+    const replay = replayDataset(dataset);
+    let judgeCalls = 0;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "live/judge") {
+        judgeCalls += 1;
+        return response(JSON.stringify({ scores: { A: 90, B: 90, C: 90 } }));
+      }
+      if (body.model === "live/cheap") return responseWithFinishReason("partial", "length");
+      return response(`${body.model}-answer`);
+    };
+
+    const result = await runLiveEvaluation(dataset, replay, config, fetchImpl);
+
+    expect(judgeCalls).toBe(0);
+    expect(result.cases[0]).toMatchObject({ complete: false });
+    expect(result.cases[0].errors).toContain("router: generated output terminal state is incomplete");
+    expect(result.qualityGate.sampleSize).toBe(0);
+  });
+
+  it("does not count a non-completed judge terminal state as a complete case", async () => {
+    const dataset = liveFixture();
+    const replay = replayDataset(dataset);
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "live/judge") return responseWithFinishReason(JSON.stringify({ scores: { A: 90, B: 90, C: 90 } }), "length");
+      return response(`${body.model}-answer`);
+    };
+
+    const result = await runLiveEvaluation(dataset, replay, config, fetchImpl);
+
+    expect(result.cases[0]).toMatchObject({ complete: false });
+    expect(result.cases[0].errors).toContain("judge: judge response terminal state is incomplete");
     expect(result.qualityGate.sampleSize).toBe(0);
   });
 

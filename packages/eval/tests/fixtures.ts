@@ -18,6 +18,9 @@ export function fixtureTurn(overrides: Partial<EvalTurnV1> = {}): EvalTurnV1 {
     },
     messages: [{ role: "user", content: "Implement the fixture" }],
     usage: { inputTokens: 1000, outputTokens: 100, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+    terminalState: "completed",
+    contentTruncated: false,
+    requiredCapabilities: ["text"],
     ...overrides,
   };
 }
@@ -76,8 +79,8 @@ export function fixtureDataset(turns: EvalTurnV1[] = [fixtureTurn()]): EvalDatas
       "provider/frontier": { inputPerMillion: 10, outputPerMillion: 30, cacheReadPerMillion: 1, cacheWritePerMillion: 12.5 },
     },
     capabilities: {
-      "provider/cheap": ["tools"],
-      "provider/frontier": ["tools"],
+      "provider/cheap": ["text", "tools"],
+      "provider/frontier": ["text", "tools"],
     },
     sessions: [{ id: "session-1", turns }],
   };

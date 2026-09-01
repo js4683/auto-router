@@ -53,6 +53,19 @@ describe("requestCompletion", () => {
     }
   });
 
+  it("preserves non-completed provider terminal states", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "partial" }, finish_reason: "length" }] }));
+
+    const result = await requestCompletion(
+      { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
+      config("https://example.com/v1"),
+      fetchImpl
+    );
+
+    expect(result.terminalState).toBe("incomplete");
+  });
+
   it("does not retry provider failures or expose credentials", async () => {
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {

@@ -19,6 +19,7 @@ function recording(sessionId: string, turnId: string) {
     sessionState: turn.sessionState,
     usageSource: "estimated",
     usage: turn.usage,
+    requiredCapabilities: ["text"],
     messages: [{ role: "user", content: "Bearer private-token" }],
     output: "completed",
   };
@@ -40,7 +41,34 @@ describe("curateRecording", () => {
     expect(dataset.sessions.map((session) => session.id)).toEqual(["session-1", "session-2"]);
     expect(dataset.sessions[0].turns.map((turn) => turn.id)).toEqual(["turn-1", "turn-2"]);
     expect(JSON.stringify(dataset)).not.toContain("private-token");
+    expect(dataset.sessions[0].turns[0]).toMatchObject({
+      terminalState: "completed",
+      contentTruncated: false,
+      requiredCapabilities: ["text"],
+    });
     expect(dataset.sessions[0].turns[0].observed).toMatchObject({ modelId: "provider/cheap", usageSource: "estimated", output: "completed" });
+  });
+
+  it("preserves failed and truncated terminal metadata and rejects partial sessions", () => {
+    const failed = {
+      ...recording("session-1", "turn-1"),
+      status: "failed",
+      contentTruncated: true,
+      requiredCapabilities: ["text", "tools"],
+    };
+    const dataset = curateRecording(writeLines([failed]), fixtureDataset());
+    expect(dataset.sessions[0].turns[0]).toMatchObject({
+      terminalState: "failed",
+      contentTruncated: true,
+      requiredCapabilities: ["text", "tools"],
+    });
+
+    expect(() =>
+      curateRecording(
+        writeLines([{ ...recording("session-2", "turn-1"), sessionState: { ...fixtureTurn().sessionState, isNewSession: false } }]),
+        fixtureDataset()
+      )
+    ).toThrow("must begin with isNewSession=true");
   });
 
   it("redacts credentials in retained session state while preserving routing numbers", () => {

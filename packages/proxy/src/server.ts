@@ -550,6 +550,17 @@ function sessionId(req: IncomingMessage, text: string): string {
   return String(req.headers["x-session-id"] ?? req.headers["x-opencode-session"] ?? text.slice(0, 64) ?? "global");
 }
 
+function requiredCapabilities(body: any): string[] {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const declaredTools = Array.isArray(body?.tools) && body.tools.length > 0;
+  const toolMessages = messages.some(
+    (message: any) =>
+      message?.role === "tool" ||
+      (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0)
+  );
+  return ["text", ...(declaredTools || toolMessages ? ["tools"] : [])];
+}
+
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
@@ -984,6 +995,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           startedAt,
           selection: { modelId: result.modelId, via: result.via, reason: result.reason },
           sessionState: state,
+          requiredCapabilities: requiredCapabilities(normalizedBody),
           ...(Array.isArray(normalizedBody.messages) ? { messages: normalizedBody.messages } : {}),
         });
       }

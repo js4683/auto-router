@@ -58,11 +58,16 @@ const config: RouterConfig = {
   },
 };
 
-function fakeReq(url: string, body: unknown, headers: Record<string, string> = {}): IncomingMessage {
+function fakeReq(url: string, body: unknown, headers: Record<string, string | undefined> = {}): IncomingMessage {
   const req = new IncomingMessage(new Socket());
   req.method = "POST";
   req.url = url;
-  req.headers = { "content-type": "application/json", "x-session-id": "ses_test", ...headers };
+  const requestHeaders: Record<string, string> = { "content-type": "application/json", "x-session-id": "ses_test" };
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) delete requestHeaders[name];
+    else requestHeaders[name] = value;
+  }
+  req.headers = requestHeaders;
   queueMicrotask(() => {
     req.emit("data", Buffer.from(JSON.stringify(body)));
     req.emit("end");
@@ -1529,11 +1534,49 @@ describe("proxy", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ sessionId: "ses_test", turnId: "turn-recorded", status: "completed", usageSource: "estimated" });
+    expect(records[0]).toMatchObject({ status: "completed", usageSource: "estimated", requiredCapabilities: ["text"] });
+    expect(records[0].sessionId).toMatch(/^session-[0-9a-f]{64}$/);
+    expect(records[0].turnId).toMatch(/^turn-[0-9a-f]{64}$/);
+    expect(records[0].sessionId).not.toBe("ses_test");
+    expect(records[0].turnId).not.toBe("turn-recorded");
     expect(records[0].messages).toEqual([{ role: "user", content: "hello" }]);
     expect(records[0].output).toContain("Hello");
     expect(JSON.stringify(records[0])).not.toContain("inbound-secret");
     expect(records[0]).not.toHaveProperty("headers");
+  });
+
+  it("records opaque IDs and hard capabilities without session headers", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
+    const recorder = createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30 });
+    const server = recordingServer(recorder);
+    const res = collectRes();
+    const prompt = "reset password using sk-ant-super-secret-value";
+
+    try {
+      await server.handle(
+        fakeReq(
+          "/v1/chat/completions",
+          {
+            model: "auto",
+            messages: [{ role: "user", content: prompt }],
+            tools: [{ type: "function", function: { name: "reset_password", parameters: { type: "object" } } }],
+          },
+          { "x-session-id": undefined, "x-turn-id": undefined }
+        ),
+        res as never
+      );
+      await recorder.flush();
+      const line = readFileSync(join(directory, readdirSync(directory)[0]), "utf8");
+      const record = JSON.parse(line);
+
+      expect(record.sessionId).toMatch(/^session-[0-9a-f]{64}$/);
+      expect(record.turnId).toMatch(/^turn-[0-9a-f]{64}$/);
+      expect(record.requiredCapabilities).toEqual(["text", "tools"]);
+      expect(line).not.toContain(prompt);
+      expect(line).not.toContain("super-secret-value");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("fails open when eval recording fails", async () => {

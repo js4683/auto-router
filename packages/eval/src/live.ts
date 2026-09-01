@@ -105,6 +105,12 @@ function parseUsage(value: any): EvalUsage | undefined {
   return parsed;
 }
 
+function outputTerminalState(payload: any, finishReason: unknown): LiveOutput["terminalState"] {
+  if (payload?.status === "failed" || payload?.status === "cancelled" || finishReason === "content_filter") return "failed";
+  if (["incomplete", "in_progress", "queued"].includes(String(payload?.status)) || finishReason === "length") return "incomplete";
+  return "completed";
+}
+
 function parseOutput(raw: string): LiveOutput {
   let payload: any;
   try {
@@ -124,7 +130,7 @@ function parseOutput(raw: string): LiveOutput {
   return {
     text: typeof message.content === "string" ? message.content : "",
     toolCalls,
-    terminalState: finishReason === "length" ? "incomplete" : finishReason === "content_filter" ? "failed" : "completed",
+    terminalState: outputTerminalState(payload, finishReason),
     ...(usage ? { usage } : {}),
   };
 }
@@ -191,6 +197,7 @@ export async function judgeOutputs(
     config,
     fetchImpl
   );
+  if (judged.terminalState !== "completed") throw new Error(`judge response terminal state is ${judged.terminalState}`);
   const scores = parseJudgeScores(judged.text, labels);
   const result = {} as Record<StrategyName, number>;
   for (const label of labels) result[mapping[label]] = scores[label] / 100;
@@ -299,6 +306,10 @@ async function generateCase(
     StrategyName,
     LiveOutput
   >;
+  const terminalErrors = STRATEGIES.flatMap((strategy) =>
+    outputs[strategy].terminalState === "completed" ? [] : [`${strategy}: generated output terminal state is ${outputs[strategy].terminalState}`]
+  );
+  if (terminalErrors.length) return { ...base, complete: false, errors: terminalErrors };
   let judged: Record<StrategyName, number>;
   try {
     judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl);

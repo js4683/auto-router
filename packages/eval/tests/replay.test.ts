@@ -47,10 +47,24 @@ describe("replayDataset", () => {
       },
     });
     const dataset = fixtureDataset([first, constrainedFollowUp]);
-    dataset.capabilities = { "provider/cheap": [], "provider/frontier": ["tools"] };
+    dataset.capabilities = { "provider/cheap": ["text"], "provider/frontier": ["text", "tools"] };
 
     const result = replayDataset(dataset);
 
     expect(result.strategies.router.turns.map((turn) => turn.modelId)).toEqual(["provider/cheap", "provider/frontier"]);
+    expect(result.strategies.router.turns[0]).toMatchObject({ weight: 1, terminalState: "completed", contentTruncated: false });
+  });
+
+  it("exposes incomplete recorded turns to every strategy", () => {
+    const result = replayDataset(fixtureDataset([fixtureTurn({ terminalState: "incomplete", contentTruncated: true, weight: 2 })]));
+
+    expect(result.strategies.router.turns[0]).toMatchObject({ terminalState: "incomplete", contentTruncated: true, weight: 2 });
+    expect(result.strategies.router.incompleteReasons).toEqual(
+      expect.arrayContaining([
+        "recorded turn session-1/turn-1 has terminal state incomplete",
+        "recorded turn session-1/turn-1 has truncated content",
+      ])
+    );
+    expect(result.strategies["always-frontier"].incompleteReasons).toEqual(expect.arrayContaining(result.strategies.router.incompleteReasons));
   });
 });

@@ -3,6 +3,7 @@ import type { Catalog, RouterConfig, SelectionResult, SessionState, TaskType, Ti
 export const EVAL_SCHEMA_VERSION = 1 as const;
 
 export type StrategyName = "router" | "always-frontier" | "always-cheap";
+export type EvalTerminalState = "completed" | "incomplete" | "failed";
 
 export interface EvalUsage {
   inputTokens: number;
@@ -25,7 +26,7 @@ export type DeterministicCheck =
   | { type: "includes"; expected: string[] }
   | { type: "json-equals"; expected: unknown }
   | { type: "tool-call"; name: string; arguments?: Record<string, unknown> }
-  | { type: "terminal-state"; expected: "completed" | "incomplete" | "failed" }
+  | { type: "terminal-state"; expected: EvalTerminalState }
   | { type: "recorded-outcome"; passed: boolean };
 
 export interface EvalMessage {
@@ -41,8 +42,10 @@ export interface EvalTurnV1 {
   prevMessage?: string;
   messages?: EvalMessage[];
   usage: EvalUsage;
+  terminalState: EvalTerminalState;
+  contentTruncated: boolean;
   observed?: { modelId: string; usageSource: UsageSource; usage: EvalUsage; output?: unknown };
-  requiredCapabilities?: string[];
+  requiredCapabilities: string[];
   checks?: DeterministicCheck[];
   judgeRubric?: string;
   weight?: number;
@@ -77,6 +80,9 @@ export interface ReplayTurnResult {
   reason: string;
   codingIndex: number;
   usage: EvalUsage;
+  weight: number;
+  terminalState: EvalTerminalState;
+  contentTruncated: boolean;
 }
 
 export interface StrategyReplayResult {
@@ -145,6 +151,7 @@ export interface EvalReportV1 {
     routerQualityProxyRetainedVsFrontier: number | null;
   };
   gates: {
+    completeness: ReportGate;
     liveQuality: ReportGate;
     estimatedCost: ReportGate;
   };
@@ -159,7 +166,7 @@ export interface LiveToolCall {
 export interface LiveOutput {
   text: string;
   toolCalls: LiveToolCall[];
-  terminalState: "completed" | "incomplete" | "failed";
+  terminalState: EvalTerminalState;
   usage?: EvalUsage;
 }
 
@@ -225,6 +232,7 @@ export interface EvalRecordInput {
   status: "completed" | "incomplete" | "failed";
   selection: { modelId: string; via: string; reason: string };
   sessionState: SessionState;
+  requiredCapabilities: string[];
   usageSource: UsageSource;
   usage: EvalUsage;
   messages?: EvalMessage[];

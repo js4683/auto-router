@@ -65,6 +65,7 @@ function persistedInput(input: EvalRecordInput, mode: Exclude<RecordingMode, "of
     status: input.status,
     selection: input.selection,
     sessionState: mode === "metadata" ? metadataSessionState(input.sessionState) : input.sessionState,
+    requiredCapabilities: input.requiredCapabilities,
     usageSource: input.usageSource,
     usage: input.usage,
     ...(input.contentTruncated ? { contentTruncated: true } : {}),

@@ -38,6 +38,14 @@ export function calculateStrategyMetrics(result: StrategyReplayResult, prices: R
   const incompleteReasons = [...result.incompleteReasons];
 
   for (const turn of result.turns) {
+    if (turn.terminalState !== "completed") {
+      const reason = `recorded turn ${turn.sessionId}/${turn.turnId} has terminal state ${turn.terminalState}`;
+      if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+    }
+    if (turn.contentTruncated) {
+      const reason = `recorded turn ${turn.sessionId}/${turn.turnId} has truncated content`;
+      if (!incompleteReasons.includes(reason)) incompleteReasons.push(reason);
+    }
     const sameSession = previousSession === turn.sessionId;
     const hasReusablePrefix = sameSession && previousModel === turn.modelId;
     if (sameSession && previousModel !== turn.modelId) switchCount += 1;
@@ -51,13 +59,17 @@ export function calculateStrategyMetrics(result: StrategyReplayResult, prices: R
     previousModel = turn.modelId;
   }
 
+  const hasIncompleteTurn = result.turns.some((turn) => turn.terminalState !== "completed" || turn.contentTruncated);
+
   return {
     isEstimated: true,
     totalCostUsd: incompleteReasons.length ? null : totalCostUsd,
     switchCount,
     cacheReadTokens,
     cacheMissTokens,
-    qualityProxy: weightedMean(result.turns.map((turn) => ({ score: turn.codingIndex / 100, weight: 1 }))),
+    qualityProxy: hasIncompleteTurn
+      ? null
+      : rounded(weightedMean(result.turns.map((turn) => ({ score: turn.codingIndex / 100, weight: turn.weight })))),
     incompleteReasons,
   };
 }
@@ -70,6 +82,10 @@ export function weightedMean(values: Array<{ score: number; weight: number }>): 
   const totalWeight = values.reduce((total, value) => total + value.weight, 0);
   if (totalWeight === 0) return null;
   return values.reduce((total, value) => total + value.score * value.weight, 0) / totalWeight;
+}
+
+function rounded(value: number | null): number | null {
+  return value === null ? null : Number(value.toFixed(12));
 }
 
 export function qualityRetained(routerQuality: number, frontierQuality: number): number | null {

@@ -18,7 +18,7 @@ describe("baseline strategies", () => {
       id: "alpha",
       runtimeId: "provider/alpha",
     });
-    dataset.capabilities!["provider/alpha"] = ["tools"];
+    dataset.capabilities!["provider/alpha"] = ["text", "tools"];
     const originalOrder = dataset.catalog.models.map((model) => model.id);
 
     expect(selectCheap(dataset, fixtureTurn()).runtimeId).toBe("provider/alpha");

@@ -113,6 +113,8 @@ Optional live limits are `AUTO_ROUTER_EVAL_TIMEOUT_MS` and
 counts before execution. Do not claim quality retention from offline catalog proxies.
 The benchmark gate requires at least 30 complete live cases, 95% router quality
 retention, 50% estimated cost savings, and a seeded bootstrap interval.
+Replay reports expose recorded terminal state and truncation; incomplete records fail
+the completeness gate and cannot support cost or quality comparisons.
 
 ### Recording and curation
 
@@ -128,6 +130,9 @@ AUTO_ROUTER_EVAL_RECORD_MODE=content npm start --workspace=@auto-router/proxy
 Records default to the ignored `.eval-recordings/` directory with `0600` file
 permissions and 30-day retention. Override these with
 `AUTO_ROUTER_EVAL_RECORD_DIR` and `AUTO_ROUTER_EVAL_RETENTION_DAYS`.
+Persisted session and turn IDs are opaque process-local digests, including when callers
+provide IDs or omit them. Metadata mode retains routing numbers and a fixed prompt
+placeholder, never raw prompt text.
 Proxy-derived token usage is labeled `estimated`; only usage explicitly labeled
 `provider` contributes to the report's separate provider-observed cost.
 

@@ -87,6 +87,9 @@ Each session contains ordered turns. Each turn has:
 - The prior agent and prior message inputs needed by boundary detection.
 - Optional recorded messages for live replay.
 - Optional observed model and token usage.
+- Required terminal state and content-truncation metadata for recorded turns.
+- Required hard capabilities derived from the normalized request (`text`, plus `tools`
+  when tools or tool calls are present).
 - Optional deterministic quality checks and a judge rubric.
 - An optional non-negative case weight, defaulting to one.
 
@@ -132,6 +135,7 @@ The machine-readable report includes:
 - Switch counts and cache-impact estimates.
 - Failed, skipped, incomplete, and excluded cases with reasons.
 - Aggregate metrics, sample size, and confidence intervals where applicable.
+- A completeness gate that fails for failed, incomplete, or truncated replay turns.
 - Gate results and the thresholds used to calculate them.
 
 The Markdown report is a deterministic presentation of the JSON report. Raw prompts and
@@ -157,9 +161,12 @@ The `curate` command validates and redacts a recording into the dataset shape. I
 not imply that the output is safe to commit. Only manually reviewed curated fixtures may
 enter version control.
 
-Records use JSON Lines with one completed turn per line. Writes are serialized within a
-proxy process so concurrent requests cannot interleave bytes. An interrupted session may
-lose its active turn but preserves completed turns.
+Records use JSON Lines with one turn per line. Writes are serialized within a proxy
+process so concurrent requests cannot interleave bytes. Persisted session and turn IDs
+are opaque HMAC digests using a process-local secret; caller IDs and prompt-derived
+fallbacks are never stored. An interrupted session may lose its active turn but
+preserves completed turns. Curation rejects a session whose first recorded turn is not
+explicitly marked as a new session.
 
 Recorded usage carries an explicit `provider` or `estimated` source. Proxy token counts
 are estimates unless a provider usage envelope is captured; estimated recording usage
@@ -252,6 +259,9 @@ Live mode requires `--confirm-live`, applies request timeouts and output-token l
 and prints the planned case/model call count before execution. A timed-out request is not
 automatically retried because its billing outcome is unknown. Provider failures remain
 visible as failed cases rather than being replaced with synthetic output.
+
+Every generated response and blinded judge response must have a completed terminal
+state before the live case is complete or contributes to the 30-case quality gate.
 
 The live runner sends recorded transcript context but does not execute tools. Recorded
 tool calls and results may remain in the transcript as context.

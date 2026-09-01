@@ -7,7 +7,7 @@ import {
   qualityRetained,
   weightedMean,
 } from "../src/metrics.js";
-import type { StrategyReplayResult } from "../src/types.js";
+import type { ReplayTurnResult, StrategyReplayResult } from "../src/types.js";
 
 describe("cost metrics", () => {
   it("charges uncached input, output, cache reads, and cache writes separately", () => {
@@ -61,6 +61,30 @@ describe("cost metrics", () => {
     expect(metrics.totalCostUsd).toBeNull();
     expect(metrics.incompleteReasons).toEqual(["missing price for model missing"]);
   });
+
+  it("uses replay weights and excludes incomplete turns from quality", () => {
+    const weighted: StrategyReplayResult = {
+      name: "router",
+      incompleteReasons: [],
+      turns: [
+        turn("session-1", "turn-1", "provider/cheap", { codingIndex: 100, weight: 1 }),
+        turn("session-1", "turn-2", "provider/cheap", { codingIndex: 0, weight: 3 }),
+      ],
+    };
+    const prices = {
+      "provider/cheap": { inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 0.1, cacheWritePerMillion: 1.25 },
+    };
+    expect(calculateStrategyMetrics(weighted, prices).qualityProxy).toBe(0.25);
+
+    const incomplete: StrategyReplayResult = {
+      ...weighted,
+      turns: [turn("session-1", "turn-1", "provider/cheap", { terminalState: "failed" })],
+    };
+    const metrics = calculateStrategyMetrics(incomplete, prices);
+    expect(metrics.qualityProxy).toBeNull();
+    expect(metrics.totalCostUsd).toBeNull();
+    expect(metrics.incompleteReasons).toContain("recorded turn session-1/turn-1 has terminal state failed");
+  });
 });
 
 describe("quality metrics", () => {
@@ -78,7 +102,7 @@ describe("quality metrics", () => {
   });
 });
 
-function turn(sessionId: string, turnId: string, modelId: string) {
+function turn(sessionId: string, turnId: string, modelId: string, overrides: Partial<ReplayTurnResult> = {}): ReplayTurnResult {
   return {
     sessionId,
     turnId,
@@ -88,6 +112,10 @@ function turn(sessionId: string, turnId: string, modelId: string) {
     via: "value" as const,
     reason: "fixture",
     codingIndex: 70,
+    weight: 1,
+    terminalState: "completed",
+    contentTruncated: false,
     usage: { inputTokens: 1000, outputTokens: 100, cacheReadInputTokens: 400, cacheWriteInputTokens: 0 },
+    ...overrides,
   };
 }

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
-import { fixtureDataset } from "./fixtures.js";
+import { fixtureDataset, fixtureTurn } from "./fixtures.js";
 
 function io(fetchImpl?: typeof fetch) {
   const stdout: string[] = [];
@@ -59,6 +59,20 @@ describe("eval CLI", () => {
     const incomplete = io();
     expect(await runCli(["replay", "--dataset", incompletePath], incomplete.value)).toBe(1);
     expect(incomplete.stderr.join("\n")).toContain("missing price for model");
+  });
+
+  it("writes replay evidence when terminal metadata fails completeness", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-eval-"));
+    const datasetPath = join(directory, "incomplete.json");
+    const outputPath = join(directory, "report");
+    writeFileSync(datasetPath, JSON.stringify(fixtureDataset([fixtureTurn({ terminalState: "incomplete", contentTruncated: true })])));
+    const output = io();
+
+    expect(await runCli(["replay", "--dataset", datasetPath, "--output", outputPath], output.value)).toBe(1);
+    const report = JSON.parse(readFileSync(`${outputPath}.json`, "utf8"));
+    expect(report.gates.completeness).toMatchObject({ passed: false });
+    expect(report.strategies.router.turns[0]).toMatchObject({ terminalState: "incomplete", contentTruncated: true });
+    expect(output.stderr.join("\n")).toContain("terminal state incomplete");
   });
 
   it("requires confirmation and environment credentials before live calls", async () => {
@@ -162,6 +176,7 @@ describe("eval CLI", () => {
         sessionState: base.sessions[0].turns[0].sessionState,
         usageSource: "estimated",
         usage: base.sessions[0].turns[0].usage,
+        requiredCapabilities: ["text"],
         messages: [{ role: "user", content: "hello" }],
       })}\n`
     );

@@ -5,7 +5,7 @@ Provider-observed cost: incomplete (0 turns).
 
 | Strategy | Estimated cost USD | Quality proxy | Switches | Cache misses |
 |---|---:|---:|---:|---:|
-| router | 0.063200 | 0.725000 | 0 | 0 |
+| router | 0.063200 | 0.770000 | 0 | 0 |
 | always-frontier | 0.142240 | 0.950000 | 0 | 0 |
 | always-cheap | 0.000000 | 0.650000 | 0 | 0 |
 
@@ -28,5 +28,6 @@ Provider-observed cost: incomplete (0 turns).
 
 ## Gates
 
+- Completeness: passed (all replay turns are complete)
 - Live quality: not passed (live quality is unproven by offline replay)
 - Estimated cost: passed (router cost savings 55.57%)

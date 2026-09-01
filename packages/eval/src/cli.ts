@@ -64,7 +64,12 @@ function runReplay(parsed: ParsedArgs, io: CliIo): number {
   const outputPath = parsed.values["--output"] ?? `${datasetPath}.eval-report.local`;
   const dataset = readDataset(datasetPath);
   const report = buildReplayReport(dataset, replayDataset(dataset));
-  assertComplete(report);
+  try {
+    assertComplete(report);
+  } catch (error) {
+    if (!report.gates.completeness.passed) writeReport(outputPath, report, io);
+    throw error;
+  }
   writeReport(outputPath, report, io);
   return 0;
 }

@@ -27,7 +27,21 @@ function baselineTurn(sessionId: string, turn: EvalTurnV1, model: ModelEntry, st
     reason: strategy === "always-frontier" ? "highest eligible coding index" : "lowest eligible blended price",
     codingIndex: model.codingIndex,
     usage: turn.usage,
+    weight: turn.weight ?? 1,
+    terminalState: turn.terminalState,
+    contentTruncated: turn.contentTruncated,
   };
+}
+
+function turnCompletenessReasons(sessionId: string, turn: EvalTurnV1): string[] {
+  return [
+    ...(turn.terminalState === "completed" ? [] : [`recorded turn ${sessionId}/${turn.id} has terminal state ${turn.terminalState}`]),
+    ...(turn.contentTruncated ? [`recorded turn ${sessionId}/${turn.id} has truncated content`] : []),
+  ];
+}
+
+function addIncompleteReasons(result: StrategyReplayResult, reasons: string[]): void {
+  for (const reason of reasons) if (!result.incompleteReasons.includes(reason)) result.incompleteReasons.push(reason);
 }
 
 function emptyResult(): ReplayResult {
@@ -55,6 +69,8 @@ export function replayDataset(dataset: EvalDatasetV1): ReplayResult {
     let previousAgent: string | undefined;
     let previousMessage: string | undefined;
     for (const turn of session.turns) {
+      const completenessReasons = turnCompletenessReasons(session.id, turn);
+      for (const strategy of Object.values(replay.strategies)) addIncompleteReasons(strategy, completenessReasons);
       const eligible = eligibleModels(dataset, turn);
       if (!eligible.length) throw new Error(`no eligible model for turn ${turn.id}`);
       const eligibleIds = new Set(eligible.flatMap((model) => [model.id, modelRuntimeId(model)]));
@@ -80,6 +96,9 @@ export function replayDataset(dataset: EvalDatasetV1): ReplayResult {
         reason: selection.reason,
         codingIndex: model.codingIndex,
         usage: turn.usage,
+        weight: turn.weight ?? 1,
+        terminalState: turn.terminalState,
+        contentTruncated: turn.contentTruncated,
       });
       state = advanceRouterState(selectionState, selection);
       previousAgent = turn.sessionState.activeAgent;
