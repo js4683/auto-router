@@ -13,6 +13,7 @@ export interface ProxyEvalRecordContext {
   sessionId: string;
   turnId: string;
   startedAt: number;
+  protocol: "chat" | "anthropic" | "responses";
   selection: EvalRecordInput["selection"];
   sessionState: EvalRecordInput["sessionState"];
   requiredCapabilities: string[];
@@ -31,13 +32,62 @@ function estimateTokens(text: string): number {
   return text ? Math.ceil(text.length / 4) : 0;
 }
 
-function recordedStatus(statusCode: number, output: string): EvalRecordInput["status"] {
-  if (statusCode >= 400) return "failed";
+function objectPayload(value: unknown): Record<string, any> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, any>) : undefined;
+}
+
+function responsePayloads(output: string): Record<string, any>[] {
   try {
-    if (JSON.parse(output)?.status === "incomplete") return "incomplete";
+    const payload = objectPayload(JSON.parse(output));
+    if (payload) return [payload];
   } catch {}
-  if (output.includes('"response.incomplete"') || output.includes('"finish_reason":"length"')) return "incomplete";
-  return "completed";
+
+  const payloads: Record<string, any>[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.trimStart().startsWith("data:")) continue;
+    const data = line.slice(line.indexOf(":") + 1).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const payload = objectPayload(JSON.parse(data));
+      if (payload) payloads.push(payload);
+    } catch {}
+  }
+  return payloads;
+}
+
+function terminalStatus(protocol: ProxyEvalRecordContext["protocol"], payload: Record<string, any>): EvalRecordInput["status"] | undefined {
+  if (protocol === "chat") {
+    const finishReason = payload.choices?.[0]?.finish_reason;
+    if (finishReason === "length") return "incomplete";
+    if (finishReason === "content_filter") return "failed";
+    if (finishReason === "stop" || finishReason === "tool_calls") return "completed";
+    return undefined;
+  }
+  if (protocol === "anthropic") {
+    const stopReason = payload.stop_reason ?? payload.delta?.stop_reason ?? payload.message?.stop_reason;
+    if (stopReason === "max_tokens") return "incomplete";
+    if (stopReason === "refusal") return "failed";
+    if (stopReason === "end_turn" || stopReason === "stop_sequence" || stopReason === "tool_use") return "completed";
+    return undefined;
+  }
+
+  const status = payload.status ?? payload.response?.status;
+  if (status === "completed") return "completed";
+  if (status === "incomplete" || status === "in_progress" || status === "queued") return "incomplete";
+  if (status === "failed" || status === "cancelled") return "failed";
+  if (payload.type === "response.completed") return "completed";
+  if (payload.type === "response.incomplete") return "incomplete";
+  if (payload.type === "response.failed") return "failed";
+  return undefined;
+}
+
+function recordedStatus(statusCode: number, output: string, protocol: ProxyEvalRecordContext["protocol"]): EvalRecordInput["status"] {
+  if (statusCode >= 400) return "failed";
+  const statuses = responsePayloads(output).flatMap((payload) => {
+    const status = terminalStatus(protocol, payload);
+    return status ? [status] : [];
+  });
+  return statuses[statuses.length - 1] ?? "incomplete";
 }
 
 function tapResponse(res: ServerResponse, complete: (output: string, truncated: boolean) => Promise<void>): void {
@@ -82,7 +132,7 @@ export function recordProxyResponse(res: ServerResponse, recorder: EvalRecorder,
       turnId: opaqueRecordingId("turn", context.turnId),
       recordedAt: new Date().toISOString(),
       durationMs: Math.max(0, Date.now() - context.startedAt),
-      status: recordedStatus(res.statusCode, output),
+      status: recordedStatus(res.statusCode, output, context.protocol),
       selection: context.selection,
       sessionState: context.sessionState,
       requiredCapabilities: context.requiredCapabilities,

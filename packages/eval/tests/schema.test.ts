@@ -120,4 +120,26 @@ describe("parseDataset", () => {
   it("allows missing prices for incomplete-metric reporting", () => {
     expect(parseDataset({ ...validDataset(), prices: {} }).prices).toEqual({});
   });
+
+  it("rejects malformed task-type policy fields", () => {
+    const base = validDataset();
+    expect(() =>
+      parseDataset({
+        ...base,
+        config: { ...base.config, taskTypeModels: { implement: { prefer: 42 } } },
+      })
+    ).toThrow("config.taskTypeModels.implement.prefer must be a non-empty string");
+    expect(() =>
+      parseDataset({
+        ...base,
+        config: { ...base.config, taskTypeModels: { implement: { prefer: null, strategy: "bogus" } } },
+      })
+    ).toThrow("config.taskTypeModels.implement.strategy is invalid");
+    expect(() =>
+      parseDataset({
+        ...base,
+        config: { ...base.config, taskTypeModels: { implement: { prefer: null, minQuality: "not-a-number" } } },
+      })
+    ).toThrow("config.taskTypeModels.implement.minQuality must be non-negative");
+  });
 });

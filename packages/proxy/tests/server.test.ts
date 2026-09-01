@@ -1545,6 +1545,84 @@ describe("proxy", () => {
     expect(records[0]).not.toHaveProperty("headers");
   });
 
+  it("records a 200 Anthropic max-token response as incomplete", async () => {
+    const records: EvalRecordInput[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      recorder: { mode: "metadata", record: async (input) => records.push(input), flush: async () => {} },
+      backends: {
+        anthropic: {
+          baseUrl: "https://anthropic.test",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "msg_partial",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "partial" }],
+                stop_reason: "max_tokens",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            ),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(fakeReq("/v1/messages", { model: "auto", messages: [{ role: "user", content: "hello" }] }), collectRes() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(records).toHaveLength(1);
+    expect(records[0].status).toBe("incomplete");
+  });
+
+  it("records a 200 Responses failed status as failed", async () => {
+    const records: EvalRecordInput[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      recorder: { mode: "metadata", record: async (input) => records.push(input), flush: async () => {} },
+      backends: {
+        openai: {
+          baseUrl: "https://openai.test",
+          fetchImpl: async () => new Response(JSON.stringify({ id: "resp_failed", status: "failed", output: [] }), { status: 200 }),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/model",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(fakeReq("/v1/responses", { model: "auto", input: "hello" }), collectRes() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(records).toHaveLength(1);
+    expect(records[0].status).toBe("failed");
+  });
+
   it("records opaque IDs and hard capabilities without session headers", async () => {
     const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
     const recorder = createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30 });

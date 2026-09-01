@@ -993,6 +993,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           sessionId: id,
           turnId,
           startedAt,
+          protocol,
           selection: { modelId: result.modelId, via: result.via, reason: result.reason },
           sessionState: state,
           requiredCapabilities: requiredCapabilities(normalizedBody),

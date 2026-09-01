@@ -109,6 +109,18 @@ function validateScorer(value: unknown): void {
   nonNegative(thresholds.mediumMax, "config.scorer.thresholds.mediumMax");
 }
 
+function validateTaskTypeModels(value: unknown): void {
+  for (const [taskType, raw] of Object.entries(record(value, "config.taskTypeModels"))) {
+    const policy = record(raw, `config.taskTypeModels.${taskType}`);
+    if (!("prefer" in policy) || policy.prefer === undefined) throw new Error(`config.taskTypeModels.${taskType}.prefer is required`);
+    if (policy.prefer !== null) string(policy.prefer, `config.taskTypeModels.${taskType}.prefer`);
+    if (policy.strategy !== undefined && !["value", "lowest-cost", "quality"].includes(String(policy.strategy))) {
+      throw new Error(`config.taskTypeModels.${taskType}.strategy is invalid`);
+    }
+    if (policy.minQuality !== undefined) nonNegative(policy.minQuality, `config.taskTypeModels.${taskType}.minQuality`);
+  }
+}
+
 function validateStringMap(value: unknown, label: string, valuesAreArrays = false): void {
   for (const [key, entry] of Object.entries(record(value, label))) {
     string(key, `${label} key`);
@@ -130,7 +142,7 @@ function validateConfig(value: unknown): void {
   boolean(stickiness.upgradeImmediate, "config.stickiness.upgradeImmediate");
   const guards = record(config.guards, "config.guards");
   nonNegative(guards.contextFitMarginTokens, "config.guards.contextFitMarginTokens");
-  record(config.taskTypeModels, "config.taskTypeModels");
+  validateTaskTypeModels(config.taskTypeModels);
   for (const item of array(config.providerFreeSet, "config.providerFreeSet")) string(item, "config.providerFreeSet item");
   validateStringMap(config.windowRegistry, "config.windowRegistry");
   const catalog = record(config.catalog, "config.catalog");

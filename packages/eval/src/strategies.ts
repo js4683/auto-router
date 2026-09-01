@@ -5,14 +5,19 @@ export function modelRuntimeId(model: ModelEntry): string {
   return model.runtimeId ?? model.id;
 }
 
-export function eligibleModels(dataset: EvalDatasetV1, turn: EvalTurnV1): ModelEntry[] {
+export function capabilityEligibleModels(dataset: EvalDatasetV1, turn: EvalTurnV1): ModelEntry[] {
   const required = turn.requiredCapabilities ?? [];
-  const margin = dataset.config.guards.contextFitMarginTokens;
   return dataset.catalog.models.filter((model) => {
-    if (turn.sessionState.lifetimeTokens + margin > model.windowTokens) return false;
     const capabilities = dataset.capabilities?.[modelRuntimeId(model)] ?? dataset.capabilities?.[model.id] ?? [];
     return required.every((capability) => capabilities.includes(capability));
   });
+}
+
+export function eligibleModels(dataset: EvalDatasetV1, turn: EvalTurnV1): ModelEntry[] {
+  const margin = dataset.config.guards.contextFitMarginTokens;
+  return capabilityEligibleModels(dataset, turn).filter(
+    (model) => turn.sessionState.lifetimeTokens + margin <= model.windowTokens
+  );
 }
 
 function requireEligible(dataset: EvalDatasetV1, turn: EvalTurnV1): ModelEntry[] {

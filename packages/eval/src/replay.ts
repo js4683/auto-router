@@ -1,5 +1,5 @@
 import { selectModel, type ModelEntry, type RouterState, type SelectionResult } from "@auto-router/router-core";
-import { eligibleModels, modelRuntimeId, selectCheap, selectFrontier } from "./strategies.js";
+import { capabilityEligibleModels, eligibleModels, modelRuntimeId, selectCheap, selectFrontier } from "./strategies.js";
 import type { EvalDatasetV1, EvalTurnV1, ReplayResult, ReplayTurnResult, StrategyReplayResult } from "./types.js";
 
 export function advanceRouterState(state: RouterState, result: SelectionResult): RouterState {
@@ -73,13 +73,14 @@ export function replayDataset(dataset: EvalDatasetV1): ReplayResult {
       for (const strategy of Object.values(replay.strategies)) addIncompleteReasons(strategy, completenessReasons);
       const eligible = eligibleModels(dataset, turn);
       if (!eligible.length) throw new Error(`no eligible model for turn ${turn.id}`);
-      const eligibleIds = new Set(eligible.flatMap((model) => [model.id, modelRuntimeId(model)]));
+      const capabilityEligible = capabilityEligibleModels(dataset, turn);
+      const eligibleIds = new Set(capabilityEligible.flatMap((model) => [model.id, modelRuntimeId(model)]));
       const selectionState = state.currentModel && !eligibleIds.has(state.currentModel)
         ? { currentModel: null, currentTier: null, downgradeCounter: 0 }
         : state;
       const selection = selectModel(
         turn.sessionState,
-        { ...dataset.catalog, models: eligible.map((model) => ({ ...model })) },
+        { ...dataset.catalog, models: capabilityEligible.map((model) => ({ ...model })) },
         dataset.config,
         selectionState,
         turn.prevAgent ?? previousAgent,

@@ -82,8 +82,11 @@ function parseArguments(value: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function usageToken(value: unknown, label: string): number {
-  if (value === undefined) return 0;
+function usageToken(value: unknown, label: string, required = false): number {
+  if (value === undefined) {
+    if (required) throw new Error(`provider usage ${label} is required`);
+    return 0;
+  }
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error(`provider usage ${label} must be non-negative`);
   }
@@ -94,8 +97,8 @@ function parseUsage(value: any): EvalUsage | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("provider usage must be an object");
   const parsed = {
-    inputTokens: usageToken(value.prompt_tokens, "prompt_tokens"),
-    outputTokens: usageToken(value.completion_tokens, "completion_tokens"),
+    inputTokens: usageToken(value.prompt_tokens, "prompt_tokens", true),
+    outputTokens: usageToken(value.completion_tokens, "completion_tokens", true),
     cacheReadInputTokens: usageToken(value.prompt_tokens_details?.cached_tokens, "cached_tokens"),
     cacheWriteInputTokens: usageToken(value.prompt_tokens_details?.cache_creation_tokens, "cache_creation_tokens"),
   };

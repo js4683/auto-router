@@ -55,6 +55,39 @@ describe("replayDataset", () => {
     expect(result.strategies.router.turns[0]).toMatchObject({ weight: 1, terminalState: "completed", contentTruncated: false });
   });
 
+  it("lets the context-fit guard own a downgrade when the cheap model no longer fits", () => {
+    const dataset = fixtureDataset();
+    dataset.config.stickiness.downgradeAfter = 1;
+    dataset.catalog.models.push({
+      id: "alternate",
+      runtimeId: "provider/alternate",
+      codingIndex: 65,
+      blendedPrice: 5,
+      value: 13,
+      windowTokens: 256000,
+      isFree: false,
+    });
+    dataset.capabilities!["provider/alternate"] = ["text", "tools"];
+    const first = fixtureTurn({
+      id: "turn-1",
+      sessionState: { ...fixtureTurn().sessionState, forceTier: "complex" },
+    });
+    const downgrade = fixtureTurn({
+      id: "turn-2",
+      sessionState: {
+        ...first.sessionState,
+        lifetimeTokens: 200000,
+        isNewSession: false,
+        isCompacted: true,
+        forceTier: "simple",
+      },
+    });
+
+    const result = replayDataset({ ...dataset, sessions: [{ id: "session-1", turns: [first, downgrade] }] });
+
+    expect(result.strategies.router.turns[1]).toMatchObject({ modelId: "provider/frontier", via: "context-fit-block" });
+  });
+
   it("exposes incomplete recorded turns to every strategy", () => {
     const result = replayDataset(fixtureDataset([fixtureTurn({ terminalState: "incomplete", contentTruncated: true, weight: 2 })]));
 

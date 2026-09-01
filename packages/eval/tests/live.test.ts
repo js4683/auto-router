@@ -66,6 +66,15 @@ describe("requestCompletion", () => {
     expect(result.terminalState).toBe("incomplete");
   });
 
+  it("rejects provider usage envelopes missing completion tokens", async () => {
+    const partialUsage: typeof fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "partial" } }], usage: { prompt_tokens: 100 } }));
+
+    await expect(
+      requestCompletion({ model: "provider/model", messages: [{ role: "user", content: "hi" }] }, config("https://example.com/v1"), partialUsage)
+    ).rejects.toThrow("provider usage completion_tokens is required");
+  });
+
   it("does not retry provider failures or expose credentials", async () => {
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {

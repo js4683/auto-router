@@ -41,15 +41,22 @@ function providerObserved(dataset: EvalDatasetV1): EvalReportV1["providerObserve
   return { sampleSize, totalCostUsd: incompleteReasons.length ? null : totalCostUsd, incompleteReasons };
 }
 
-function replayCompleteness(replay: ReplayResult): EvalReportV1["gates"]["completeness"] {
+function replayCompleteness(
+  replay: ReplayResult,
+  strategies: Record<StrategyName, StrategyReport>
+): EvalReportV1["gates"]["completeness"] {
   const reasons = [
     ...new Set(
-      Object.values(replay.strategies).flatMap((strategy) =>
-        strategy.turns.flatMap((turn) => [
-          ...(turn.terminalState === "completed" ? [] : [`recorded turn ${turn.sessionId}/${turn.turnId} has terminal state ${turn.terminalState}`]),
-          ...(turn.contentTruncated ? [`recorded turn ${turn.sessionId}/${turn.turnId} has truncated content`] : []),
-        ])
-      )
+      [
+        ...Object.values(replay.strategies).flatMap((strategy) => strategy.incompleteReasons),
+        ...Object.values(strategies).flatMap((strategy) => strategy.metrics.incompleteReasons),
+        ...Object.values(replay.strategies).flatMap((strategy) =>
+          strategy.turns.flatMap((turn) => [
+            ...(turn.terminalState === "completed" ? [] : [`recorded turn ${turn.sessionId}/${turn.turnId} has terminal state ${turn.terminalState}`]),
+            ...(turn.contentTruncated ? [`recorded turn ${turn.sessionId}/${turn.turnId} has truncated content`] : []),
+          ])
+        ),
+      ]
     ),
   ];
   return { passed: reasons.length === 0, reason: reasons.length ? reasons.join("; ") : "all replay turns are complete" };
@@ -66,7 +73,7 @@ export function buildReplayReport(dataset: EvalDatasetV1, replay: ReplayResult):
     strategies.router.metrics.qualityProxy === null || strategies["always-frontier"].metrics.qualityProxy === null
       ? null
       : qualityRetained(strategies.router.metrics.qualityProxy, strategies["always-frontier"].metrics.qualityProxy);
-  const completeness = replayCompleteness(replay);
+  const completeness = replayCompleteness(replay, strategies);
   return {
     schemaVersion: 1,
     datasetId: dataset.id,

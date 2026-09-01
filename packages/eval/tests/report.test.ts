@@ -70,4 +70,15 @@ describe("offline reports", () => {
     expect(report.gates.estimatedCost.passed).toBe(false);
     expect(report.strategies.router.turns[0]).toMatchObject({ terminalState: "failed", contentTruncated: true });
   });
+
+  it("fails comparison gates when any strategy metric is incomplete", () => {
+    const dataset = fixtureDataset();
+    delete dataset.prices["provider/cheap"];
+    const report = buildReplayReport(dataset, replayDataset(dataset));
+
+    expect(report.strategies["always-cheap"].metrics.totalCostUsd).toBeNull();
+    expect(report.gates.completeness).toMatchObject({ passed: false });
+    expect(report.gates.completeness.reason).toContain("missing price for model provider/cheap");
+    expect(report.gates.estimatedCost.passed).toBe(false);
+  });
 });
