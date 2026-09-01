@@ -1,4 +1,4 @@
-import { selectModel, type ModelEntry, type RouterState, type SelectionResult } from "@auto-router/router-core";
+import { classify, selectModel, tierRank, type ModelEntry, type RouterState, type SelectionResult } from "@auto-router/router-core";
 import { capabilityEligibleModels, eligibleModels, modelRuntimeId, selectCheap, selectFrontier } from "./strategies.js";
 import type { EvalDatasetV1, EvalTurnV1, ReplayResult, ReplayTurnResult, StrategyReplayResult } from "./types.js";
 
@@ -74,13 +74,16 @@ export function replayDataset(dataset: EvalDatasetV1): ReplayResult {
       const eligible = eligibleModels(dataset, turn);
       if (!eligible.length) throw new Error(`no eligible model for turn ${turn.id}`);
       const capabilityEligible = capabilityEligibleModels(dataset, turn);
-      const eligibleIds = new Set(capabilityEligible.flatMap((model) => [model.id, modelRuntimeId(model)]));
+      const eligibleIds = new Set(eligible.flatMap((model) => [model.id, modelRuntimeId(model)]));
       const selectionState = state.currentModel && !eligibleIds.has(state.currentModel)
         ? { currentModel: null, currentTier: null, downgradeCounter: 0 }
         : state;
+      const requestedTier = classify(turn.sessionState, dataset.config).tier;
+      const isDowngrade = selectionState.currentTier !== null && tierRank(requestedTier) < tierRank(selectionState.currentTier);
+      const routerModels = isDowngrade ? capabilityEligible : eligible;
       const selection = selectModel(
         turn.sessionState,
-        { ...dataset.catalog, models: capabilityEligible.map((model) => ({ ...model })) },
+        { ...dataset.catalog, models: routerModels.map((model) => ({ ...model })) },
         dataset.config,
         selectionState,
         turn.prevAgent ?? previousAgent,

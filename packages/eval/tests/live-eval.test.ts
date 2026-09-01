@@ -6,7 +6,7 @@ import { fixtureDataset, fixtureTurn } from "./fixtures.js";
 
 function response(content: string, status = 200): Response {
   return new Response(
-    JSON.stringify({ choices: [{ message: { role: "assistant", content } }], usage: { prompt_tokens: 100, completion_tokens: 20 } }),
+    JSON.stringify({ choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 20 } }),
     { status, headers: { "content-type": "application/json" } }
   );
 }
@@ -103,7 +103,10 @@ describe("live evaluation orchestration", () => {
         return response(JSON.stringify({ scores }));
       }
       if (body.model === "live/cheap") {
-        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "cheap" } }] }), { status: 200 });
+        return new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "cheap" }, finish_reason: "stop" }] }),
+          { status: 200 }
+        );
       }
       return response(`${body.model}-answer`);
     };

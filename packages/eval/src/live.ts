@@ -111,7 +111,8 @@ function parseUsage(value: any): EvalUsage | undefined {
 function outputTerminalState(payload: any, finishReason: unknown): LiveOutput["terminalState"] {
   if (payload?.status === "failed" || payload?.status === "cancelled" || finishReason === "content_filter") return "failed";
   if (["incomplete", "in_progress", "queued"].includes(String(payload?.status)) || finishReason === "length") return "incomplete";
-  return "completed";
+  if (payload?.status === "completed" || ["stop", "tool_calls", "function_call"].includes(String(finishReason))) return "completed";
+  return "incomplete";
 }
 
 function parseOutput(raw: string): LiveOutput {

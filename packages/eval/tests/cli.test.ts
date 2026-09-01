@@ -110,7 +110,7 @@ describe("eval CLI", () => {
       calls += 1;
       const body = JSON.parse(String(init?.body));
       const content = body.model === "live/judge" ? JSON.stringify({ scores: { A: 90, B: 90, C: 90 } }) : "provider answer";
-      return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+      return new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] }));
     };
     const output = io(fetchImpl);
     output.value.env = {

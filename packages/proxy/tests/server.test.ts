@@ -1551,7 +1551,13 @@ describe("proxy", () => {
       catalog,
       config,
       sessions: memorySessions(),
-      recorder: { mode: "metadata", record: async (input) => records.push(input), flush: async () => {} },
+      recorder: {
+        mode: "metadata",
+        record: async (input) => {
+          records.push(input);
+        },
+        flush: async () => {},
+      },
       backends: {
         anthropic: {
           baseUrl: "https://anthropic.test",
@@ -1595,7 +1601,13 @@ describe("proxy", () => {
       catalog,
       config,
       sessions: memorySessions(),
-      recorder: { mode: "metadata", record: async (input) => records.push(input), flush: async () => {} },
+      recorder: {
+        mode: "metadata",
+        record: async (input) => {
+          records.push(input);
+        },
+        flush: async () => {},
+      },
       backends: {
         openai: {
           baseUrl: "https://openai.test",

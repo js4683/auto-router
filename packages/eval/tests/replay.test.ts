@@ -88,6 +88,33 @@ describe("replayDataset", () => {
     expect(result.strategies.router.turns[1]).toMatchObject({ modelId: "provider/frontier", via: "context-fit-block" });
   });
 
+  it("excludes context-ineligible models from an initial selection", () => {
+    const turn = fixtureTurn({
+      sessionState: { ...fixtureTurn().sessionState, lifetimeTokens: 200000 },
+    });
+
+    const result = replayDataset(fixtureDataset([turn]));
+
+    expect(result.strategies.router.turns[0].modelId).toBe("provider/frontier");
+  });
+
+  it("reselects when the current model no longer fits on a same-tier boundary", () => {
+    const first = fixtureTurn({ id: "turn-1" });
+    const second = fixtureTurn({
+      id: "turn-2",
+      sessionState: {
+        ...first.sessionState,
+        lifetimeTokens: 200000,
+        isNewSession: false,
+        isCompacted: true,
+      },
+    });
+
+    const result = replayDataset(fixtureDataset([first, second]));
+
+    expect(result.strategies.router.turns[1].modelId).toBe("provider/frontier");
+  });
+
   it("exposes incomplete recorded turns to every strategy", () => {
     const result = replayDataset(fixtureDataset([fixtureTurn({ terminalState: "incomplete", contentTruncated: true, weight: 2 })]));
 

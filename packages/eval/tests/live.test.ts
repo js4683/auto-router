@@ -24,7 +24,7 @@ function config(baseUrl: string): LiveClientConfig {
 
 function chatResponse(content: string): string {
   return JSON.stringify({
-    choices: [{ message: { role: "assistant", content } }],
+    choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }],
     usage: { prompt_tokens: 10, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 2 } },
   });
 }
@@ -61,6 +61,19 @@ describe("requestCompletion", () => {
       { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
       config("https://example.com/v1"),
       fetchImpl
+    );
+
+    expect(result.terminalState).toBe("incomplete");
+  });
+
+  it("marks responses without terminal metadata incomplete", async () => {
+    const missingTerminalState: typeof fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "unconfirmed" } }] }));
+
+    const result = await requestCompletion(
+      { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
+      config("https://example.com/v1"),
+      missingTerminalState
     );
 
     expect(result.terminalState).toBe("incomplete");

@@ -11,6 +11,21 @@ export interface JsonlRecorderOptions {
 }
 
 const REDACTED_PROMPT = "[REDACTED]";
+const CREDENTIAL_KEYS = new Set([
+  "apikey",
+  "apitoken",
+  "xapikey",
+  "token",
+  "accesstoken",
+  "refreshtoken",
+  "authtoken",
+  "authorization",
+  "password",
+  "secret",
+  "clientsecret",
+  "secretaccesskey",
+  "privatekey",
+]);
 
 function redactString(value: string): string {
   return value
@@ -21,6 +36,10 @@ function redactString(value: string): string {
     .replace(/(api[_-]?key\s*[=:]\s*)[^&\s"']+/gi, "$1[REDACTED]");
 }
 
+function isCredentialKey(key: string): boolean {
+  return CREDENTIAL_KEYS.has(key.toLowerCase().replace(/[^a-z0-9]/g, ""));
+}
+
 function redact(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (depth > 20) throw new Error("recording content exceeds maximum depth 20");
   if (typeof value === "string") return redactString(value);
@@ -29,7 +48,12 @@ function redact(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   seen.add(value);
   const result = Array.isArray(value)
     ? value.map((entry) => redact(entry, depth + 1, seen))
-    : Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redact(entry, depth + 1, seen)]));
+    : Object.fromEntries(
+        Object.entries(value).map(([key, entry]) => [
+          key,
+          isCredentialKey(key) ? REDACTED_PROMPT : redact(entry, depth + 1, seen),
+        ])
+      );
   seen.delete(value);
   return result;
 }

@@ -45,6 +45,28 @@ describe("recording redaction", () => {
     });
   });
 
+  it("redacts values under structured credential keys", () => {
+    expect(
+      redactContent({
+        apiKey: "plain-api-value",
+        nested: {
+          access_token: "plain-token-value",
+          password: "plain-password-value",
+          clientSecret: "plain-secret-value",
+          promptTokens: 100,
+        },
+      })
+    ).toEqual({
+      apiKey: "[REDACTED]",
+      nested: {
+        access_token: "[REDACTED]",
+        password: "[REDACTED]",
+        clientSecret: "[REDACTED]",
+        promptTokens: 100,
+      },
+    });
+  });
+
   it("rejects cyclic content", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
