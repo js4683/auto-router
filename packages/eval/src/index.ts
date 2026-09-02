@@ -12,3 +12,4 @@ export * from "./avengers-corpus.js";
 export * from "./avengers-collection.js";
 export * from "./avengers-embedding-cache.js";
 export * from "./avengers-training.js";
+export * from "./avengers-validation.js";

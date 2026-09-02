@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { replayDataset } from "../src/replay.js";
+import { replayDataset, selectReplayRouterStep } from "../src/replay.js";
 import { fixtureDataset, fixtureTurn } from "./fixtures.js";
+
+describe("selectReplayRouterStep", () => {
+  it("returns the same first-turn selection as replayDataset", () => {
+    const dataset = fixtureDataset();
+    const turn = dataset.sessions[0].turns[0];
+    const step = selectReplayRouterStep(dataset, turn, { currentModel: null, currentTier: null, downgradeCounter: 0 });
+    const replay = replayDataset(dataset);
+    expect(step.selection.modelId).toBe(replay.strategies.router.turns[0].modelId);
+  });
+});
 
 describe("replayDataset", () => {
   it("preserves router state and reselects at a planning boundary", () => {
