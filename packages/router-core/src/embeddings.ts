@@ -110,7 +110,7 @@ async function responseBody(response: Response, signal: AbortSignal): Promise<st
   } catch (error) {
     if (error instanceof ResponseLimitError) throw new Error("embedding response exceeds 16 MiB");
     if (isTimeout(error, signal)) throw new Error("embedding request timed out");
-    throw new Error("embedding response is invalid");
+    throw new Error("embedding request failed");
   }
 }
 

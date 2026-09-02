@@ -156,6 +156,24 @@ describe("embedding client boundary", () => {
     expect(error?.message).not.toContain("raw provider failure");
   });
 
+  it("maps response body stream failures to transport errors", async () => {
+    const secretConfig = { ...config, apiKey: "secret-api-key" };
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new Error("secret-api-key raw provider stream failure");
+      },
+    });
+    let error: Error | undefined;
+    try {
+      await requestEmbeddings(["one"], secretConfig, async () => new Response(body));
+    } catch (caught) {
+      error = caught as Error;
+    }
+    expect(error?.message).toBe("embedding request failed");
+    expect(error?.message).not.toContain(secretConfig.apiKey);
+    expect(error?.message).not.toContain("raw provider stream failure");
+  });
+
   it("reports HTTP status without exposing credentials or the provider body", async () => {
     const secretConfig = { ...config, apiKey: "secret-api-key" };
     let error: Error | undefined;
@@ -192,20 +210,48 @@ describe("embedding client boundary", () => {
   });
 
   it("reads at most 16 MiB from the provider response", async () => {
-    const rawBody = `provider-marker${"x".repeat(16 * 1024 * 1024)}`;
+    let pulls = 0;
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      pull(controller) {
+        pulls += 1;
+        if (pulls === 1) {
+          controller.enqueue(new Uint8Array(16 * 1024 * 1024));
+          return;
+        }
+        if (pulls === 2) {
+          controller.enqueue(new Uint8Array([1]));
+          return;
+        }
+        controller.enqueue(new TextEncoder().encode("provider-marker"));
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
     let error: Error | undefined;
     try {
-      await requestEmbeddings(["one"], config, async () => new Response(rawBody));
+      await requestEmbeddings(["one"], config, async () => new Response(body));
     } catch (caught) {
       error = caught as Error;
     }
     expect(error?.message).toBe("embedding response exceeds 16 MiB");
     expect(error?.message).not.toContain("provider-marker");
     expect(error?.message).not.toContain(config.apiKey);
+    expect(pulls).toBe(2);
+    expect(cancelled).toBe(true);
+  });
+
+  it("rejects missing response indices", async () => {
+    await expect(requestEmbeddings(["one", "two"], config, async () => embeddingResponse([validItem(0)]))).rejects.toThrow(
+      "embedding response indices are invalid"
+    );
   });
 
   it.each([
-    ["missing", [validItem(0), validItem(2)]],
+    ["out-of-range", [validItem(0), validItem(2)]],
     ["duplicate", [validItem(0), validItem(0)]],
     ["non-integer", [validItem(0), { index: 1.5, embedding: [0, 1] }]],
   ])("rejects %s response indices", async (_case, data) => {
