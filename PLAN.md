@@ -353,6 +353,10 @@ Supported strategies:
 - **2026-09-01:** The Phase 4 Tier-1 embedding architecture is approved as opt-in;
   the checked-in fixture path remains disabled by default and fails open to Tier 0;
   production activation requires the held-out validation gate.
+- [x] Phase 4 code complete
+- [ ] real observed-outcome corpus collected
+- [ ] production artifact trained
+- [ ] production artifact activation gate passed
 
 ## Supporting Documents
 

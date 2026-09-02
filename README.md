@@ -151,6 +151,24 @@ npm run eval -- curate \
 Automatic redaction cannot guarantee anonymity. Manually review every curated file for
 credentials, personal data, and proprietary content before committing it.
 
+## Phase 4 embedding classifier
+
+Tier 1 stays disabled by default. Rollback is `avengersPro.enabled: false`.
+Networked commands require `--confirm-live` and print planned billable calls first.
+Collection uses `AUTO_ROUTER_EVAL_BASE_URL`, `AUTO_ROUTER_EVAL_API_KEY`, and
+`AUTO_ROUTER_EVAL_JUDGE_MODEL`. Training and validation use
+`AUTO_ROUTER_EMBEDDING_BASE_URL`, `AUTO_ROUTER_EMBEDDING_API_KEY`, and
+`AUTO_ROUTER_EMBEDDING_MODEL`. Artifacts store aggregate centers and stats only.
+Local collection, corpus, cache, and validation files stay ignored, mode `0600`,
+and need manual review before any commit.
+
+```bash
+npm run eval -- collect-avengers --dataset path/to/reviewed-dataset.json --models paper/a=provider/a,paper/b=provider/b --output phase-4-collection.local.jsonl --confirm-live
+npm run eval -- curate-avengers --input phase-4-collection.local.jsonl --dataset path/to/reviewed-dataset.json --models paper/a=provider/a,paper/b=provider/b --output phase-4-corpus.local.json
+npm run eval -- train-avengers --corpus phase-4-corpus.local.json --artifact-dir path/to/artifact --cache phase-4-embeddings.local.json --clusters 8 --seed 4683 --held-out-ratio 0.2 --top-k 3 --beta 9 --min-observations 3 --max-input-chars 16000 --timeout-ms 400 --confirm-live
+npm run eval -- validate-avengers --corpus phase-4-corpus.local.json --artifact-dir path/to/artifact --output phase-4-validation.local --bootstrap-seed fixture-seed --timeout-ms 400 --confirm-live
+```
+
 ## Docs
 
 | Doc | Purpose |

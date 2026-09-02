@@ -68,7 +68,10 @@ unchecked benchmark gate passes.
 
 ## Stretch
 
-- [ ] Implement and validate the approved Tier-1 embedding classifier
+- [x] Phase 4 code complete
+- [ ] real observed-outcome corpus collected
+- [ ] production artifact trained
+- [ ] production artifact activation gate passed
 - [ ] Tier-2 LLM judge (flagged)
 - [ ] Upstream `llm.request.before` hook to opencode (ref #45764) if v2 hook is
       insufficient

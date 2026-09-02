@@ -198,7 +198,8 @@ trivial-task model.
 
 Use task-boundary embeddings and observed model outcomes to train deterministic clusters,
 then constrained-rerank eligible models. The checked-in fixture-backed path remains
-disabled by default and falls back to Tier 0. The full architecture, including the
+disabled by default and falls back to Tier 0. Phase 4 code is complete; production
+corpus, artifact, and activation remain unchecked. The full architecture, including the
 held-out activation gate, is documented in the
 [Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md).
 
