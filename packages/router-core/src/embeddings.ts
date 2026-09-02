@@ -76,6 +76,7 @@ async function sendRequest(
       method: "POST",
       headers: { authorization: `Bearer ${config.apiKey}`, "content-type": "application/json" },
       body: JSON.stringify({ model: config.model, input: inputs }),
+      redirect: "error",
       signal,
     });
   } catch (error) {
@@ -160,6 +161,14 @@ function parseEmbeddings(text: string, inputCount: number): number[][] {
   return validateDimensions(orderedEmbeddings(data, inputCount));
 }
 
+function discardResponse(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    return;
+  }
+}
+
 export async function requestEmbeddings(
   inputs: string[],
   config: EmbeddingClientConfig,
@@ -169,6 +178,9 @@ export async function requestEmbeddings(
   const endpoint = `${normalizedBaseUrl(config.baseUrl)}/embeddings`;
   const signal = timeoutSignal(config.timeoutMs);
   const response = await sendRequest(endpoint, inputs, config, signal, fetchImpl);
-  if (!response.ok) throw new Error(`embedding endpoint returned HTTP ${response.status}`);
+  if (!response.ok) {
+    discardResponse(response);
+    throw new Error(`embedding endpoint returned HTTP ${response.status}`);
+  }
   return parseEmbeddings(await responseBody(response, signal), inputs.length);
 }

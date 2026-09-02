@@ -55,6 +55,20 @@ describe("embedding client boundary", () => {
     ]);
   });
 
+  it("rejects redirects before forwarding to another endpoint", async () => {
+    let reachedRedirectTarget = false;
+    const redirectingFetch: typeof fetch = async (_url, init) => {
+      if (init?.redirect !== "error") {
+        reachedRedirectTarget = true;
+        return embeddingResponse([validItem()]);
+      }
+      throw new TypeError("redirect rejected");
+    };
+
+    await expect(requestEmbeddings(["one"], config, redirectingFetch)).rejects.toThrow("embedding request failed");
+    expect(reachedRedirectTarget).toBe(false);
+  });
+
   it("hashes the normalized pre-append endpoint", () => {
     expect(embeddingEndpointDigest("https://embed.test/v1///")).toBe("39beffdc40eefb62aa8bb8524984f3c7e79010892caf55555207caf39bbe7363");
   });
@@ -153,6 +167,25 @@ describe("embedding client boundary", () => {
     expect(error?.message).toBe("embedding endpoint returned HTTP 429");
     expect(error?.message).not.toContain(secretConfig.apiKey);
     expect(error?.message).not.toContain("raw provider body");
+  });
+
+  it("cancels non-success bodies without reading them", async () => {
+    let cancelled = false;
+    let reads = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        reads += 1;
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    await expect(requestEmbeddings(["one"], config, async () => new Response(body, { status: 429 }))).rejects.toThrow(
+      "embedding endpoint returned HTTP 429"
+    );
+    expect(cancelled).toBe(true);
+    expect(reads).toBe(0);
   });
 
   it("reads at most 16 MiB from the provider response", async () => {
