@@ -171,3 +171,8 @@ export interface SelectionResult {
   score: number;
   boundary: BoundaryResult;
 }
+
+export interface AvengersProPrediction {
+  paperIds: string[];
+  predictedQuality: Record<string, number>;
+}

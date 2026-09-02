@@ -1,0 +1,30 @@
+{
+  "0": {
+    "openai/gpt-5-medium": {
+      "completed": 1,
+      "failed": 0,
+      "observations": 1,
+      "qualityMean": 0.4
+    },
+    "qwen/qwen3": {
+      "completed": 1,
+      "failed": 0,
+      "observations": 1,
+      "qualityMean": 0.9
+    }
+  },
+  "1": {
+    "openai/gpt-5-medium": {
+      "completed": 1,
+      "failed": 0,
+      "observations": 1,
+      "qualityMean": 0.95
+    },
+    "qwen/qwen3": {
+      "completed": 1,
+      "failed": 0,
+      "observations": 1,
+      "qualityMean": 0.3
+    }
+  }
+}

@@ -657,7 +657,7 @@ describe("proxy", () => {
     });
   });
 
-  it("wires Avengers-Pro fixture ranking into the executable bootstrap", async () => {
+  it("keeps the disabled synthetic v2 fixture usable for pure bootstrap scoring", async () => {
     const directory = mkdtempSync(join(tmpdir(), "auto-router-avengers-"));
     const configPath = join(directory, "enabled.json");
     writeFileSync(configPath, JSON.stringify({

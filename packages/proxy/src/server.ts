@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   detectBoundary,
-  loadAvengersProArtifacts,
+  loadAvengersProArtifact,
   loadCatalogSync,
   loadConfig,
   scoreAvengersPro,
@@ -1158,7 +1158,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
   let rankAvengers: CreateProxyServerOptions["rankAvengers"];
   if (config.avengersPro?.enabled) {
     try {
-      const artifacts = loadAvengersProArtifacts(resolveExistingPath(config.avengersPro.artifactDir));
+      const artifacts = loadAvengersProArtifact(resolveExistingPath(config.avengersPro.artifactDir));
       rankAvengers = (text) => scoreAvengersPro(fixtureEmbed(text), artifacts);
     } catch {
       rankAvengers = undefined;
