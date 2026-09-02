@@ -1,27 +1,31 @@
 # Phase 4 Tier-1 Embedding Classifier Design
 
 **Status:** Approved in design review on 2026-09-01
-**Implementation status:** The shared `router-core` embedding boundary is implemented;
-observed-outcome collection, artifact building, held-out validation, and runtime wiring
+**Implementation status:** Phase 4 code is complete: the shared `router-core` embedding
+boundary, observed-outcome collection, artifact building, held-out validation, and
+opt-in runtime wiring are implemented. The checked-in corpus and artifact remain
+synthetic; production corpus collection, production artifact training, and activation
 remain pending.
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
 ## Context
 
-The router currently has three partial Tier-1 pieces:
+Phase 4 now spans these implemented Tier-1 pieces:
 
-- `router-core` can load fixture Avengers-Pro cluster artifacts and score a supplied
-  embedding.
+- `router-core` loads versioned Avengers-Pro cluster artifacts, scores supplied embeddings,
+  and exposes the constrained learned reranker.
 - `router-core` exposes the shared dependency-free OpenAI-compatible embedding boundary
   for normalization, endpoint binding, and batched validated requests.
+- `packages/eval` owns observed-outcome collection, curation, deterministic artifact
+  training, and held-out validation.
 - The proxy can pass the resulting canonical model ranking into `selectModel`.
 
-The runtime classifier path is not production-ready. It still uses a two-dimensional
-keyword fixture, does not invoke the embedding boundary, and has no observed-outcome
-corpus or artifact builder. The checked-in `auto-router.json` keeps this fixture disabled
-by default. Phase 4 completes that path without weakening the existing task-policy,
-Tier-0, context-fit, or stickiness contracts.
+The runtime classifier path is implemented but not production-ready. The checked-in
+corpus and artifact are synthetic, their validation is ineligible for activation, and
+`auto-router.json` keeps Tier 1 disabled by default. Production corpus collection,
+production artifact training, and activation remain pending. The implementation
+preserves the existing task-policy, Tier-0, context-fit, and stickiness contracts.
 
 ## Goals
 
@@ -113,7 +117,7 @@ The corpus is a versioned local JSON document. Each example contains:
 Each model outcome contains:
 
 - Canonical paper model ID.
-- Terminal state: `complete`, `incomplete`, or `failed`.
+- Terminal state: `completed`, `incomplete`, or `failed`.
 - Quality in `[0, 1]`, with judge/check provenance.
 - Provider-observed or explicitly estimated token usage.
 - Observed or estimated request cost and its source.
@@ -134,12 +138,14 @@ The eval CLI adds an explicitly billable candidate-model collection mode. Concep
 ```bash
 npm run eval -- collect-avengers \
   --dataset path/to/reviewed-dataset.json \
-  --models model-a,model-b,model-c \
+  --models paper/a=provider/a,paper/b=provider/b \
   --output phase-4-collection.local.jsonl \
   --confirm-live
 
 npm run eval -- curate-avengers \
   --input phase-4-collection.local.jsonl \
+  --dataset path/to/reviewed-dataset.json \
+  --models paper/a=provider/a,paper/b=provider/b \
   --output phase-4-corpus.local.json
 ```
 
@@ -196,7 +202,10 @@ npm run eval -- train-avengers \
   --top-k 3 \
   --beta 9 \
   --min-observations 3 \
-  --max-input-chars 16000
+  --max-input-chars 16000 \
+  --cache phase-4-embeddings.local.json \
+  --timeout-ms 400 \
+  --confirm-live
 ```
 
 Training performs these steps:
@@ -256,7 +265,10 @@ the observed outcome matrix. It compares:
 npm run eval -- validate-avengers \
   --corpus phase-4-corpus.local.json \
   --artifact-dir path/to/artifact \
-  --output phase-4-validation.local
+  --output phase-4-validation.local \
+  --bootstrap-seed fixture-seed \
+  --timeout-ms 400 \
+  --confirm-live
 ```
 
 Validation uses single-item embedding requests against the endpoint and timeout intended

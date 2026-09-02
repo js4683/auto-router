@@ -12,7 +12,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 | **1** | opencode plugin adapter with task-boundary recommendations and decision logging | ~2-3 days |
 | **2** | OpenAI-compatible proxy adapter (any harness via base_url) | ~2-3 days |
 | **3** | Eval harness: replay real sessions, measure cost saved vs quality retained | ~3 days |
-| **4** | Tier-1 embedding classifier (approved design; opt-in, disabled by default) | later |
+| **4** | Tier-1 embedding classifier (code complete; opt-in, disabled by default) | activation later |
 
 ## Phase 0 — router-core (start here)
 

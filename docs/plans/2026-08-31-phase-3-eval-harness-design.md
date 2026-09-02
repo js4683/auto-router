@@ -350,12 +350,11 @@ Benchmark acceptance requires:
 The harness may ship before external provider quota permits benchmark acceptance, but
 the roadmap quality bar remains unchecked and the report must say that it is unproven.
 
-## Phase 2 Prerequisite
+## Phase 2 Compatibility
 
-Before Phase 3 is accepted, add a regression test for translated non-Gemini SSE. If the
-suspected buffering or parsing fallthrough reproduces, either fix that behavior or mark
-the broader Phase 2 translated-streaming claim incomplete. Phase 3 must not rely on an
-overstated proxy baseline.
+Translated paths without an incremental translator request buffered upstream JSON before
+synthesizing client-compatible SSE. Regression coverage in
+`packages/proxy/tests/server.test.ts` protects this compatibility boundary.
 
 ## Consequences
 
