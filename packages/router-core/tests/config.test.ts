@@ -8,7 +8,7 @@ describe("loadConfig merge", () => {
   it("keeps the checked-in Phase 4 classifier disabled by default", () => {
     const cfg = loadConfig(new URL("../../../auto-router.json", import.meta.url).pathname);
 
-    expect(cfg.avengersPro.enabled).toBe(false);
+    expect(cfg.avengersPro?.enabled).toBe(false);
   });
 
   it("fills missing planning and verification policies from defaults", () => {

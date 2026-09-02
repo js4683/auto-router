@@ -23,9 +23,10 @@ of the above do.
 
 1. **Language:** TypeScript for `router-core` + the opencode plugin (native plugin
    language, richest session signals). Revisit Go later for the standalone proxy.
-2. **Classifier:** Avengers-Pro cluster scoring on a task boundary, with heuristic
-   `selectModel` as fallback. Overlap models join through LLMRouterBench; Muse/Grok/Luna
-   use an explicit hand map until we have our own labels.
+2. **Classifier:** Tier-0 heuristic `selectModel` remains the default. The fixture-backed
+   Avengers-Pro scorer is an opt-in Tier-1 reranker that fails open to Tier 0. Overlap
+   models join through LLMRouterBench; Muse/Grok/Luna use an explicit hand map until we
+   have our own labels.
 3. **Apply path:** a local OpenAI/Anthropic proxy. The OpenCode plugin stays observational.
 4. **Model selection data:** Artificial Analysis free API for quality (coding index)
    + price -> a "bang-for-buck" score per model, refreshed daily and cached.
@@ -75,11 +76,12 @@ incrementally as upstream chunks arrive. Cross-protocol paths without an increme
 translator request buffered upstream JSON, then synthesize a client-compatible event
 stream instead of attempting to parse upstream SSE as JSON.
 
-The proxy scores the first message of a task with Avengers-Pro fixture ranking when
-enabled, applies free-first / planning-quality overlays, then holds that target until
-a confirmed boundary. Routing state is reconstructed conservatively from normalized
-messages, tool schemas, and tool-call history so context size, tool depth, file/patch
-hints, and prior tool errors inform selection when the request exposes them.
+When enabled, the proxy scores the first message of a task with Avengers-Pro fixture
+ranking, applies free-first / planning-quality overlays, then holds that target until a
+confirmed boundary. The checked-in configuration leaves this Tier-1 path disabled by
+default; failures fall back to Tier 0. Routing state is reconstructed conservatively from
+normalized messages, tool schemas, and tool-call history so context size, tool depth,
+file/patch hints, and prior tool errors inform selection when the request exposes them.
 
 ## Evaluation
 
@@ -157,6 +159,7 @@ credentials, personal data, and proprietary content before committing it.
 | [design.md](./design.md) | Architecture, the two hard problems, classification tiers |
 | [roadmap.md](./roadmap.md) | Phased plan, effort, checklist |
 | [Phase 3 eval design](./docs/plans/2026-08-31-phase-3-eval-harness-design.md) | Accepted offline/live evaluation, recording, metrics, and trust-boundary design |
+| [Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md) | Approved Tier-1 architecture, privacy boundaries, and activation gates |
 
 ## Why this is a strong fit
 

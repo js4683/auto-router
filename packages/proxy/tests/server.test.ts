@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { IncomingMessage } from "node:http";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -658,27 +658,44 @@ describe("proxy", () => {
   });
 
   it("wires Avengers-Pro fixture ranking into the executable bootstrap", async () => {
-    const { bootstrapProxyOptions } = await import("../src/server.js");
-    const opts = bootstrapProxyOptions();
-    expect(opts.rankAvengers).toBeTypeOf("function");
-    expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("qwen/qwen3");
-
-    const res = collectRes();
-    const server = createProxyServer({
-      ...opts,
-      sessions: memorySessions(),
-      backends: {
-        opencode: {
-          baseUrl: "http://backend.test",
-          fetchImpl: async () => new Response(JSON.stringify({ id: "ok", output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }] })),
-        },
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-avengers-"));
+    const configPath = join(directory, "enabled.json");
+    writeFileSync(configPath, JSON.stringify({
+      tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
+      avengersPro: { enabled: true },
+      providerFreeSet: ["muse-spark-1.2-contributor-free"],
+      windowRegistry: { "muse-spark-1.2-contributor-free": 272000 },
+      modelMap: {
+        "qwen/qwen3": [{ runtimeId: "opencode/muse-spark-1.2-contributor-free", source: "hand" }],
       },
-    });
-    await server.handle(
-      fakeReq("/v1/route", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] }),
-      res as never
-    );
-    expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
+    }));
+    vi.stubEnv("AUTO_ROUTER_CONFIG", configPath);
+    try {
+      const { bootstrapProxyOptions } = await import("../src/server.js");
+      const opts = bootstrapProxyOptions();
+      expect(opts.rankAvengers).toBeTypeOf("function");
+      expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("qwen/qwen3");
+
+      const res = collectRes();
+      const server = createProxyServer({
+        ...opts,
+        sessions: memorySessions(),
+        backends: {
+          opencode: {
+            baseUrl: "http://backend.test",
+            fetchImpl: async () => new Response(JSON.stringify({ id: "ok", output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }] })),
+          },
+        },
+      });
+      await server.handle(
+        fakeReq("/v1/route", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] }),
+        res as never
+      );
+      expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("enables proxy recording only through explicit environment configuration", async () => {

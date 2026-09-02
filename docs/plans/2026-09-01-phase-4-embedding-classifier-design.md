@@ -2,6 +2,7 @@
 
 **Status:** Approved in design review on 2026-09-01
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
+**Canonical project plan:** [PLAN.md](../../PLAN.md)
 
 ## Context
 
@@ -12,10 +13,10 @@ The router currently has two partial Tier-1 pieces:
 - The proxy can pass the resulting canonical model ranking into `selectModel`.
 
 The executable path is not production-ready. It uses a two-dimensional keyword fixture,
-does not call a real embedding endpoint, has no observed-outcome corpus or artifact
-builder, and enables the fixture in the checked-in `auto-router.json`. Phase 4 completes
-that path without weakening the existing task-policy, Tier-0, context-fit, or stickiness
-contracts.
+does not call a real embedding endpoint, and has no observed-outcome corpus or artifact
+builder. The checked-in `auto-router.json` keeps this fixture disabled by default. Phase 4
+completes that path without weakening the existing task-policy, Tier-0, context-fit, or
+stickiness contracts.
 
 ## Goals
 

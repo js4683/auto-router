@@ -332,9 +332,9 @@ Supported strategies:
   policy.
 - **2026-08-30:** Do not implement the assigned OpenCode hook. The local proxy is the
   apply path for OpenCode and every other harness that can set a base URL.
-- **2026-08-30:** Avengers-Pro scores the first message of a task. Overlap models join
-  through LLMRouterBench (`source: "bench"`). Muse / Grok / Luna-class IDs use an
-  explicit `source: "hand"` bootstrap until we have our own labels.
+- **2026-08-30:** When enabled, Avengers-Pro scores the first message of a task. Overlap
+  models join through LLMRouterBench (`source: "bench"`). Muse / Grok / Luna-class IDs
+  use an explicit `source: "hand"` bootstrap until we have our own labels.
 - **2026-08-31:** Proxy `SessionState` uses the normalized message and tool payload for a
   conservative context estimate. Standard tool-call arguments provide tool-depth,
   file, patch-hunk, and prior-error hints; unavailable harness signals stay at zero.
@@ -350,10 +350,15 @@ Supported strategies:
 - **2026-08-31:** Proxy recording is disabled by default. Content mode is explicit,
   local, bounded, redacted, access-restricted, retention-limited, and never considered
   safe to commit without manual review.
+- **2026-09-01:** The Phase 4 Tier-1 embedding architecture is approved as opt-in;
+  the checked-in fixture path remains disabled by default and fails open to Tier 0;
+  production activation requires the held-out validation gate.
 
 ## Supporting Documents
 
 - `design.md`: architecture rationale and selection model.
-- `roadmap.md`: broader project phases beyond the current change.
+- `roadmap.md`: broader project phases and implementation status.
 - `docs/plans/2026-08-31-phase-3-eval-harness-design.md`: accepted eval architecture,
   data contracts, trust boundaries, and acceptance gates.
+- `docs/plans/2026-09-01-phase-4-embedding-classifier-design.md`: approved Tier-1
+  embedding architecture, privacy boundaries, and activation gates.

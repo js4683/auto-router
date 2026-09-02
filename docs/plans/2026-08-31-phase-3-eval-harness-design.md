@@ -153,9 +153,10 @@ Content recording requires an explicit setting. Local recording files use restri
 permissions and a default retention period of 30 days. Expired records are pruned when
 the recorder starts.
 
-HTTP headers, environment values, and credentials are excluded by construction. Content
-redaction covers common bearer tokens and provider-key formats, but the command warns
-that automatic redaction cannot guarantee anonymity.
+HTTP headers and environment values are excluded by construction. Content redaction
+recursively replaces structured credential keys, including nested objects, and covers
+common bearer tokens and provider-key formats, but the command warns that automatic
+redaction cannot guarantee anonymity.
 
 The `curate` command validates and redacts a recording into the dataset shape. It does
 not imply that the output is safe to commit. Only manually reviewed curated fixtures may
@@ -261,7 +262,8 @@ automatically retried because its billing outcome is unknown. Provider failures 
 visible as failed cases rather than being replaced with synthetic output.
 
 Every generated response and blinded judge response must have a completed terminal
-state before the live case is complete or contributes to the 30-case quality gate.
+state before the live case is complete or contributes to the 30-case quality gate. A
+missing or unrecognized finish reason or terminal status is incomplete.
 
 The live runner sends recorded transcript context but does not execute tools. Recorded
 tool calls and results may remain in the transcript as context.

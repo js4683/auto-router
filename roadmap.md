@@ -12,7 +12,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 | **1** | opencode plugin adapter with task-boundary recommendations and decision logging | ~2-3 days |
 | **2** | OpenAI-compatible proxy adapter (any harness via base_url) | ~2-3 days |
 | **3** | Eval harness: replay real sessions, measure cost saved vs quality retained | ~3 days |
-| **4** | Tier-1 embedding classifier (opt-in) | later |
+| **4** | Tier-1 embedding classifier (approved design; opt-in, disabled by default) | later |
 
 ## Phase 0 — router-core (start here)
 
@@ -68,7 +68,7 @@ unchecked benchmark gate passes.
 
 ## Stretch
 
-- [ ] Tier-1 embedding classifier
+- [ ] Implement and validate the approved Tier-1 embedding classifier
 - [ ] Tier-2 LLM judge (flagged)
 - [ ] Upstream `llm.request.before` hook to opencode (ref #45764) if v2 hook is
       insufficient
@@ -81,3 +81,4 @@ unchecked benchmark gate passes.
 - RouteLLM: https://github.com/lm-sys/RouteLLM
 - Not-Diamond RoRF: https://github.com/Not-Diamond/RoRF
 - vLLM semantic-router (classification signals): https://github.com/vllm-project/semantic-router
+- Phase 4 embedding classifier design: [docs/plans/2026-09-01-phase-4-embedding-classifier-design.md](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md)

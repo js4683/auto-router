@@ -194,10 +194,13 @@ Map aggregate score -> tier -> model (via policy config). Planning and architect
 keywords additionally activate the planning quality floor so they cannot route to a
 trivial-task model.
 
-### Tier 1 — embedding similarity (later)
+### Tier 1 — embedding similarity (approved, opt-in)
 
-Compare the request against a small labeled difficulty set (jina / voyage embeddings,
-a la Not-Diamond RoRF). Opt-in.
+Use task-boundary embeddings and observed model outcomes to train deterministic clusters,
+then constrained-rerank eligible models. The checked-in fixture-backed path remains
+disabled by default and falls back to Tier 0. The full architecture, including the
+held-out activation gate, is documented in the
+[Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md).
 
 ### Tier 2 — LLM judge (optional, later)
 
