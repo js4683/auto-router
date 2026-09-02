@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { selectModel } from "../src/selector.js";
-import type { Catalog, RouterConfig, RouterState, SessionState } from "../src/types.js";
+import type { AvengersProPrediction, Catalog, RouterConfig, RouterState, SessionState, TaskStrategy } from "../src/types.js";
 
 const cfg: RouterConfig = {
   tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
@@ -41,6 +41,39 @@ const catalog: Catalog = {
     { id: "small-window", codingIndex: 65, blendedPrice: 0.3, value: 216, windowTokens: 12000, isFree: true },
   ],
 };
+
+const learnedCatalog: Catalog = {
+  fetchedAt: new Date().toISOString(),
+  source: "live",
+  models: [
+    { id: "frontier", runtimeId: "provider/frontier", codingIndex: 92, blendedPrice: 10, value: 9.2, windowTokens: 272000, isFree: false },
+    { id: "cheap", runtimeId: "provider/cheap", codingIndex: 88, blendedPrice: 1, value: 88, windowTokens: 128000, isFree: false },
+  ],
+};
+
+const learned: AvengersProPrediction = {
+  paperIds: ["paper/frontier", "paper/cheap"],
+  predictedQuality: { "paper/frontier": 0.95, "paper/cheap": 0.8 },
+};
+
+function selectFor(strategy: TaskStrategy, prediction = learned, candidateCatalog = learnedCatalog) {
+  return selectModel(
+    sess({ lastUserMessage: "implement the feature", userTag: "implement", forceTier: "medium", isNewSession: true }),
+    candidateCatalog,
+    {
+      ...cfg,
+      taskTypeModels: { ...cfg.taskTypeModels, implement: { prefer: null, strategy } },
+      modelMap: {
+        "paper/frontier": [{ runtimeId: "provider/frontier", source: "hand" }],
+        "paper/cheap": [{ runtimeId: "provider/cheap", source: "hand" }],
+      },
+    },
+    { currentModel: null, currentTier: null, downgradeCounter: 0 },
+    undefined,
+    undefined,
+    prediction
+  );
+}
 
 function sess(over: Partial<SessionState> & Partial<SessionState["currentTask"]> = {}): SessionState {
   return {
@@ -205,6 +238,225 @@ describe("selector — two axes + guards + stickiness", () => {
     expect(["free-medium", "paid-mid", "small-window"]).toContain(r3.modelId);
   });
 
+  it("orders learned quality candidates by predicted quality", () => {
+    expect(selectFor("quality").modelId).toBe("provider/frontier");
+  });
+
+  it("orders learned lowest-cost candidates by blended price", () => {
+    expect(selectFor("lowest-cost").modelId).toBe("provider/cheap");
+  });
+
+  it("orders learned paid value candidates by predicted quality per price", () => {
+    expect(selectFor("value").modelId).toBe("provider/cheap");
+  });
+
+  it("uses catalog quality and runtime ID to break learned quality ties", () => {
+    const tiedPrediction: AvengersProPrediction = {
+      paperIds: ["paper/lower-catalog", "paper/z", "paper/a"],
+      predictedQuality: { "paper/lower-catalog": 0.9, "paper/z": 0.9, "paper/a": 0.9 },
+    };
+    const tiedCatalog: Catalog = {
+      fetchedAt: "t",
+      source: "live",
+      models: [
+        { id: "lower-catalog", runtimeId: "provider/0", codingIndex: 90, blendedPrice: 1, value: 90, windowTokens: 128000, isFree: false },
+        { id: "z", runtimeId: "provider/z", codingIndex: 91, blendedPrice: 1, value: 91, windowTokens: 128000, isFree: false },
+        { id: "a", runtimeId: "provider/a", codingIndex: 91, blendedPrice: 1, value: 91, windowTokens: 128000, isFree: false },
+      ],
+    };
+    const modelMap = {
+      "paper/lower-catalog": [{ runtimeId: "provider/0", source: "hand" as const }],
+      "paper/z": [{ runtimeId: "provider/z", source: "hand" as const }],
+      "paper/a": [{ runtimeId: "provider/a", source: "hand" as const }],
+    };
+    const result = selectModel(
+      sess({ userTag: "implement", forceTier: "medium", isNewSession: true }),
+      tiedCatalog,
+      { ...cfg, taskTypeModels: { ...cfg.taskTypeModels, implement: { prefer: null, strategy: "quality" } }, modelMap },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      tiedPrediction
+    );
+
+    expect(result.modelId).toBe("provider/a");
+  });
+
+  it("uses predicted quality and runtime ID to break learned lowest-cost ties", () => {
+    const tiedPrediction: AvengersProPrediction = {
+      paperIds: ["paper/lower-quality", "paper/z", "paper/a"],
+      predictedQuality: { "paper/lower-quality": 0.8, "paper/z": 0.9, "paper/a": 0.9 },
+    };
+    const tiedCatalog: Catalog = {
+      fetchedAt: "t",
+      source: "live",
+      models: [
+        { id: "lower-quality", runtimeId: "provider/0", codingIndex: 90, blendedPrice: 1, value: 90, windowTokens: 128000, isFree: false },
+        { id: "z", runtimeId: "provider/z", codingIndex: 90, blendedPrice: 1, value: 90, windowTokens: 128000, isFree: false },
+        { id: "a", runtimeId: "provider/a", codingIndex: 90, blendedPrice: 1, value: 90, windowTokens: 128000, isFree: false },
+      ],
+    };
+    const modelMap = {
+      "paper/lower-quality": [{ runtimeId: "provider/0", source: "hand" as const }],
+      "paper/z": [{ runtimeId: "provider/z", source: "hand" as const }],
+      "paper/a": [{ runtimeId: "provider/a", source: "hand" as const }],
+    };
+    const result = selectModel(
+      sess({ userTag: "implement", forceTier: "medium", isNewSession: true }),
+      tiedCatalog,
+      { ...cfg, taskTypeModels: { ...cfg.taskTypeModels, implement: { prefer: null, strategy: "lowest-cost" } }, modelMap },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      tiedPrediction
+    );
+
+    expect(result.modelId).toBe("provider/a");
+  });
+
+  it("prefers learned free value candidates by predicted quality and runtime ID", () => {
+    const prediction: AvengersProPrediction = {
+      paperIds: ["paper/paid", "paper/z", "paper/a"],
+      predictedQuality: { "paper/paid": 0.99, "paper/z": 0.8, "paper/a": 0.8 },
+    };
+    const valueCatalog: Catalog = {
+      fetchedAt: "t",
+      source: "live",
+      models: [
+        { id: "paid", runtimeId: "provider/paid", codingIndex: 90, blendedPrice: 1, value: 90, windowTokens: 128000, isFree: false },
+        { id: "z", runtimeId: "provider/z", codingIndex: 90, blendedPrice: 0, value: 900, windowTokens: 128000, isFree: true },
+        { id: "a", runtimeId: "provider/a", codingIndex: 90, blendedPrice: 0, value: 900, windowTokens: 128000, isFree: true },
+      ],
+    };
+    const modelMap = {
+      "paper/paid": [{ runtimeId: "provider/paid", source: "hand" as const }],
+      "paper/z": [{ runtimeId: "provider/z", source: "hand" as const }],
+      "paper/a": [{ runtimeId: "provider/a", source: "hand" as const }],
+    };
+    const result = selectModel(
+      sess({ userTag: "implement", forceTier: "medium", isNewSession: true }),
+      valueCatalog,
+      { ...cfg, modelMap },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      prediction
+    );
+
+    expect(result.modelId).toBe("provider/a");
+  });
+
+  it("uses predicted quality and runtime ID to break learned paid value-ratio ties", () => {
+    const prediction: AvengersProPrediction = {
+      paperIds: ["paper/lower-quality", "paper/z", "paper/a"],
+      predictedQuality: { "paper/lower-quality": 0.4, "paper/z": 0.8, "paper/a": 0.8 },
+    };
+    const valueCatalog: Catalog = {
+      fetchedAt: "t",
+      source: "live",
+      models: [
+        { id: "lower-quality", runtimeId: "provider/0", codingIndex: 90, blendedPrice: 1, value: 90, windowTokens: 128000, isFree: false },
+        { id: "z", runtimeId: "provider/z", codingIndex: 90, blendedPrice: 2, value: 45, windowTokens: 128000, isFree: false },
+        { id: "a", runtimeId: "provider/a", codingIndex: 90, blendedPrice: 2, value: 45, windowTokens: 128000, isFree: false },
+      ],
+    };
+    const modelMap = {
+      "paper/lower-quality": [{ runtimeId: "provider/0", source: "hand" as const }],
+      "paper/z": [{ runtimeId: "provider/z", source: "hand" as const }],
+      "paper/a": [{ runtimeId: "provider/a", source: "hand" as const }],
+    };
+    const result = selectModel(
+      sess({ userTag: "implement", forceTier: "medium", isNewSession: true }),
+      valueCatalog,
+      { ...cfg, modelMap },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      prediction
+    );
+
+    expect(result.modelId).toBe("provider/a");
+  });
+
+  it("does not admit an unmapped model through its learned score", () => {
+    const result = selectModel(
+      sess({ userTag: "implement", forceTier: "medium", isNewSession: true }),
+      learnedCatalog,
+      {
+        ...cfg,
+        taskTypeModels: { ...cfg.taskTypeModels, implement: { prefer: null, strategy: "quality" } },
+        modelMap: { "paper/cheap": [{ runtimeId: "provider/cheap", source: "hand" }] },
+      },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      learned
+    );
+
+    expect(result.modelId).toBe("provider/cheap");
+  });
+
+  it("does not admit a learned model below the global quality floor", () => {
+    const floorCatalog: Catalog = {
+      ...learnedCatalog,
+      models: [
+        { ...learnedCatalog.models[0], codingIndex: 84 },
+        { ...learnedCatalog.models[1], codingIndex: 88 },
+      ],
+    };
+    const result = selectModel(
+      sess({ lastUserMessage: "plan the architecture", userTag: "planning", forceTier: "simple", isNewSession: true }),
+      floorCatalog,
+      {
+        ...cfg,
+        modelMap: {
+          "paper/frontier": [{ runtimeId: "provider/frontier", source: "hand" }],
+          "paper/cheap": [{ runtimeId: "provider/cheap", source: "hand" }],
+        },
+      },
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      learned
+    );
+
+    expect(result.modelId).toBe("provider/cheap");
+  });
+
+  it.each([0, -1, Number.POSITIVE_INFINITY, Number.NaN])(
+    "does not admit a paid learned value candidate with price %s",
+    (price) => {
+      const invalidPriceCatalog: Catalog = {
+        ...learnedCatalog,
+        models: [
+          { ...learnedCatalog.models[0], blendedPrice: price },
+          learnedCatalog.models[1],
+        ],
+      };
+
+      expect(selectFor("value", learned, invalidPriceCatalog).modelId).toBe("provider/cheap");
+    }
+  );
+
+  it("applies context-fit guards after learned candidate ordering", () => {
+    const prediction: AvengersProPrediction = {
+      paperIds: ["paper/small-window"],
+      predictedQuality: { "paper/small-window": 0.99 },
+    };
+    const result = selectModel(
+      sess({ lifetimeTokens: 5000, forceTier: "simple", isCompacted: true }),
+      catalog,
+      { ...cfg, modelMap: { "paper/small-window": [{ runtimeId: "small-window", source: "hand" }] } },
+      { currentModel: "frontier", currentTier: "complex", downgradeCounter: 3 },
+      undefined,
+      undefined,
+      prediction
+    );
+
+    expect(result.modelId).toBe("frontier");
+    expect(result.via).toBe("context-fit-block");
+  });
+
   it("uses the first mapped Avengers-Pro paper id on a new task", () => {
     const r = selectModel(
       sess({ lastUserMessage: "implement the feature", isNewSession: true }),
@@ -213,7 +465,7 @@ describe("selector — two axes + guards + stickiness", () => {
       { currentModel: null, currentTier: null, downgradeCounter: 0 },
       undefined,
       undefined,
-      { paperIds: ["qwen/qwen3"] }
+      { paperIds: ["qwen/qwen3"], predictedQuality: { "qwen/qwen3": 0.9 } }
     );
     expect(r.modelId).toBe("free-medium");
     expect(r.via).toBe("avengers-pro");
@@ -227,22 +479,21 @@ describe("selector — two axes + guards + stickiness", () => {
       { currentModel: null, currentTier: null, downgradeCounter: 0 },
       undefined,
       undefined,
-      { paperIds: ["qwen/qwen3"] }
+      { paperIds: ["qwen/qwen3"], predictedQuality: { "qwen/qwen3": 0.9 } }
     );
     expect(r.modelId).toBe("frontier");
     expect(r.via).toBe("quality");
   });
 
-  it("falls back to heuristic select when no paper id maps", () => {
-    const r = selectModel(
-      sess({ lastUserMessage: "hello", isNewSession: true }),
-      catalog,
-      cfg,
-      { currentModel: null, currentTier: null, downgradeCounter: 0 },
-      undefined,
-      undefined,
-      { paperIds: ["missing/model"] }
-    );
-    expect(r.via).not.toBe("avengers-pro");
+  it("preserves the Tier-0 result when no learned candidate remains", () => {
+    const session = sess({ lastUserMessage: "hello", isNewSession: true });
+    const state: RouterState = { currentModel: null, currentTier: null, downgradeCounter: 0 };
+    const tierZero = selectModel(session, catalog, cfg, state);
+    const withUnmappedPrediction = selectModel(session, catalog, cfg, state, undefined, undefined, {
+      paperIds: ["missing/model"],
+      predictedQuality: { "missing/model": 1 },
+    });
+
+    expect(withUnmappedPrediction).toEqual(tierZero);
   });
 });

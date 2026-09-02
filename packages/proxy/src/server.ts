@@ -9,6 +9,7 @@ import {
   loadConfig,
   scoreAvengersPro,
   selectModel,
+  type AvengersProPrediction,
   type Catalog,
   type RouterConfig,
   type SelectionResult,
@@ -30,7 +31,7 @@ export interface CreateProxyServerOptions {
   config: RouterConfig;
   sessions: ProxySessionStore;
   backends: Record<string, ProxyBackend>;
-  rankAvengers?: (text: string) => { paperIds: string[] };
+  rankAvengers?: (text: string) => AvengersProPrediction;
   recorder?: EvalRecorder;
 }
 
@@ -919,11 +920,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       };
     }
 
-    let paperIds: string[] | undefined;
+    let prediction: AvengersProPrediction | undefined;
     try {
-      paperIds = opts.rankAvengers?.(text).paperIds;
+      prediction = opts.rankAvengers?.(text);
     } catch {
-      paperIds = undefined;
+      prediction = undefined;
     }
 
     const forced = req.headers["x-force-model"];
@@ -943,7 +944,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       return result;
     }
 
-    const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, paperIds ? { paperIds } : undefined);
+    const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
     opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
     return result;
   }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createJsonlRecorder, type EvalRecordInput, type EvalRecorder } from "@auto-router/eval";
-import { selectModel, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
+import { selectModel, type AvengersProPrediction, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
 import { createProxyServer } from "../src/server.js";
 import { memorySessions } from "../src/session.js";
 
@@ -56,6 +56,11 @@ const config: RouterConfig = {
   modelMap: {
     "qwen/qwen3": [{ runtimeId: "opencode/muse-spark-1.2-contributor-free", source: "hand" }],
   },
+};
+
+const avengersPrediction: AvengersProPrediction = {
+  paperIds: ["qwen/qwen3"],
+  predictedQuality: { "qwen/qwen3": 0.9 },
 };
 
 function fakeReq(url: string, body: unknown, headers: Record<string, string | undefined> = {}): IncomingMessage {
@@ -150,7 +155,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const req = fakeReq("/api/hello", {});
@@ -179,7 +184,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const req = fakeReq("/v1/models?client_version=0.147.0", {});
@@ -270,7 +275,7 @@ describe("proxy", () => {
       },
       rankAvengers: () => {
         rankCalls += 1;
-        return { paperIds: ["qwen/qwen3"] };
+        return avengersPrediction;
       },
       select: selectModel,
     });
@@ -299,7 +304,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const res = collectRes();
@@ -308,6 +313,41 @@ describe("proxy", () => {
       res as never
     );
     expect(backendCalls).toBe(0);
+    expect(JSON.parse(res.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
+  });
+
+  it("forwards the complete Avengers-Pro prediction to the selector", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      rankAvengers: () => avengersPrediction,
+      select: ((...args: Parameters<typeof selectModel>) => {
+        const prediction = args[6] as AvengersProPrediction | undefined;
+        return {
+          modelId:
+            prediction?.predictedQuality?.["qwen/qwen3"] === 0.9
+              ? "opencode/muse-spark-1.2-contributor-free"
+              : "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "prediction plumbing",
+          via: "avengers-pro",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        };
+      }) as typeof selectModel,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/route", { model: "auto", messages: [{ role: "user", content: "implement the feature" }] }),
+      res as never
+    );
+
     expect(JSON.parse(res.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
   });
 
@@ -419,7 +459,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -476,7 +516,7 @@ describe("proxy", () => {
             ),
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const body = { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "Make a restricted request." }] };
@@ -743,7 +783,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -943,7 +983,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -998,7 +1038,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -1041,7 +1081,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -1083,7 +1123,7 @@ describe("proxy", () => {
           ),
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
