@@ -8,3 +8,4 @@ export * from "./config.js";
 export * from "./avengers-pro-artifacts.js";
 export * from "./avengers-pro.js";
 export * from "./model-map.js";
+export * from "./embeddings.js";
