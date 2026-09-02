@@ -51,7 +51,7 @@ function learnedCandidates(
   for (const entry of resolveMappedModels(prediction.paperIds, modelMap, catalog)) {
     const model = catalog.models.find((item) => modelRuntimeId(item) === entry.runtimeId || item.id === entry.runtimeId);
     const predictedQuality = prediction.predictedQuality[entry.paperId];
-    if (!model || model.codingIndex < minQuality || !Number.isFinite(predictedQuality)) continue;
+    if (!model || !(model.codingIndex >= minQuality) || !Number.isFinite(predictedQuality)) continue;
     candidates.push({ model, predictedQuality });
   }
   return candidates;

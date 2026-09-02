@@ -423,6 +423,18 @@ describe("selector — two axes + guards + stickiness", () => {
     expect(result.modelId).toBe("provider/cheap");
   });
 
+  it("does not admit a mapped model with non-finite catalog quality", () => {
+    const invalidQualityCatalog: Catalog = {
+      ...learnedCatalog,
+      models: [
+        { ...learnedCatalog.models[0], codingIndex: Number.NaN },
+        learnedCatalog.models[1],
+      ],
+    };
+
+    expect(selectFor("quality", learned, invalidQualityCatalog).modelId).toBe("provider/cheap");
+  });
+
   it.each([0, -1, Number.POSITIVE_INFINITY, Number.NaN])(
     "does not admit a paid learned value candidate with price %s",
     (price) => {
