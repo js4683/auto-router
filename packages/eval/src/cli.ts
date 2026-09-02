@@ -4,6 +4,7 @@ import { curateRecording } from "./curate.js";
 import { planLiveEvaluation, runLiveEvaluation, type JudgeClientConfig } from "./live.js";
 import { replayDataset } from "./replay.js";
 import { buildLiveReport, buildReplayReport, renderMarkdown, stableJson } from "./report.js";
+import { runAvengersCommand } from "./avengers-cli.js";
 import { readDataset } from "./schema.js";
 import type { EvalReportV1 } from "./types.js";
 
@@ -14,7 +15,7 @@ export interface CliIo {
   fetch?: typeof fetch;
 }
 
-interface ParsedArgs {
+export interface ParsedArgs {
   command: string;
   values: Record<string, string>;
   flags: Set<string>;
@@ -41,7 +42,7 @@ function parseArgs(args: string[]): ParsedArgs {
   return { command, values, flags };
 }
 
-function requireValue(parsed: ParsedArgs, flag: string): string {
+export function requireValue(parsed: ParsedArgs, flag: string): string {
   const value = parsed.values[flag];
   if (!value) throw new Error(`${flag} is required`);
   return value;
@@ -74,13 +75,13 @@ function runReplay(parsed: ParsedArgs, io: CliIo): number {
   return 0;
 }
 
-function requiredEnv(io: CliIo, name: string): string {
+export function requiredEnv(io: CliIo, name: string): string {
   const value = io.env[name];
   if (!value) throw new Error(`${name} is required`);
   return value;
 }
 
-function positiveEnv(io: CliIo, name: string, fallback: number): number {
+export function positiveEnv(io: CliIo, name: string, fallback: number): number {
   const raw = io.env[name];
   if (raw === undefined) return fallback;
   const value = Number(raw);
@@ -138,6 +139,8 @@ function runCurate(parsed: ParsedArgs, io: CliIo): number {
 export async function runCli(args: string[], io: CliIo): Promise<number> {
   try {
     const parsed = parseArgs(args);
+    const avengers = await runAvengersCommand(parsed, io);
+    if (avengers !== undefined) return avengers;
     if (parsed.command === "replay") return runReplay(parsed, io);
     if (parsed.command === "live") return await runLive(parsed, io);
     if (parsed.command === "curate") return runCurate(parsed, io);
