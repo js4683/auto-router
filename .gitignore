@@ -15,3 +15,6 @@ docs/superpowers/
 *.eval-dataset.local.json
 phase-4-collection.local.jsonl
 phase-4-corpus.local.json
+phase-4-embeddings.local.json
+phase-4-validation.local.json
+phase-4-validation.local.md

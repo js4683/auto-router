@@ -168,22 +168,26 @@ export async function requestCompletion(
   return parseOutput(await readBounded(response));
 }
 
-export async function judgeOutputs(
-  input: JudgeCaseInput,
-  outputs: Record<StrategyName, LiveOutput>,
+const JUDGE_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+export async function judgeLabeledOutputs(
+  id: string,
+  rubric: string,
+  outputs: Array<{ id: string; output: LiveOutput }>,
   config: JudgeClientConfig,
-  fetchImpl: typeof fetch = fetch
-): Promise<Record<StrategyName, number>> {
-  const names = shuffledStrategies(input.id);
-  const labels = ["A", "B", "C"] as const;
-  const mapping = Object.fromEntries(labels.map((label, index) => [label, names[index]])) as Record<(typeof labels)[number], StrategyName>;
+  fetchImpl?: typeof fetch
+): Promise<Record<string, number>> {
+  if (outputs.length < 2 || outputs.length > 26) throw new Error("judge outputs must contain between 2 and 26 items");
+  const labels = [...JUDGE_LABELS.slice(0, outputs.length)];
+  const shuffled = shuffleLabeled(outputs, id);
+  const mapping = Object.fromEntries(labels.map((label, index) => [label, shuffled[index].id]));
   const request = {
-    rubric: input.rubric,
-    instruction: "Score each response from 0 through 100. Return only a JSON object with a scores object keyed by A, B, and C.",
-    responses: labels.map((label) => {
-      const output = outputs[mapping[label]];
-      return { label, response: { text: output.text, terminalState: output.terminalState } };
-    }),
+    rubric,
+    instruction: `Score each response from 0 through 100. Return only a JSON object with a scores object keyed by ${labels.join(", ")}.`,
+    responses: labels.map((label, index) => ({
+      label,
+      response: { text: shuffled[index].output.text, terminalState: shuffled[index].output.terminalState },
+    })),
   };
   const judged = await requestCompletion(
     {
@@ -203,23 +207,44 @@ export async function judgeOutputs(
   );
   if (judged.terminalState !== "completed") throw new Error(`judge response terminal state is ${judged.terminalState}`);
   const scores = parseJudgeScores(judged.text, labels);
-  const result = {} as Record<StrategyName, number>;
+  const result: Record<string, number> = {};
   for (const label of labels) result[mapping[label]] = scores[label] / 100;
   return result;
 }
 
-function shuffledStrategies(seed: string): StrategyName[] {
-  const values: StrategyName[] = ["router", "always-frontier", "always-cheap"];
+export async function judgeOutputs(
+  input: JudgeCaseInput,
+  outputs: Record<StrategyName, LiveOutput>,
+  config: JudgeClientConfig,
+  fetchImpl: typeof fetch = fetch
+): Promise<Record<StrategyName, number>> {
+  const names: StrategyName[] = ["router", "always-frontier", "always-cheap"];
+  const scored = await judgeLabeledOutputs(
+    input.id,
+    input.rubric,
+    names.map((name) => ({ id: name, output: outputs[name] })),
+    config,
+    fetchImpl
+  );
+  return {
+    router: scored.router,
+    "always-frontier": scored["always-frontier"],
+    "always-cheap": scored["always-cheap"],
+  };
+}
+
+function shuffleLabeled<T>(values: T[], seed: string): T[] {
+  const shuffled = [...values];
   let hash = 2166136261;
   for (const char of seed) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
-  for (let index = values.length - 1; index > 0; index -= 1) {
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
     hash ^= hash << 13;
     hash ^= hash >>> 17;
     hash ^= hash << 5;
     const target = (hash >>> 0) % (index + 1);
-    [values[index], values[target]] = [values[target], values[index]];
+    [shuffled[index], shuffled[target]] = [shuffled[target], shuffled[index]];
   }
-  return values;
+  return shuffled;
 }
 
 function parseJudgeScores(text: string, labels: readonly string[]): Record<string, number> {
@@ -232,7 +257,9 @@ function parseJudgeScores(text: string, labels: readonly string[]): Record<strin
   const scores = payload?.scores;
   if (!scores || typeof scores !== "object" || Array.isArray(scores)) throw new Error("judge response is missing scores");
   const keys = Object.keys(scores).sort();
-  if (JSON.stringify(keys) !== JSON.stringify([...labels].sort())) throw new Error("judge response labels must be exactly A, B, and C");
+  if (JSON.stringify(keys) !== JSON.stringify([...labels].sort())) {
+    throw new Error(labels.length === 3 ? "judge response labels must be exactly A, B, and C" : "judge response labels must match the requested set");
+  }
   for (const label of labels) {
     const score = scores[label];
     if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) {
