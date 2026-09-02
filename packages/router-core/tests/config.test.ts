@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 
 describe("loadConfig merge", () => {
+  it("keeps the checked-in Phase 4 classifier disabled by default", () => {
+    const cfg = loadConfig(new URL("../../../auto-router.json", import.meta.url).pathname);
+
+    expect(cfg.avengersPro.enabled).toBe(false);
+  });
+
   it("fills missing planning and verification policies from defaults", () => {
     const dir = mkdtempSync(join(tmpdir(), "auto-router-config-"));
     const path = join(dir, "stale.json");

@@ -71,7 +71,7 @@
     }
   },
   "avengersPro": {
-    "enabled": true,
+    "enabled": false,
     "artifactDir": "./packages/router-core/artifacts/avengers-pro/fixture",
     "topK": 3,
     "beta": 9,
