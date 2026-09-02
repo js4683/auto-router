@@ -1,22 +1,27 @@
 # Phase 4 Tier-1 Embedding Classifier Design
 
 **Status:** Approved in design review on 2026-09-01
+**Implementation status:** The shared `router-core` embedding boundary is implemented;
+observed-outcome collection, artifact building, held-out validation, and runtime wiring
+remain pending.
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
 ## Context
 
-The router currently has two partial Tier-1 pieces:
+The router currently has three partial Tier-1 pieces:
 
 - `router-core` can load fixture Avengers-Pro cluster artifacts and score a supplied
   embedding.
+- `router-core` exposes the shared dependency-free OpenAI-compatible embedding boundary
+  for normalization, endpoint binding, and batched validated requests.
 - The proxy can pass the resulting canonical model ranking into `selectModel`.
 
-The executable path is not production-ready. It uses a two-dimensional keyword fixture,
-does not call a real embedding endpoint, and has no observed-outcome corpus or artifact
-builder. The checked-in `auto-router.json` keeps this fixture disabled by default. Phase 4
-completes that path without weakening the existing task-policy, Tier-0, context-fit, or
-stickiness contracts.
+The runtime classifier path is not production-ready. It still uses a two-dimensional
+keyword fixture, does not invoke the embedding boundary, and has no observed-outcome
+corpus or artifact builder. The checked-in `auto-router.json` keeps this fixture disabled
+by default. Phase 4 completes that path without weakening the existing task-policy,
+Tier-0, context-fit, or stickiness contracts.
 
 ## Goals
 
@@ -156,11 +161,21 @@ Training and inference use the same text-normalization function. It normalizes l
 endings, trims outer whitespace, and applies one configured input bound without changing
 case or internal content. The artifact records that normalization version and bound.
 
-The configured `baseUrl` includes the API version prefix, such as
-`https://embedding.example/v1`; the client appends `/embeddings`. Requests may be batched
-offline; runtime sends one normalized task. Every response must contain the expected item
-count, one consistent positive dimension, and finite numeric values. The configured
-embedding model and returned vectors must match artifact metadata.
+The shared boundary exports `normalizeEmbeddingText`, `embeddingEndpointDigest`, and
+`requestEmbeddings`. It uses native `fetch` and Node built-ins only. The configured
+`baseUrl` includes the API version prefix, such as `https://embedding.example/v1`; the
+client appends exactly `/embeddings` after removing trailing slashes. HTTPS is required
+except for `127.0.0.1`, `localhost`, and `::1`; credentials, query strings, and fragments
+are rejected. The endpoint digest is SHA-256 over that normalized pre-append base URL.
+
+`normalizeEmbeddingText` normalizes line endings, trims outer whitespace, and applies a
+positive integer character bound without changing case or internal content.
+`requestEmbeddings` accepts 1–128 strings totaling at most 1 MiB of UTF-8 input,
+requires a positive integer timeout, rejects redirects, performs no retries, and bounds
+successful response bodies to 16 MiB. Responses must contain unique in-range indices,
+one consistent positive dimension, and finite numeric values. Non-success errors expose
+only the HTTP status and cancel the response body; keys and provider bodies are never
+included in errors.
 
 Offline embedding caches are keyed by corpus example ID, normalized-input digest, and
 embedding model. They are ignored local data and never contain API keys or raw responses.
