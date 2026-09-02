@@ -11,7 +11,7 @@ const options: AvengersTrainingOptions = {
   embeddingModel: "embed/test",
   embeddingDimensions: 2,
   maxInputChars: 16000,
-  splitSeed: "seed-1",
+  splitSeed: "training-seed-1",
   heldOutRatio: 0.4,
   clusters: 2,
   topK: 1,
