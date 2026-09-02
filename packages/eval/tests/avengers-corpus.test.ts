@@ -229,7 +229,7 @@ describe("parseAvengersCorpus", () => {
 
 describe("splitAvengersCorpus", () => {
   it("keeps every session group on one side of the split", () => {
-    const split = splitAvengersCorpus(corpusWithRepeatedGroups(), "seed-1", 0.4);
+    const split = splitAvengersCorpus(corpusWithRepeatedGroups(), "split-seed", 0.4);
     const trainGroups = new Set(split.train.map((item) => item.sessionGroupId));
     expect(split.heldOut.every((item) => !trainGroups.has(item.sessionGroupId))).toBe(true);
   });
@@ -237,6 +237,20 @@ describe("splitAvengersCorpus", () => {
   it("rejects a held-out ratio outside (0, 1)", () => {
     expect(() => splitAvengersCorpus(corpusWithRepeatedGroups(), "seed-1", 0)).toThrow(/ratio/i);
     expect(() => splitAvengersCorpus(corpusWithRepeatedGroups(), "seed-1", 1)).toThrow(/ratio/i);
+  });
+
+  it("holds out a fraction of session groups close to the requested ratio", () => {
+    const corpus = validCorpus();
+    corpus.examples = Array.from({ length: 400 }, (_, index) =>
+      validExample({ id: `ex-${index}`, sessionGroupId: `group-${index}`, sequence: 0 }),
+    );
+    for (const ratio of [0.2, 0.5, 0.8]) {
+      const split = splitAvengersCorpus(corpus, "ratio-seed", ratio);
+      const heldOutGroups = new Set(split.heldOut.map((item) => item.sessionGroupId));
+      const fraction = heldOutGroups.size / 400;
+      expect(fraction).toBeGreaterThan(ratio - 0.1);
+      expect(fraction).toBeLessThan(ratio + 0.1);
+    }
   });
 
   it("produces stable, sorted output for a literal seed", () => {

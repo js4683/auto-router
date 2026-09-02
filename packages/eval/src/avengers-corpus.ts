@@ -277,7 +277,7 @@ export function avengersCorpusDigest(corpus: AvengersCorpusV1): string {
 function splitRatio(seed: string, sessionGroupId: string): number {
   const hash = createHash("sha256").update(`${seed}\0${sessionGroupId}`).digest("hex");
   const value = Number.parseInt(hash.slice(0, 13), 16);
-  return value / 0x1fffffffffffff;
+  return value / 0x10000000000000;
 }
 
 export function splitAvengersCorpus(corpus: AvengersCorpusV1, seed: string, heldOutRatio: number): CorpusSplit {
