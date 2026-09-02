@@ -171,21 +171,24 @@ describe("embedding client boundary", () => {
 
   it("cancels non-success bodies without reading them", async () => {
     let cancelled = false;
-    let reads = 0;
-    const body = new ReadableStream<Uint8Array>({
-      pull() {
-        reads += 1;
-      },
+    let readAttempts = 0;
+    const body = {
       cancel() {
         cancelled = true;
+        return Promise.resolve();
       },
-    });
+      getReader() {
+        readAttempts += 1;
+        throw new Error("non-success body was read");
+      },
+    } as unknown as Body;
+    const response = { ok: false, status: 429, body } as unknown as Response;
 
-    await expect(requestEmbeddings(["one"], config, async () => new Response(body, { status: 429 }))).rejects.toThrow(
+    await expect(requestEmbeddings(["one"], config, async () => response)).rejects.toThrow(
       "embedding endpoint returned HTTP 429"
     );
     expect(cancelled).toBe(true);
-    expect(reads).toBe(0);
+    expect(readAttempts).toBe(0);
   });
 
   it("reads at most 16 MiB from the provider response", async () => {
