@@ -54,7 +54,7 @@ describe("avengers-pro inference", () => {
   it("ranks the nearest cluster's top paper model first", async () => {
     const artifacts = loadAvengersProArtifact(fixtureDir);
     const result = await rankAvengersPro("write a cheap unit test", artifacts, async () => [1, 0]);
-    expect(result.paperIds[0]).toBe("qwen/qwen3");
+    expect(result.paperIds[0]).toBe("paper/frontier");
   });
 
   it("aggregates cluster quality means by top-K softmax probability", () => {

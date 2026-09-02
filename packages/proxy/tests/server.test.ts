@@ -706,7 +706,7 @@ describe("proxy", () => {
       providerFreeSet: ["muse-spark-1.2-contributor-free"],
       windowRegistry: { "muse-spark-1.2-contributor-free": 272000 },
       modelMap: {
-        "qwen/qwen3": [{ runtimeId: "opencode/muse-spark-1.2-contributor-free", source: "hand" }],
+        "paper/frontier": [{ runtimeId: "opencode/muse-spark-1.2-contributor-free", source: "hand" }],
       },
     }));
     vi.stubEnv("AUTO_ROUTER_CONFIG", configPath);
@@ -714,7 +714,7 @@ describe("proxy", () => {
       const { bootstrapProxyOptions } = await import("../src/server.js");
       const opts = bootstrapProxyOptions();
       expect(opts.rankAvengers).toBeTypeOf("function");
-      expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("qwen/qwen3");
+      expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("paper/frontier");
 
       const res = collectRes();
       const server = createProxyServer({
