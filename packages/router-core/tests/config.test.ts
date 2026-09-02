@@ -9,6 +9,10 @@ describe("loadConfig merge", () => {
     const cfg = loadConfig(new URL("../../../auto-router.json", import.meta.url).pathname);
 
     expect(cfg.avengersPro?.enabled).toBe(false);
+    expect(cfg.avengersPro?.timeoutMs).toBe(400);
+    expect(cfg.avengersPro?.maxInputChars).toBe(16000);
+    expect(cfg.avengersPro).not.toHaveProperty("topK");
+    expect(cfg.avengersPro).not.toHaveProperty("beta");
   });
 
   it("fills missing planning and verification policies from defaults", () => {

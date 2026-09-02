@@ -697,45 +697,39 @@ describe("proxy", () => {
     });
   });
 
-  it("keeps the disabled synthetic v2 fixture usable for pure bootstrap scoring", async () => {
+  it("rejects the synthetic fixture through production bootstrap", async () => {
     const directory = mkdtempSync(join(tmpdir(), "auto-router-avengers-"));
     const configPath = join(directory, "enabled.json");
     writeFileSync(configPath, JSON.stringify({
       tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
-      avengersPro: { enabled: true },
-      providerFreeSet: ["muse-spark-1.2-contributor-free"],
-      windowRegistry: { "muse-spark-1.2-contributor-free": 272000 },
-      modelMap: {
-        "paper/frontier": [{ runtimeId: "opencode/muse-spark-1.2-contributor-free", source: "hand" }],
-      },
+      avengersPro: { enabled: true, artifactDir: "./packages/router-core/artifacts/avengers-pro/fixture", timeoutMs: 400, maxInputChars: 16000 },
     }));
     vi.stubEnv("AUTO_ROUTER_CONFIG", configPath);
     try {
       const { bootstrapProxyOptions } = await import("../src/server.js");
       const opts = bootstrapProxyOptions();
-      expect(opts.rankAvengers).toBeTypeOf("function");
-      expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("paper/frontier");
-
-      const res = collectRes();
-      const server = createProxyServer({
-        ...opts,
-        sessions: memorySessions(),
-        backends: {
-          opencode: {
-            baseUrl: "http://backend.test",
-            fetchImpl: async () => new Response(JSON.stringify({ id: "ok", output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }] })),
-          },
-        },
-      });
-      await server.handle(
-        fakeReq("/v1/route", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] }),
-        res as never
-      );
-      expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
+      expect(opts.rankAvengers).toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("lets an injected async prediction drive avengers-pro selection", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      rankAvengers: async () => avengersPrediction,
+      select: selectModel,
+    });
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/route", { model: "auto", messages: [{ role: "user", content: "implement the feature" }] }),
+      res as never
+    );
+    expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
   });
 
   it("enables proxy recording only through explicit environment configuration", async () => {

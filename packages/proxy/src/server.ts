@@ -4,10 +4,8 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   detectBoundary,
-  loadAvengersProArtifact,
   loadCatalogSync,
   loadConfig,
-  scoreAvengersPro,
   selectModel,
   type AvengersProPrediction,
   type Catalog,
@@ -16,6 +14,7 @@ import {
   type SessionState,
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
+import { createAvengersRuntime } from "./avengers-runtime.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 
@@ -31,7 +30,7 @@ export interface CreateProxyServerOptions {
   config: RouterConfig;
   sessions: ProxySessionStore;
   backends: Record<string, ProxyBackend>;
-  rankAvengers?: (text: string) => AvengersProPrediction;
+  rankAvengers?: (text: string) => AvengersProPrediction | Promise<AvengersProPrediction>;
   recorder?: EvalRecorder;
 }
 
@@ -900,7 +899,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   close(): void;
 } {
-  function decide(req: IncomingMessage, body: any, text: string): SelectionResult {
+  async function decide(req: IncomingMessage, body: any, text: string): Promise<SelectionResult> {
     const id = sessionId(req, text);
     const stored = opts.sessions.get(id);
     const isNewSession = !stored.taskTarget;
@@ -920,13 +919,6 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       };
     }
 
-    let prediction: AvengersProPrediction | undefined;
-    try {
-      prediction = opts.rankAvengers?.(text);
-    } catch {
-      prediction = undefined;
-    }
-
     const forced = req.headers["x-force-model"];
     if (typeof forced === "string" && forced) {
       const result: SelectionResult = {
@@ -942,6 +934,13 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       };
       opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
       return result;
+    }
+
+    let prediction: AvengersProPrediction | undefined;
+    try {
+      prediction = await opts.rankAvengers?.(text);
+    } catch {
+      prediction = undefined;
     }
 
     const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
@@ -980,7 +979,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const text = lastUserText(messages);
       const id = sessionId(req, text);
       const state = sessionState(normalizedBody, text, !opts.sessions.get(id).taskTarget);
-      const result = decide(req, normalizedBody, text);
+      const result = await decide(req, normalizedBody, text);
 
       if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
@@ -1144,27 +1143,14 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   };
 }
 
-function resolveExistingPath(path: string): string {
-  const candidates = [resolve(path), resolve("..", path), resolve("../..", path)];
-  return candidates.find((candidate) => existsSync(candidate)) ?? resolve(path);
-}
-
-function fixtureEmbed(text: string): number[] {
-  return /plan|architect|design/i.test(text) ? [0, 1] : [1, 0];
-}
-
 export function bootstrapProxyOptions(): CreateProxyServerOptions {
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
-  let rankAvengers: CreateProxyServerOptions["rankAvengers"];
-  if (config.avengersPro?.enabled) {
-    try {
-      const artifacts = loadAvengersProArtifact(resolveExistingPath(config.avengersPro.artifactDir));
-      rankAvengers = (text) => scoreAvengersPro(fixtureEmbed(text), artifacts);
-    } catch {
-      rankAvengers = undefined;
-    }
-  }
+  const runtime = createAvengersRuntime({
+    config,
+    env: process.env,
+    warn: (event) => console.warn("[auto-router]", event.code),
+  });
   return {
     select: selectModel,
     catalog,
@@ -1179,7 +1165,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
         apiKey: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY,
       },
     },
-    rankAvengers,
+    rankAvengers: runtime ? (text) => runtime.rank(text) : undefined,
     recorder: createProxyRecorderFromEnv(),
   };
 }

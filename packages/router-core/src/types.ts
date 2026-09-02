@@ -144,9 +144,8 @@ export interface RouterConfig {
     enabled: boolean;
     artifactDir: string;
     embedding?: { baseUrl: string; apiKeyEnv: string; model: string };
-    topK?: number;
-    beta?: number;
-    timeoutMs?: number;
+    timeoutMs: number;
+    maxInputChars: number;
   };
   modelMap?: ModelMap;
 }
