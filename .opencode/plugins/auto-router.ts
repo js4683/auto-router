@@ -12,6 +12,11 @@ type LiveCatalogSnapshot = Readonly<{
   runtimeIDs: ReadonlySet<string>;
 }>;
 
+type TaskSelection = Readonly<{
+  target: string;
+  liveSnapshot: LiveCatalogSnapshot;
+}>;
+
 type RuntimeModel = { providerID: string; modelID: string };
 type PendingApply = RuntimeModel & { messageID: string; agent: string };
 
@@ -235,7 +240,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     boundary: ReturnType<typeof detectBoundary>,
     prevAgent?: string,
     prevMessage?: string
-  ): Promise<LiveCatalogSnapshot | undefined> {
+  ): Promise<TaskSelection | undefined> {
     const liveSnapshot = await loadLiveCatalog();
     const selectionState: SessionState = {
       ...sessionState,
@@ -290,26 +295,27 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       boundary,
       catalogSource: result.catalogSource,
     });
-    return liveSnapshot;
+    return { target: result.modelId, liveSnapshot };
   }
 
   async function applyTaskTarget(
     sessionID: string,
     session: PerSession,
+    taskTarget: string | null,
     message: { id: string; agent: string; model: RuntimeModel & { variant?: string } },
     liveSnapshot: LiveCatalogSnapshot,
     notify: boolean
   ): Promise<void> {
-    if (!session.taskTarget || !liveSnapshot.runtimeIDs.has(session.taskTarget)) return;
-    const target = parseRuntimeModelID(session.taskTarget);
+    if (!taskTarget || !liveSnapshot.runtimeIDs.has(taskTarget)) return;
+    const target = parseRuntimeModelID(taskTarget);
     if (!target) {
-      await logDecision(`[auto-router] TASK APPLY skipped malformed=${session.taskTarget}`, "warn", {
+      await logDecision(`[auto-router] TASK APPLY skipped malformed=${taskTarget}`, "warn", {
         sessionID,
-        target: session.taskTarget,
+        target: taskTarget,
       });
       return;
     }
-    if (runtimeModelID(message.model) === session.taskTarget) return;
+    if (runtimeModelID(message.model) === taskTarget) return;
 
     message.model = target;
     session.pendingApply = { ...target, messageID: message.id, agent: message.agent };
@@ -318,7 +324,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     await client.tui.showToast({
       body: {
         title: "Auto-router",
-        message: `Using ${session.taskTarget} for this task`,
+        message: `Using ${taskTarget} for this task`,
         variant: "info",
         duration: 3000,
       },
@@ -350,16 +356,17 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       s.prevAgent = agent ?? sessionState.activeAgent;
       s.prevMessage = msgText;
       const requestSnapshot = currentLiveSnapshot;
-      const shouldSelect = !s.taskTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(s.taskTarget);
+      const requestTarget = s.taskTarget;
+      const shouldSelect = !requestTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(requestTarget);
       s.pendingApply = null;
 
       if (shouldSelect) {
-        const selectedSnapshot = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage);
-        if (!selectedSnapshot) return;
-        await applyTaskTarget(sessionID, s, output.message, selectedSnapshot, true);
+        const selection = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage);
+        if (!selection) return;
+        await applyTaskTarget(sessionID, s, selection.target, output.message, selection.liveSnapshot, true);
         return;
       }
-      await applyTaskTarget(sessionID, s, output.message, requestSnapshot, false);
+      await applyTaskTarget(sessionID, s, requestTarget, output.message, requestSnapshot, false);
     },
 
     "chat.params": async (input) => {

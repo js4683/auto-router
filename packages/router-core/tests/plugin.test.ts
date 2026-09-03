@@ -326,6 +326,64 @@ describe("auto-router provider discovery", () => {
     });
   });
 
+  it("applies overlapping same-session selections to their own messages", async () => {
+    let calls = 0;
+    let paused = false;
+    let releaseFirstSelection: (() => void) | undefined;
+    let firstSelectionLogged: (() => void) | undefined;
+    const selectionLogged = new Promise<void>((resolve) => {
+      firstSelectionLogged = resolve;
+    });
+    const fixture = testClient(async () => {
+      calls += 1;
+      return {
+        data: calls === 1
+          ? providerData
+          : {
+              connected: ["openai"],
+              all: [{
+                id: "openai",
+                models: {
+                  "fable-latest": {
+                    id: "fable-latest",
+                    name: "Fable",
+                    cost: { input: 2, output: 8 },
+                    limit: { context: 272000, output: 65536 },
+                    status: "active",
+                  },
+                },
+              }],
+            },
+      };
+    });
+    const appLog = fixture.client.app.log;
+    fixture.client.app.log = async ({ body }: any) => {
+      await appLog({ body });
+      if (!paused && body.extra?.sessionID === "overlap" && body.message.includes("TASK SELECT")) {
+        paused = true;
+        firstSelectionLogged?.();
+        await new Promise<void>((resolve) => {
+          releaseFirstSelection = resolve;
+        });
+      }
+    };
+    const hooks = await plugin(fixture.client);
+    const first = message("fix typo", { sessionID: "overlap", messageID: "message-1" });
+    const firstTurn = hooks["chat.message"]!({ sessionID: "overlap", agent: "build" } as any, first as any);
+
+    await selectionLogged;
+    const second = message("[task:planning] plan the architecture", { sessionID: "overlap", messageID: "message-2" });
+    await hooks["chat.message"]!({ sessionID: "overlap", agent: "build" } as any, second as any);
+    releaseFirstSelection?.();
+    await firstTurn;
+
+    expect(first.message.model).toEqual({
+      providerID: "opencode",
+      modelID: "muse-spark-1.2-contributor-free",
+    });
+    expect(second.message.model).toEqual({ providerID: "openai", modelID: "fable-latest" });
+  });
+
   it("confirms the applied model only for the matching message and agent", async () => {
     const fixture = testClient();
     const hooks = await plugin(fixture.client);
