@@ -194,10 +194,14 @@ Map aggregate score -> tier -> model (via policy config). Planning and architect
 keywords additionally activate the planning quality floor so they cannot route to a
 trivial-task model.
 
-### Tier 1 — embedding similarity (later)
+### Tier 1 — embedding similarity (approved, opt-in)
 
-Compare the request against a small labeled difficulty set (jina / voyage embeddings,
-a la Not-Diamond RoRF). Opt-in.
+Use task-boundary embeddings and observed model outcomes to train deterministic clusters,
+then constrained-rerank eligible models. The checked-in fixture-backed path remains
+disabled by default and falls back to Tier 0. Phase 4 code is complete; production
+corpus, artifact, and activation remain unchecked. The full architecture, including the
+held-out activation gate, is documented in the
+[Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md).
 
 ### Tier 2 — LLM judge (optional, later)
 
@@ -245,6 +249,25 @@ target state once an upstream `llm.request.before`-style hook exists.
 
 ## Eval harness
 
-Replay real recorded sessions through the router; measure cost saved vs quality
-retained. Bar to beat: RouteLLM reports ~95% quality at ~26% cost. This is the
-"backtest" that makes the project credible rather than a demo.
+`packages/eval` is a separate workspace over `router-core`. Its required offline mode
+replays versioned datasets through the router and deterministic always-frontier and
+always-cheap baselines. All strategies share one frozen catalog, price snapshot,
+capability map, and context eligibility rules. Reports separate observed data from
+counterfactual estimates and include cost, model switches, cache impact, completeness,
+and deterministic routing evidence.
+
+Opt-in live mode calls an OpenAI-compatible endpoint for all three strategies, applies
+bounded deterministic checks, and uses seeded blinded response labels for a judge. Live
+calls require `--confirm-live`, explicit environment credentials, request timeouts, and
+output limits. Only complete live cases can establish quality retention; offline catalog
+quality is a proxy and cannot satisfy the benchmark gate.
+
+The proxy may emit local JSON Lines in disabled-by-default `metadata` or explicitly
+enabled `content` mode. Headers and environment values are excluded, common credential
+formats are redacted, writes are serialized with restrictive permissions, and old files
+are pruned. Curation validates records into dataset shape but always requires manual
+privacy review before commit. Proxy token counts remain explicitly estimated; reports
+aggregate provider-observed usage separately.
+
+The accepted design and exact gates are recorded in
+[`docs/plans/2026-08-31-phase-3-eval-harness-design.md`](./docs/plans/2026-08-31-phase-3-eval-harness-design.md).

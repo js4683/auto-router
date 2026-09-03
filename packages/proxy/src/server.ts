@@ -4,16 +4,18 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   detectBoundary,
-  loadAvengersProArtifacts,
   loadCatalogSync,
   loadConfig,
-  scoreAvengersPro,
   selectModel,
+  type AvengersProPrediction,
   type Catalog,
   type RouterConfig,
   type SelectionResult,
   type SessionState,
 } from "@auto-router/router-core";
+import type { EvalRecorder } from "@auto-router/eval";
+import { createAvengersRuntime } from "./avengers-runtime.js";
+import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 
 export interface ProxyBackend {
@@ -28,7 +30,8 @@ export interface CreateProxyServerOptions {
   config: RouterConfig;
   sessions: ProxySessionStore;
   backends: Record<string, ProxyBackend>;
-  rankAvengers?: (text: string) => { paperIds: string[] };
+  rankAvengers?: (text: string) => AvengersProPrediction | Promise<AvengersProPrediction>;
+  recorder?: EvalRecorder;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -515,7 +518,7 @@ function upstreamRequest(
     return { body: { ...originalBody, model }, path: "/v1/responses", translateResponse: false, useGemini: false };
   }
   if (provider === "google") {
-    const isStream = !!normalizedBody.stream;
+    const isStream = !!normalizedBody.stream && protocol === "chat";
     const key = token ? `?key=${encodeURIComponent(token)}` : "";
     const alt = isStream ? (key ? "&alt=sse" : "?alt=sse") : "";
     const action = isStream ? "streamGenerateContent" : "generateContent";
@@ -526,13 +529,11 @@ function upstreamRequest(
     if (native) {
       return { body: { ...originalBody, model }, path: "/v1/messages", translateResponse: !native, useGemini: false };
     }
-    const body: any = anthropicRequest(normalizedBody, model);
-    if (normalizedBody.stream) body.stream = true;
+    const body: any = { ...anthropicRequest(normalizedBody, model), stream: false };
     return { body, path: "/v1/messages", translateResponse: !native, useGemini: false };
   }
   if (provider === "opencode") {
-    const body: any = zenRequest(normalizedBody, model);
-    if (normalizedBody.stream) body.stream = true;
+    const body: any = { ...zenRequest(normalizedBody, model), stream: false };
     return { body, path: "/v1/responses", translateResponse: true, useGemini: false };
   }
 
@@ -547,6 +548,17 @@ function upstreamRequest(
 
 function sessionId(req: IncomingMessage, text: string): string {
   return String(req.headers["x-session-id"] ?? req.headers["x-opencode-session"] ?? text.slice(0, 64) ?? "global");
+}
+
+function requiredCapabilities(body: any): string[] {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const declaredTools = Array.isArray(body?.tools) && body.tools.length > 0;
+  const toolMessages = messages.some(
+    (message: any) =>
+      message?.role === "tool" ||
+      (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0)
+  );
+  return ["text", ...(declaredTools || toolMessages ? ["tools"] : [])];
 }
 
 function estimateTokens(text: string): number {
@@ -887,7 +899,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   close(): void;
 } {
-  function decide(req: IncomingMessage, body: any, text: string): SelectionResult {
+  async function decide(req: IncomingMessage, body: any, text: string): Promise<SelectionResult> {
     const id = sessionId(req, text);
     const stored = opts.sessions.get(id);
     const isNewSession = !stored.taskTarget;
@@ -907,13 +919,6 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       };
     }
 
-    let paperIds: string[] | undefined;
-    try {
-      paperIds = opts.rankAvengers?.(text).paperIds;
-    } catch {
-      paperIds = undefined;
-    }
-
     const forced = req.headers["x-force-model"];
     if (typeof forced === "string" && forced) {
       const result: SelectionResult = {
@@ -931,13 +936,21 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       return result;
     }
 
-    const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, paperIds ? { paperIds } : undefined);
+    let prediction: AvengersProPrediction | undefined;
+    try {
+      prediction = await opts.rankAvengers?.(text);
+    } catch {
+      prediction = undefined;
+    }
+
+    const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
     opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
     return result;
   }
 
   return {
     async handle(req, res) {
+      const startedAt = Date.now();
       const path = req.url?.split("?", 1)[0];
       if (path === "/health") {
         json(res, 200, { ok: true });
@@ -964,11 +977,28 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const normalizedBody = normalizeIngress(body, protocol);
       const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
-      const result = decide(req, normalizedBody, text);
+      const id = sessionId(req, text);
+      const state = sessionState(normalizedBody, text, !opts.sessions.get(id).taskTarget);
+      const result = await decide(req, normalizedBody, text);
 
       if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
         return;
+      }
+
+      if (opts.recorder && opts.recorder.mode !== "off") {
+        const headerTurnId = req.headers["x-turn-id"];
+        const turnId = typeof headerTurnId === "string" && headerTurnId ? headerTurnId : `${id}-${startedAt}`;
+        recordProxyResponse(res, opts.recorder, {
+          sessionId: id,
+          turnId,
+          startedAt,
+          protocol,
+          selection: { modelId: result.modelId, via: result.via, reason: result.reason },
+          sessionState: state,
+          requiredCapabilities: requiredCapabilities(normalizedBody),
+          ...(Array.isArray(normalizedBody.messages) ? { messages: normalizedBody.messages } : {}),
+        });
       }
 
       const { provider, bareModel } = resolveProvider(result.modelId);
@@ -1105,31 +1135,22 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       else res.statusCode = upstream.status;
       res.end(payload);
     },
-    close() {},
+    close() {
+      void opts.recorder?.flush().catch(() => {
+        console.warn("[auto-router] eval recording flush failed");
+      });
+    },
   };
-}
-
-function resolveExistingPath(path: string): string {
-  const candidates = [resolve(path), resolve("..", path), resolve("../..", path)];
-  return candidates.find((candidate) => existsSync(candidate)) ?? resolve(path);
-}
-
-function fixtureEmbed(text: string): number[] {
-  return /plan|architect|design/i.test(text) ? [0, 1] : [1, 0];
 }
 
 export function bootstrapProxyOptions(): CreateProxyServerOptions {
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
-  let rankAvengers: CreateProxyServerOptions["rankAvengers"];
-  if (config.avengersPro?.enabled) {
-    try {
-      const artifacts = loadAvengersProArtifacts(resolveExistingPath(config.avengersPro.artifactDir));
-      rankAvengers = (text) => scoreAvengersPro(fixtureEmbed(text), artifacts);
-    } catch {
-      rankAvengers = undefined;
-    }
-  }
+  const runtime = createAvengersRuntime({
+    config,
+    env: process.env,
+    warn: (event) => console.warn("[auto-router]", event.code),
+  });
   return {
     select: selectModel,
     catalog,
@@ -1144,7 +1165,8 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
         apiKey: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY,
       },
     },
-    rankAvengers,
+    rankAvengers: runtime ? (text) => runtime.rank(text) : undefined,
+    recorder: createProxyRecorderFromEnv(),
   };
 }
 

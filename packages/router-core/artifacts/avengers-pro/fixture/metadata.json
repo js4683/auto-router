@@ -1,7 +1,21 @@
 {
-  "n_clusters": 2,
-  "embedding_model": "fixture",
-  "available_models": ["qwen/qwen3", "openai/gpt-5-medium"],
-  "top_k": 1,
-  "beta": 9
+  "algorithmVersion": "deterministic-kmeans-v1",
+  "availableModels": [
+    "paper/balanced",
+    "paper/cheap",
+    "paper/frontier"
+  ],
+  "beta": 9,
+  "corpusDigest": "8f0bf13ddfba44cd30c79c105bef222aab2c4ac2af8b638bd6de263888a92c33",
+  "embeddingDimensions": 2,
+  "embeddingModel": "fixture",
+  "heldOutRatio": 0.34,
+  "maxInputChars": 16000,
+  "minObservations": 1,
+  "nClusters": 2,
+  "normalizationVersion": "phase4-text-v1",
+  "schemaVersion": 2,
+  "splitSeed": "fixture-seed",
+  "synthetic": true,
+  "topK": 1
 }

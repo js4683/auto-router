@@ -1,0 +1,71 @@
+{
+  "artifactDigest": "dfcc68cbacdefb87ac2c861ccedc81ef0bf889cb1940683c3b40ec682924fc27",
+  "eligible": false,
+  "embeddingEndpointDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "embeddingTimeoutMs": 400,
+  "gates": {
+    "candidateMatrix": {
+      "passed": true,
+      "reason": "fixture candidate matrix is complete"
+    },
+    "corpus": {
+      "passed": true,
+      "reason": "fixture corpus is valid"
+    },
+    "costSavings": {
+      "passed": true,
+      "reason": "fixture cost savings meets 0.50"
+    },
+    "embedding": {
+      "passed": true,
+      "reason": "fixture embedding matches"
+    },
+    "latency": {
+      "passed": true,
+      "reason": "fixture p95 is within timeout"
+    },
+    "qualityRetention": {
+      "passed": true,
+      "reason": "fixture quality retention meets 0.95"
+    },
+    "requiredCases": {
+      "passed": true,
+      "reason": "fixture required cases are complete"
+    },
+    "sampleSize": {
+      "passed": true,
+      "reason": "fixture has enough held-out cases"
+    },
+    "synthetic": {
+      "passed": false,
+      "reason": "fixture is synthetic"
+    },
+    "tier0Cost": {
+      "passed": true,
+      "reason": "fixture cost is no higher than Tier 0"
+    },
+    "tier0Quality": {
+      "passed": true,
+      "reason": "fixture quality is no lower than Tier 0"
+    },
+    "uncertainty": {
+      "passed": true,
+      "reason": "fixture seeded interval is present"
+    }
+  },
+  "metrics": {
+    "costDeltaVsTier0": 0,
+    "costSavingsVsFrontier": 0.5,
+    "qualityDeltaVsTier0": 0,
+    "qualityRetentionVsFrontier": 0.95
+  },
+  "p95EmbeddingLatencyMs": 300,
+  "qualityRetentionConfidenceInterval": {
+    "lower": 0.95,
+    "samples": 10000,
+    "seed": "fixture-bootstrap-v1",
+    "upper": 0.95
+  },
+  "sampleSize": 30,
+  "schemaVersion": 1
+}

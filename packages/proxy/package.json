@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "pretest": "npm run build --workspace=@auto-router/router-core",
+    "pretest": "npm run build --workspace=@auto-router/router-core && npm run build --workspace=@auto-router/eval",
     "test": "vitest run",
     "start": "node dist/src/server.js"
   },
   "dependencies": {
+    "@auto-router/eval": "*",
     "@auto-router/router-core": "*"
   },
   "devDependencies": {

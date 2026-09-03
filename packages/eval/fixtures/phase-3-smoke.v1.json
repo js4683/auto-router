@@ -1,0 +1,247 @@
+{
+  "schemaVersion": 1,
+  "id": "phase-3-smoke",
+  "description": "Synthetic verification, planning, and sticky implementation sessions",
+  "catalog": {
+    "fetchedAt": "2026-08-31T00:00:00.000Z",
+    "source": "cache",
+    "models": [
+      {
+        "id": "free",
+        "runtimeId": "fixture/free",
+        "codingIndex": 65,
+        "blendedPrice": 0,
+        "value": 650,
+        "windowTokens": 128000,
+        "isFree": true
+      },
+      {
+        "id": "cheap",
+        "runtimeId": "fixture/cheap",
+        "codingIndex": 75,
+        "blendedPrice": 1,
+        "value": 75,
+        "windowTokens": 128000,
+        "isFree": false
+      },
+      {
+        "id": "frontier",
+        "runtimeId": "fixture/frontier",
+        "codingIndex": 95,
+        "blendedPrice": 10,
+        "value": 9.5,
+        "windowTokens": 256000,
+        "isFree": false
+      }
+    ]
+  },
+  "config": {
+    "tiers": {
+      "simple": { "minQuality": 0 },
+      "medium": { "minQuality": 60 },
+      "complex": { "minQuality": 80 }
+    },
+    "scorer": {
+      "weights": {
+        "promptTokens": 0.2,
+        "sessionTokens": 0.2,
+        "filesTouched": 0.15,
+        "diffHunks": 0.15,
+        "toolDepth": 0.15,
+        "keywords": 0.15
+      },
+      "thresholds": { "simpleMax": 0.4, "mediumMax": 0.7 }
+    },
+    "stickiness": { "downgradeAfter": 3, "upgradeImmediate": true },
+    "guards": { "contextFitMarginTokens": 8000 },
+    "taskTypeModels": {
+      "code_review": { "prefer": null },
+      "run_tests": { "prefer": null, "strategy": "lowest-cost" },
+      "monitoring": { "prefer": null },
+      "planning": { "prefer": null, "strategy": "quality", "minQuality": 85 },
+      "implement": { "prefer": null },
+      "debug": { "prefer": null }
+    },
+    "providerFreeSet": ["fixture/free"],
+    "windowRegistry": {
+      "fixture/free": 128000,
+      "fixture/cheap": 128000,
+      "fixture/frontier": 256000
+    },
+    "catalog": {
+      "cachePath": "./.cache/eval-fixture.json",
+      "refreshIntervalHours": 24,
+      "artificialAnalysis": { "apiUrl": "https://example.invalid", "apiKeyEnv": "FIXTURE_KEY" }
+    }
+  },
+  "prices": {
+    "fixture/free": {
+      "inputPerMillion": 0,
+      "outputPerMillion": 0,
+      "cacheReadPerMillion": 0,
+      "cacheWritePerMillion": 0
+    },
+    "fixture/cheap": {
+      "inputPerMillion": 0.5,
+      "outputPerMillion": 2,
+      "cacheReadPerMillion": 0.05,
+      "cacheWritePerMillion": 0.625
+    },
+    "fixture/frontier": {
+      "inputPerMillion": 8,
+      "outputPerMillion": 24,
+      "cacheReadPerMillion": 0.8,
+      "cacheWritePerMillion": 10
+    }
+  },
+  "capabilities": {
+    "fixture/free": ["text", "tools"],
+    "fixture/cheap": ["text", "tools"],
+    "fixture/frontier": ["text", "tools"]
+  },
+  "liveModelAliases": {
+    "fixture/free": "provider/free",
+    "fixture/cheap": "provider/cheap",
+    "fixture/frontier": "provider/frontier"
+  },
+  "sessions": [
+    {
+      "id": "verification-session",
+      "turns": [
+        {
+          "id": "verification-1",
+          "sessionState": {
+            "lifetimeTokens": 1200,
+            "currentTask": {
+              "promptTokens": 30,
+              "taskTokens": 1200,
+              "filesTouched": 1,
+              "diffHunks": 0,
+              "toolDepth": 1,
+              "lastUserMessage": "Run the tests and report failures"
+            },
+            "userTag": "run_tests",
+            "isNewSession": true,
+            "forceTier": "simple"
+          },
+          "messages": [{ "role": "user", "content": "Run the synthetic tests and report failures" }],
+          "usage": {
+            "inputTokens": 1200,
+            "outputTokens": 120,
+            "cacheReadInputTokens": 0,
+            "cacheWriteInputTokens": 600
+          },
+          "requiredCapabilities": ["tools"],
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "checks": [{ "type": "includes", "expected": ["passed"] }],
+          "judgeRubric": "The answer accurately reports the supplied verification result.",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "id": "planning-session",
+      "turns": [
+        {
+          "id": "planning-1",
+          "sessionState": {
+            "lifetimeTokens": 5000,
+            "currentTask": {
+              "promptTokens": 300,
+              "taskTokens": 5000,
+              "filesTouched": 4,
+              "diffHunks": 2,
+              "toolDepth": 1,
+              "lastUserMessage": "Plan the architecture and explain trade-offs"
+            },
+            "userTag": "planning",
+            "isNewSession": true,
+            "forceTier": "medium"
+          },
+          "messages": [{ "role": "user", "content": "Plan a synthetic queue architecture and explain trade-offs" }],
+          "usage": {
+            "inputTokens": 5000,
+            "outputTokens": 800,
+            "cacheReadInputTokens": 0,
+            "cacheWriteInputTokens": 2000
+          },
+          "requiredCapabilities": ["text"],
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "judgeRubric": "The plan identifies failure modes and explains concrete trade-offs.",
+          "weight": 2
+        }
+      ]
+    },
+    {
+      "id": "implementation-session",
+      "turns": [
+        {
+          "id": "implementation-1",
+          "sessionState": {
+            "lifetimeTokens": 3000,
+            "currentTask": {
+              "promptTokens": 120,
+              "taskTokens": 3000,
+              "filesTouched": 2,
+              "diffHunks": 3,
+              "toolDepth": 2,
+              "lastUserMessage": "Implement the small parser"
+            },
+            "userTag": "implement",
+            "isNewSession": true,
+            "forceTier": "simple"
+          },
+          "messages": [{ "role": "user", "content": "Implement a small synthetic parser" }],
+          "usage": {
+            "inputTokens": 3000,
+            "outputTokens": 500,
+            "cacheReadInputTokens": 0,
+            "cacheWriteInputTokens": 1000
+          },
+          "requiredCapabilities": ["tools"],
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "checks": [{ "type": "recorded-outcome", "passed": true }],
+          "judgeRubric": "The implementation response is direct and complete.",
+          "weight": 1
+        },
+        {
+          "id": "implementation-2",
+          "sessionState": {
+            "lifetimeTokens": 4200,
+            "currentTask": {
+              "promptTokens": 40,
+              "taskTokens": 4200,
+              "filesTouched": 2,
+              "diffHunks": 3,
+              "toolDepth": 3,
+              "lastUserMessage": "Add the matching test"
+            },
+            "userTag": "implement",
+            "isNewSession": false,
+            "forceTier": "simple"
+          },
+          "messages": [
+            { "role": "user", "content": "Implement a small synthetic parser" },
+            { "role": "assistant", "content": "The parser is implemented." },
+            { "role": "user", "content": "Add the matching test" }
+          ],
+          "usage": {
+            "inputTokens": 4200,
+            "outputTokens": 400,
+            "cacheReadInputTokens": 2200,
+            "cacheWriteInputTokens": 0
+          },
+          "requiredCapabilities": ["tools"],
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "checks": [{ "type": "recorded-outcome", "passed": true }],
+          "judgeRubric": "The response adds a focused test without changing unrelated behavior.",
+          "weight": 1
+        }
+      ]
+    }
+  ]
+}

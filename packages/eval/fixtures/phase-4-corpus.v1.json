@@ -1,0 +1,442 @@
+{
+  "schemaVersion": 1,
+  "id": "phase-4-synthetic-corpus-v1",
+  "synthetic": true,
+  "candidatePaperModelIds": [
+    "paper/frontier",
+    "paper/cheap",
+    "paper/balanced"
+  ],
+  "routingSnapshot": {
+    "catalog": {
+      "fetchedAt": "2026-09-01T00:00:00.000Z",
+      "source": "cache",
+      "models": [
+        {
+          "id": "frontier",
+          "runtimeId": "provider/frontier",
+          "codingIndex": 95,
+          "blendedPrice": 10,
+          "value": 9.5,
+          "windowTokens": 272000,
+          "isFree": false
+        },
+        {
+          "id": "cheap",
+          "runtimeId": "provider/cheap",
+          "codingIndex": 70,
+          "blendedPrice": 0.5,
+          "value": 140,
+          "windowTokens": 128000,
+          "isFree": false
+        },
+        {
+          "id": "balanced",
+          "runtimeId": "provider/balanced",
+          "codingIndex": 85,
+          "blendedPrice": 2,
+          "value": 42.5,
+          "windowTokens": 128000,
+          "isFree": false
+        }
+      ]
+    },
+    "config": {
+      "tiers": {
+        "simple": { "minQuality": 0 },
+        "medium": { "minQuality": 60 },
+        "complex": { "minQuality": 80 }
+      },
+      "scorer": {
+        "weights": {
+          "promptTokens": 0.2,
+          "sessionTokens": 0.2,
+          "filesTouched": 0.15,
+          "diffHunks": 0.15,
+          "toolDepth": 0.15,
+          "keywords": 0.15
+        },
+        "thresholds": {
+          "simpleMax": 0.4,
+          "mediumMax": 0.7
+        }
+      },
+      "stickiness": {
+        "downgradeAfter": 3,
+        "upgradeImmediate": true
+      },
+      "guards": {
+        "contextFitMarginTokens": 8000
+      },
+      "taskTypeModels": {
+        "planning": {
+          "prefer": null,
+          "strategy": "quality",
+          "minQuality": 85
+        },
+        "implement": {
+          "prefer": null,
+          "strategy": "value"
+        }
+      },
+      "providerFreeSet": [],
+      "windowRegistry": {
+        "provider/frontier": 272000,
+        "provider/cheap": 128000,
+        "provider/balanced": 128000
+      },
+      "catalog": {
+        "cachePath": "./.cache/auto-router-catalog.json",
+        "refreshIntervalHours": 24,
+        "artificialAnalysis": {
+          "apiUrl": "",
+          "apiKeyEnv": ""
+        }
+      }
+    },
+    "prices": {
+      "provider/frontier": {
+        "inputPerMillion": 5,
+        "outputPerMillion": 15,
+        "cacheReadPerMillion": 0.5,
+        "cacheWritePerMillion": 6
+      },
+      "provider/cheap": {
+        "inputPerMillion": 0.25,
+        "outputPerMillion": 0.75,
+        "cacheReadPerMillion": 0.05,
+        "cacheWritePerMillion": 0.5
+      },
+      "provider/balanced": {
+        "inputPerMillion": 1,
+        "outputPerMillion": 3,
+        "cacheReadPerMillion": 0.2,
+        "cacheWritePerMillion": 1.5
+      }
+    },
+    "capabilities": {
+      "provider/frontier": ["text", "tools"],
+      "provider/cheap": ["text"],
+      "provider/balanced": ["text", "tools"]
+    },
+    "modelMap": {
+      "paper/frontier": [{ "runtimeId": "provider/frontier", "source": "hand" }],
+      "paper/cheap": [{ "runtimeId": "provider/cheap", "source": "hand" }],
+      "paper/balanced": [{ "runtimeId": "provider/balanced", "source": "hand" }]
+    }
+  },
+  "examples": [
+    {
+      "id": "syn-ex-1",
+      "sessionGroupId": "alpha",
+      "sequence": 0,
+      "weight": 1,
+      "text": "Write a basic helper function to format timestamps.",
+      "sessionState": {
+        "lifetimeTokens": 1000,
+        "currentTask": {
+          "promptTokens": 50,
+          "taskTokens": 200,
+          "filesTouched": 1,
+          "diffHunks": 0,
+          "toolDepth": 0,
+          "lastUserMessage": "Write a basic helper function to format timestamps."
+        },
+        "isNewSession": true
+      },
+      "requiredCapabilities": ["text"],
+      "outcomes": [
+        {
+          "paperModelId": "paper/frontier",
+          "runtimeModelId": "provider/frontier",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.95,
+          "qualitySource": "judge",
+          "costUsd": 0.005,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/cheap",
+          "runtimeModelId": "provider/cheap",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.75,
+          "qualitySource": "judge",
+          "costUsd": 0.0003,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/balanced",
+          "runtimeModelId": "provider/balanced",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.88,
+          "qualitySource": "judge",
+          "costUsd": 0.0015,
+          "costSource": "estimated"
+        }
+      ]
+    },
+    {
+      "id": "syn-ex-2",
+      "sessionGroupId": "alpha",
+      "sequence": 1,
+      "weight": 1,
+      "text": "Add a unit test covering timezone offsets.",
+      "sessionState": {
+        "lifetimeTokens": 3000,
+        "currentTask": {
+          "promptTokens": 60,
+          "taskTokens": 400,
+          "filesTouched": 2,
+          "diffHunks": 1,
+          "toolDepth": 0,
+          "lastUserMessage": "Add a unit test covering timezone offsets."
+        }
+      },
+      "requiredCapabilities": ["text"],
+      "outcomes": [
+        {
+          "paperModelId": "paper/frontier",
+          "runtimeModelId": "provider/frontier",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.92,
+          "qualitySource": "judge",
+          "costUsd": 0.006,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/cheap",
+          "runtimeModelId": "provider/cheap",
+          "terminalState": "failed",
+          "contentTruncated": false,
+          "quality": 0,
+          "qualitySource": "deterministic",
+          "costUsd": 0.0002,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/balanced",
+          "runtimeModelId": "provider/balanced",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.82,
+          "qualitySource": "judge",
+          "costUsd": 0.0018,
+          "costSource": "estimated"
+        }
+      ]
+    },
+    {
+      "id": "syn-ex-3",
+      "sessionGroupId": "beta",
+      "sequence": 0,
+      "weight": 1,
+      "text": "Plan the service architecture for distributed event streaming.",
+      "taskType": "planning",
+      "sessionState": {
+        "lifetimeTokens": 2000,
+        "userTag": "planning",
+        "currentTask": {
+          "promptTokens": 150,
+          "taskTokens": 800,
+          "filesTouched": 0,
+          "diffHunks": 0,
+          "toolDepth": 0,
+          "lastUserMessage": "Plan the service architecture for distributed event streaming."
+        },
+        "isNewSession": true
+      },
+      "requiredCapabilities": ["text"],
+      "outcomes": [
+        {
+          "paperModelId": "paper/frontier",
+          "runtimeModelId": "provider/frontier",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.98,
+          "qualitySource": "composite",
+          "costUsd": 0.012,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/cheap",
+          "runtimeModelId": "provider/cheap",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.65,
+          "qualitySource": "composite",
+          "costUsd": 0.0005,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/balanced",
+          "runtimeModelId": "provider/balanced",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.86,
+          "qualitySource": "composite",
+          "costUsd": 0.003,
+          "costSource": "estimated"
+        }
+      ]
+    },
+    {
+      "id": "syn-ex-4",
+      "sessionGroupId": "delta",
+      "sequence": 0,
+      "weight": 1,
+      "text": "Call the code search tool and find usages of deprecated config.",
+      "sessionState": {
+        "lifetimeTokens": 4000,
+        "currentTask": {
+          "promptTokens": 80,
+          "taskTokens": 500,
+          "filesTouched": 3,
+          "diffHunks": 0,
+          "toolDepth": 1,
+          "lastUserMessage": "Call the code search tool and find usages of deprecated config."
+        },
+        "isNewSession": true
+      },
+      "requiredCapabilities": ["tools"],
+      "outcomes": [
+        {
+          "paperModelId": "paper/frontier",
+          "runtimeModelId": "provider/frontier",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.94,
+          "qualitySource": "judge",
+          "costUsd": 0.008,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/cheap",
+          "runtimeModelId": "provider/cheap",
+          "terminalState": "failed",
+          "contentTruncated": false,
+          "quality": 0,
+          "qualitySource": "deterministic",
+          "costUsd": 0.0004,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/balanced",
+          "runtimeModelId": "provider/balanced",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.85,
+          "qualitySource": "judge",
+          "costUsd": 0.0025,
+          "costSource": "estimated"
+        }
+      ]
+    },
+    {
+      "id": "syn-ex-5",
+      "sessionGroupId": "g-b",
+      "sequence": 0,
+      "weight": 1,
+      "text": "Analyze the full repository audit log containing 200k tokens.",
+      "sessionState": {
+        "lifetimeTokens": 200000,
+        "currentTask": {
+          "promptTokens": 200,
+          "taskTokens": 1000,
+          "filesTouched": 1,
+          "diffHunks": 0,
+          "toolDepth": 0,
+          "lastUserMessage": "Analyze the full repository audit log containing 200k tokens."
+        },
+        "isNewSession": true
+      },
+      "requiredCapabilities": ["text"],
+      "outcomes": [
+        {
+          "paperModelId": "paper/frontier",
+          "runtimeModelId": "provider/frontier",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.91,
+          "qualitySource": "judge",
+          "costUsd": 0.025,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/cheap",
+          "runtimeModelId": "provider/cheap",
+          "terminalState": "incomplete",
+          "contentTruncated": true,
+          "quality": 0,
+          "qualitySource": "deterministic",
+          "costUsd": 0.001,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/balanced",
+          "runtimeModelId": "provider/balanced",
+          "terminalState": "incomplete",
+          "contentTruncated": true,
+          "quality": 0,
+          "qualitySource": "deterministic",
+          "costUsd": 0.002,
+          "costSource": "estimated"
+        }
+      ]
+    },
+    {
+      "id": "syn-ex-6",
+      "sessionGroupId": "g-b",
+      "sequence": 1,
+      "weight": 1,
+      "text": "Summarize the critical vulnerabilities identified in the audit.",
+      "sessionState": {
+        "lifetimeTokens": 210000,
+        "currentTask": {
+          "promptTokens": 100,
+          "taskTokens": 800,
+          "filesTouched": 1,
+          "diffHunks": 0,
+          "toolDepth": 0,
+          "lastUserMessage": "Summarize the critical vulnerabilities identified in the audit."
+        }
+      },
+      "requiredCapabilities": ["text"],
+      "outcomes": [
+        {
+          "paperModelId": "paper/frontier",
+          "runtimeModelId": "provider/frontier",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.93,
+          "qualitySource": "judge",
+          "costUsd": 0.02,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/cheap",
+          "runtimeModelId": "provider/cheap",
+          "terminalState": "failed",
+          "contentTruncated": false,
+          "quality": 0,
+          "qualitySource": "deterministic",
+          "costUsd": 0.0005,
+          "costSource": "estimated"
+        },
+        {
+          "paperModelId": "paper/balanced",
+          "runtimeModelId": "provider/balanced",
+          "terminalState": "completed",
+          "contentTruncated": false,
+          "quality": 0.81,
+          "qualitySource": "judge",
+          "costUsd": 0.003,
+          "costSource": "estimated"
+        }
+      ]
+    }
+  ]
+}

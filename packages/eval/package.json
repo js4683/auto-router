@@ -1,0 +1,22 @@
+{
+  "name": "@auto-router/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "pretest": "npm run build --workspace=@auto-router/router-core",
+    "test": "vitest run",
+    "eval": "node dist/src/cli.js"
+  },
+  "dependencies": {
+    "@auto-router/router-core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.1.0"
+  }
+}

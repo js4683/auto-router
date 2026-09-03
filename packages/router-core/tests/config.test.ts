@@ -5,6 +5,16 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 
 describe("loadConfig merge", () => {
+  it("keeps the checked-in Phase 4 classifier disabled by default", () => {
+    const cfg = loadConfig(new URL("../../../auto-router.json", import.meta.url).pathname);
+
+    expect(cfg.avengersPro?.enabled).toBe(false);
+    expect(cfg.avengersPro?.timeoutMs).toBe(400);
+    expect(cfg.avengersPro?.maxInputChars).toBe(16000);
+    expect(cfg.avengersPro).not.toHaveProperty("topK");
+    expect(cfg.avengersPro).not.toHaveProperty("beta");
+  });
+
   it("fills missing planning and verification policies from defaults", () => {
     const dir = mkdtempSync(join(tmpdir(), "auto-router-config-"));
     const path = join(dir, "stale.json");

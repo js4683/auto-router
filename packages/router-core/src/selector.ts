@@ -1,4 +1,4 @@
-import type { Catalog, ModelEntry, RouterConfig, RouterState, SessionState, SelectionResult, TaskStrategy, Tier } from "./types.js";
+import type { AvengersProPrediction, Catalog, ModelEntry, ModelMap, RouterConfig, RouterState, SessionState, SelectionResult, TaskStrategy, Tier } from "./types.js";
 import { classify, detectBoundary, tierRank } from "./classify.js";
 import { passesContextFit, isUpgrade } from "./guards.js";
 import { resolveTaskType } from "./task-type.js";
@@ -28,6 +28,62 @@ function modelRuntimeId(model: ModelEntry): string {
   return model.runtimeId ?? model.id;
 }
 
+interface LearnedCandidate {
+  model: ModelEntry;
+  predictedQuality: number;
+}
+
+function runtimeIdCompare(a: LearnedCandidate, b: LearnedCandidate): number {
+  const aId = modelRuntimeId(a.model);
+  const bId = modelRuntimeId(b.model);
+  if (aId < bId) return -1;
+  if (aId > bId) return 1;
+  return 0;
+}
+
+function learnedCandidates(
+  prediction: AvengersProPrediction,
+  modelMap: ModelMap,
+  catalog: Catalog,
+  minQuality: number
+): LearnedCandidate[] {
+  const candidates: LearnedCandidate[] = [];
+  for (const entry of resolveMappedModels(prediction.paperIds, modelMap, catalog)) {
+    const model = catalog.models.find((item) => modelRuntimeId(item) === entry.runtimeId || item.id === entry.runtimeId);
+    const predictedQuality = prediction.predictedQuality[entry.paperId];
+    if (!model || !(model.codingIndex >= minQuality) || !Number.isFinite(predictedQuality)) continue;
+    candidates.push({ model, predictedQuality });
+  }
+  return candidates;
+}
+
+function bestLearnedModel(candidates: LearnedCandidate[], strategy: TaskStrategy): ModelEntry | null {
+  if (strategy === "quality") {
+    return [...candidates].sort(
+      (a, b) => b.predictedQuality - a.predictedQuality || b.model.codingIndex - a.model.codingIndex || runtimeIdCompare(a, b)
+    )[0]?.model ?? null;
+  }
+  if (strategy === "lowest-cost") {
+    return [...candidates].sort(
+      (a, b) => a.model.blendedPrice - b.model.blendedPrice || b.predictedQuality - a.predictedQuality || runtimeIdCompare(a, b)
+    )[0]?.model ?? null;
+  }
+
+  const freeCandidates = candidates.filter((candidate) => candidate.model.isFree);
+  if (freeCandidates.length) {
+    return freeCandidates.sort((a, b) => b.predictedQuality - a.predictedQuality || runtimeIdCompare(a, b))[0].model;
+  }
+  const paidCandidates = candidates.filter(
+    (candidate) => Number.isFinite(candidate.model.blendedPrice) && candidate.model.blendedPrice > 0
+  );
+  return paidCandidates.sort(
+    (a, b) =>
+      b.predictedQuality / b.model.blendedPrice - a.predictedQuality / a.model.blendedPrice ||
+      b.predictedQuality - a.predictedQuality ||
+      runtimeIdCompare(a, b)
+  )[0]?.model ?? null;
+}
+
 /**
  * Two-axis selectModel (grill Q8):
  *  1. resolve task type (explicit / gated auto)
@@ -42,7 +98,7 @@ export function selectModel(
   state: RouterState,
   prevAgent?: string,
   prevMessage?: string,
-  avengers?: { paperIds: string[] }
+  avengers?: AvengersProPrediction
 ): SelectionResult {
   const cls = classify(session, config);
   const boundary = detectBoundary(session, prevAgent, prevMessage);
@@ -71,17 +127,7 @@ export function selectModel(
   }
 
   if (!candidate && avengers?.paperIds?.length && config.modelMap) {
-    const mapped = resolveMappedModels(avengers.paperIds, config.modelMap, catalog)
-      .map((entry) => catalog.models.find((m) => (m.runtimeId ?? m.id) === entry.runtimeId || m.id === entry.runtimeId))
-      .filter((m): m is ModelEntry => !!m && m.codingIndex >= minQuality);
-    if (strategy === "lowest-cost") {
-      const free = mapped.filter((m) => m.isFree);
-      candidate = (free[0] ?? [...mapped].sort((a, b) => a.blendedPrice - b.blendedPrice)[0]) ?? null;
-    } else if (strategy === "quality") {
-      candidate = [...mapped].sort((a, b) => b.codingIndex - a.codingIndex)[0] ?? null;
-    } else {
-      candidate = mapped[0] ?? null;
-    }
+    candidate = bestLearnedModel(learnedCandidates(avengers, config.modelMap, catalog, minQuality), strategy);
     if (candidate) {
       via = strategy === "value" || !taskPolicy?.strategy ? "avengers-pro" : candidate.isFree && strategy !== "quality" ? "free-first" : strategy;
       reason = `avengers-pro mapped ${candidate.id}`;

@@ -144,9 +144,8 @@ export interface RouterConfig {
     enabled: boolean;
     artifactDir: string;
     embedding?: { baseUrl: string; apiKeyEnv: string; model: string };
-    topK?: number;
-    beta?: number;
-    timeoutMs?: number;
+    timeoutMs: number;
+    maxInputChars: number;
   };
   modelMap?: ModelMap;
 }
@@ -170,4 +169,9 @@ export interface SelectionResult {
   catalogSource: Catalog["source"];
   score: number;
   boundary: BoundaryResult;
+}
+
+export interface AvengersProPrediction {
+  paperIds: string[];
+  predictedQuality: Record<string, number>;
 }

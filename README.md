@@ -23,9 +23,10 @@ of the above do.
 
 1. **Language:** TypeScript for `router-core` + the opencode plugin (native plugin
    language, richest session signals). Revisit Go later for the standalone proxy.
-2. **Classifier:** Avengers-Pro cluster scoring on a task boundary, with heuristic
-   `selectModel` as fallback. Overlap models join through LLMRouterBench; Muse/Grok/Luna
-   use an explicit hand map until we have our own labels.
+2. **Classifier:** Tier-0 heuristic `selectModel` remains the default. The fixture-backed
+   Avengers-Pro scorer is an opt-in Tier-1 reranker that fails open to Tier 0. Overlap
+   models join through LLMRouterBench; Muse/Grok/Luna use an explicit hand map until we
+   have our own labels.
 3. **Apply path:** a local OpenAI/Anthropic proxy. The OpenCode plugin stays observational.
 4. **Model selection data:** Artificial Analysis free API for quality (coding index)
    + price -> a "bang-for-buck" score per model, refreshed daily and cached.
@@ -71,14 +72,104 @@ The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Respon
 requests. It translates text and function calls across Zen's Responses API and
 Gemini's `generateContent` API, including client-compatible streaming envelopes.
 Gemini chat completions and native OpenAI Responses streams are forwarded
-incrementally as upstream chunks arrive; other translated paths synthesize
-client-compatible events incrementally.
+incrementally as upstream chunks arrive. Cross-protocol paths without an incremental
+translator request buffered upstream JSON, then synthesize a client-compatible event
+stream instead of attempting to parse upstream SSE as JSON.
 
-The proxy scores the first message of a task with Avengers-Pro fixture ranking when
-enabled, applies free-first / planning-quality overlays, then holds that target until
-a confirmed boundary. Routing state is reconstructed conservatively from normalized
-messages, tool schemas, and tool-call history so context size, tool depth, file/patch
-hints, and prior tool errors inform selection when the request exposes them.
+When enabled, the proxy scores the first message of a task with a validated Avengers-Pro
+artifact, applies free-first / planning-quality overlays, then holds that target until a
+confirmed boundary. The checked-in synthetic fixture is for scoring and tests only; production
+activation requires a validated non-synthetic artifact. The checked-in configuration leaves
+this Tier-1 path disabled by default; failures fall back to Tier 0. Routing state is
+reconstructed conservatively from normalized messages, tool schemas, and tool-call history so
+context size, tool depth, file/patch hints, and prior tool errors inform selection when the
+request exposes them.
+
+## Evaluation
+
+Run the required deterministic replay without provider credentials:
+
+```bash
+npm run eval -- replay \
+  --dataset packages/eval/fixtures/phase-3-smoke.v1.json \
+  --output phase-3.eval-report.local
+```
+
+The report compares `router`, `always-frontier`, and `always-cheap` against the same
+frozen catalog, prices, capabilities, and context constraints. JSON and Markdown output
+exclude recorded prompts and model responses.
+
+Live generation and blinded judging are optional and billable. Update the dataset's
+`liveModelAliases`, then explicitly confirm the run:
+
+```bash
+export AUTO_ROUTER_EVAL_BASE_URL="https://openrouter.ai/api/v1"
+export AUTO_ROUTER_EVAL_API_KEY="..."
+export AUTO_ROUTER_EVAL_JUDGE_MODEL="provider/judge-model"
+npm run eval -- live \
+  --dataset path/to/live-dataset.json \
+  --output phase-3-live.eval-report.local \
+  --confirm-live
+```
+
+Optional live limits are `AUTO_ROUTER_EVAL_TIMEOUT_MS` and
+`AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS`. The CLI prints planned generation and judge call
+counts before execution. Do not claim quality retention from offline catalog proxies.
+The benchmark gate requires at least 30 complete live cases, 95% router quality
+retention, 50% estimated cost savings, and a seeded bootstrap interval.
+Replay reports expose recorded terminal state and truncation; incomplete records fail
+the completeness gate and cannot support cost or quality comparisons.
+
+### Recording and curation
+
+Proxy recording is off by default. `metadata` excludes request and response content;
+`content` adds bounded, automatically redacted content and therefore requires explicit
+opt-in:
+
+```bash
+AUTO_ROUTER_EVAL_RECORD_MODE=metadata npm start --workspace=@auto-router/proxy
+AUTO_ROUTER_EVAL_RECORD_MODE=content npm start --workspace=@auto-router/proxy
+```
+
+Records default to the ignored `.eval-recordings/` directory with `0600` file
+permissions and 30-day retention. Override these with
+`AUTO_ROUTER_EVAL_RECORD_DIR` and `AUTO_ROUTER_EVAL_RETENTION_DAYS`.
+Persisted session and turn IDs are opaque process-local digests, including when callers
+provide IDs or omit them. Metadata mode retains routing numbers and a fixed prompt
+placeholder, never raw prompt text.
+Proxy-derived token usage is labeled `estimated`; only usage explicitly labeled
+`provider` contributes to the report's separate provider-observed cost.
+
+Curate JSON Lines into a validated dataset using an existing dataset as the frozen
+catalog, policy, price, and capability base:
+
+```bash
+npm run eval -- curate \
+  --input .eval-recordings/auto-router-eval-<timestamp>.jsonl \
+  --base-dataset packages/eval/fixtures/phase-3-smoke.v1.json \
+  --output curated.eval-dataset.local.json
+```
+
+Automatic redaction cannot guarantee anonymity. Manually review every curated file for
+credentials, personal data, and proprietary content before committing it.
+
+## Phase 4 embedding classifier
+
+Tier 1 stays disabled by default. Rollback is `avengersPro.enabled: false`.
+Networked commands require `--confirm-live` and print planned billable calls first.
+Collection uses `AUTO_ROUTER_EVAL_BASE_URL`, `AUTO_ROUTER_EVAL_API_KEY`, and
+`AUTO_ROUTER_EVAL_JUDGE_MODEL`. Training and validation use
+`AUTO_ROUTER_EMBEDDING_BASE_URL`, `AUTO_ROUTER_EMBEDDING_API_KEY`, and
+`AUTO_ROUTER_EMBEDDING_MODEL`. Artifacts store aggregate centers and stats only.
+Local collection, corpus, cache, and validation files stay ignored, mode `0600`,
+and need manual review before any commit.
+
+```bash
+npm run eval -- collect-avengers --dataset path/to/reviewed-dataset.json --models paper/a=provider/a,paper/b=provider/b --output phase-4-collection.local.jsonl --confirm-live
+npm run eval -- curate-avengers --input phase-4-collection.local.jsonl --dataset path/to/reviewed-dataset.json --models paper/a=provider/a,paper/b=provider/b --output phase-4-corpus.local.json
+npm run eval -- train-avengers --corpus phase-4-corpus.local.json --artifact-dir path/to/artifact --cache phase-4-embeddings.local.json --clusters 8 --seed 4683 --held-out-ratio 0.2 --top-k 3 --beta 9 --min-observations 3 --max-input-chars 16000 --timeout-ms 400 --confirm-live
+npm run eval -- validate-avengers --corpus phase-4-corpus.local.json --artifact-dir path/to/artifact --output phase-4-validation.local --bootstrap-seed fixture-seed --timeout-ms 400 --confirm-live
+```
 
 ## Docs
 
@@ -87,6 +178,8 @@ hints, and prior tool errors inform selection when the request exposes them.
 | [PLAN.md](./PLAN.md) | Canonical scope, implementation status, acceptance criteria, and decision log |
 | [design.md](./design.md) | Architecture, the two hard problems, classification tiers |
 | [roadmap.md](./roadmap.md) | Phased plan, effort, checklist |
+| [Phase 3 eval design](./docs/plans/2026-08-31-phase-3-eval-harness-design.md) | Accepted offline/live evaluation, recording, metrics, and trust-boundary design |
+| [Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md) | Approved Tier-1 architecture, privacy boundaries, and activation gates |
 
 ## Why this is a strong fit
 

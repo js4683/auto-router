@@ -12,7 +12,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 | **1** | opencode plugin adapter with task-boundary recommendations and decision logging | ~2-3 days |
 | **2** | OpenAI-compatible proxy adapter (any harness via base_url) | ~2-3 days |
 | **3** | Eval harness: replay real sessions, measure cost saved vs quality retained | ~3 days |
-| **4** | Tier-1 embedding classifier (opt-in) | later |
+| **4** | Tier-1 embedding classifier (code complete; opt-in, disabled by default) | activation later |
 
 ## Phase 0 — router-core (start here)
 
@@ -48,19 +48,30 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 - [x] Reconstruct conservative `SessionState` signals from request messages, tools, and
       tool-call history
 - [x] Forward to the chosen upstream model
-- [x] Stream translated and native upstream responses incrementally (Gemini chat completions and OpenAI Responses passthrough; other translated paths synthesize client-compatible events incrementally)
+- [x] Stream Gemini chat completions and native OpenAI Responses incrementally; request
+      buffered upstream JSON before synthesizing SSE for other cross-protocol translations
 - [x] Works with OpenCode, Claude Code, Codex, and other clients by setting `base_url`
 
 ## Phase 3 — eval
 
-- [ ] Record/replay real sessions
-- [ ] Metrics: cost saved, quality retained, switch count, cache-hit impact
-- [ ] Compare against always-frontier and always-cheap baselines
-- [ ] Bar: approach ~95% quality at a large cost cut (RouteLLM reference)
+- [x] Versioned offline replay with deterministic JSON and Markdown reports
+- [x] Metrics: estimated cost saved, quality components, switch count, and cache impact
+- [x] Compare against always-frontier and always-cheap with shared eligibility rules
+- [x] Opt-in proxy recording, redaction, retention, and manual-review curation flow
+- [x] Explicitly confirmed live generation with blinded judging and confidence intervals
+- [ ] Benchmark gate: at least 30 complete live cases, >=95% quality retention, >=50%
+      estimated cost savings, and a seeded bootstrap interval
+
+The implementation can ship with deterministic and mock-live verification while
+provider quota is unavailable. The live quality/cost bar remains unproven until the
+unchecked benchmark gate passes.
 
 ## Stretch
 
-- [ ] Tier-1 embedding classifier
+- [x] Phase 4 code complete
+- [ ] real observed-outcome corpus collected
+- [ ] production artifact trained
+- [ ] production artifact activation gate passed
 - [ ] Tier-2 LLM judge (flagged)
 - [ ] Upstream `llm.request.before` hook to opencode (ref #45764) if v2 hook is
       insufficient
@@ -73,3 +84,4 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 - RouteLLM: https://github.com/lm-sys/RouteLLM
 - Not-Diamond RoRF: https://github.com/Not-Diamond/RoRF
 - vLLM semantic-router (classification signals): https://github.com/vllm-project/semantic-router
+- Phase 4 embedding classifier design: [docs/plans/2026-09-01-phase-4-embedding-classifier-design.md](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md)

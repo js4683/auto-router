@@ -1,7 +1,11 @@
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { IncomingMessage } from "node:http";
 import { Socket } from "node:net";
-import { describe, expect, it } from "vitest";
-import { selectModel, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { createJsonlRecorder, type EvalRecordInput, type EvalRecorder } from "@auto-router/eval";
+import { selectModel, type AvengersProPrediction, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
 import { createProxyServer } from "../src/server.js";
 import { memorySessions } from "../src/session.js";
 
@@ -54,11 +58,21 @@ const config: RouterConfig = {
   },
 };
 
-function fakeReq(url: string, body: unknown, headers: Record<string, string> = {}): IncomingMessage {
+const avengersPrediction: AvengersProPrediction = {
+  paperIds: ["qwen/qwen3"],
+  predictedQuality: { "qwen/qwen3": 0.9 },
+};
+
+function fakeReq(url: string, body: unknown, headers: Record<string, string | undefined> = {}): IncomingMessage {
   const req = new IncomingMessage(new Socket());
   req.method = "POST";
   req.url = url;
-  req.headers = { "content-type": "application/json", "x-session-id": "ses_test", ...headers };
+  const requestHeaders: Record<string, string> = { "content-type": "application/json", "x-session-id": "ses_test" };
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) delete requestHeaders[name];
+    else requestHeaders[name] = value;
+  }
+  req.headers = requestHeaders;
   queueMicrotask(() => {
     req.emit("data", Buffer.from(JSON.stringify(body)));
     req.emit("end");
@@ -81,10 +95,48 @@ function collectRes() {
     setHeader(name: string, value: string) {
       this.headers[name] = value;
     },
+    write(chunk: string | Buffer) {
+      body += String(chunk);
+    },
     end(chunk?: string | Buffer) {
       if (chunk) body += String(chunk);
     },
   };
+}
+
+function recordingServer(recorder: EvalRecorder, output = "Hello") {
+  return createProxyServer({
+    catalog,
+    config,
+    sessions: memorySessions(),
+    recorder,
+    backends: {
+      opencode: {
+        baseUrl: "https://opencode.ai/zen",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              id: "resp_1",
+              status: "completed",
+              output: [{ type: "message", content: [{ type: "output_text", text: output }] }],
+            }),
+            { headers: { "content-type": "application/json" } }
+          ),
+      },
+    },
+    select: () =>
+      ({
+        modelId: "opencode/muse-spark-1.2-contributor-free",
+        tier: "simple",
+        taskType: null,
+        confidence: 1,
+        reason: "fixture",
+        via: "force",
+        catalogSource: "live",
+        score: 0,
+        boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+      }) as never,
+  });
 }
 
 describe("proxy", () => {
@@ -103,7 +155,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const req = fakeReq("/api/hello", {});
@@ -132,7 +184,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const req = fakeReq("/v1/models?client_version=0.147.0", {});
@@ -223,7 +275,7 @@ describe("proxy", () => {
       },
       rankAvengers: () => {
         rankCalls += 1;
-        return { paperIds: ["qwen/qwen3"] };
+        return avengersPrediction;
       },
       select: selectModel,
     });
@@ -252,7 +304,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const res = collectRes();
@@ -261,6 +313,41 @@ describe("proxy", () => {
       res as never
     );
     expect(backendCalls).toBe(0);
+    expect(JSON.parse(res.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
+  });
+
+  it("forwards the complete Avengers-Pro prediction to the selector", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      rankAvengers: () => avengersPrediction,
+      select: ((...args: Parameters<typeof selectModel>) => {
+        const prediction = args[6] as AvengersProPrediction | undefined;
+        return {
+          modelId:
+            prediction?.predictedQuality?.["qwen/qwen3"] === 0.9
+              ? "opencode/muse-spark-1.2-contributor-free"
+              : "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "prediction plumbing",
+          via: "avengers-pro",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        };
+      }) as typeof selectModel,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/route", { model: "auto", messages: [{ role: "user", content: "implement the feature" }] }),
+      res as never
+    );
+
     expect(JSON.parse(res.body).modelId).toBe("opencode/muse-spark-1.2-contributor-free");
   });
 
@@ -372,7 +459,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -429,7 +516,7 @@ describe("proxy", () => {
             ),
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
     const body = { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "Make a restricted request." }] };
@@ -610,28 +697,56 @@ describe("proxy", () => {
     });
   });
 
-  it("wires Avengers-Pro fixture ranking into the executable bootstrap", async () => {
-    const { bootstrapProxyOptions } = await import("../src/server.js");
-    const opts = bootstrapProxyOptions();
-    expect(opts.rankAvengers).toBeTypeOf("function");
-    expect(opts.rankAvengers?.("implement the feature").paperIds[0]).toBe("qwen/qwen3");
+  it("rejects the synthetic fixture through production bootstrap", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-avengers-"));
+    const configPath = join(directory, "enabled.json");
+    writeFileSync(configPath, JSON.stringify({
+      tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
+      avengersPro: { enabled: true, artifactDir: "./packages/router-core/artifacts/avengers-pro/fixture", timeoutMs: 400, maxInputChars: 16000 },
+    }));
+    vi.stubEnv("AUTO_ROUTER_CONFIG", configPath);
+    try {
+      const { bootstrapProxyOptions } = await import("../src/server.js");
+      const opts = bootstrapProxyOptions();
+      expect(opts.rankAvengers).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
-    const res = collectRes();
+  it("lets an injected async prediction drive avengers-pro selection", async () => {
     const server = createProxyServer({
-      ...opts,
+      catalog,
+      config,
       sessions: memorySessions(),
-      backends: {
-        opencode: {
-          baseUrl: "http://backend.test",
-          fetchImpl: async () => new Response(JSON.stringify({ id: "ok", output: [{ type: "message", content: [{ type: "output_text", text: "OK" }] }] })),
-        },
-      },
+      backends: {},
+      rankAvengers: async () => avengersPrediction,
+      select: selectModel,
     });
+    const res = collectRes();
     await server.handle(
-      fakeReq("/v1/route", { model: "openai/gpt-5.6-luna", messages: [{ role: "user", content: "implement the feature" }] }),
+      fakeReq("/v1/route", { model: "auto", messages: [{ role: "user", content: "implement the feature" }] }),
       res as never
     );
     expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro" });
+  });
+
+  it("enables proxy recording only through explicit environment configuration", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
+    vi.stubEnv("AUTO_ROUTER_EVAL_RECORD_MODE", "metadata");
+    vi.stubEnv("AUTO_ROUTER_EVAL_RECORD_DIR", directory);
+    vi.stubEnv("AUTO_ROUTER_EVAL_RETENTION_DAYS", "7");
+    try {
+      const { bootstrapProxyOptions } = await import("../src/server.js");
+      const opts = bootstrapProxyOptions();
+
+      expect(opts.recorder?.mode).toBe("metadata");
+      await opts.recorder?.flush();
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("translates Chat Completions tools to Zen Responses and back", async () => {
@@ -662,7 +777,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -862,7 +977,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -917,7 +1032,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -960,7 +1075,7 @@ describe("proxy", () => {
           },
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -1002,7 +1117,7 @@ describe("proxy", () => {
           ),
         },
       },
-      rankAvengers: () => ({ paperIds: ["qwen/qwen3"] }),
+      rankAvengers: () => avengersPrediction,
       select: selectModel,
     });
 
@@ -1394,6 +1509,365 @@ describe("proxy", () => {
     expect(outboundZen).toHaveLength(1);
     expect(outboundZen[0].headers.authorization).toBeUndefined();
     expect(outboundZen[0].headers["x-api-key"]).toBeUndefined();
+  });
+
+  it("requests buffered Zen output when chat stream translation is unavailable", async () => {
+    let upstreamBody: any;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (_url, init) => {
+            upstreamBody = JSON.parse(String(init?.body));
+            return new Response(
+              JSON.stringify({
+                id: "resp_1",
+                status: "completed",
+                output: [{ type: "message", content: [{ type: "output_text", text: "Hello" }] }],
+              }),
+              { headers: { "content-type": "application/json" } }
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", {
+        model: "auto",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never
+    );
+
+    expect(upstreamBody.stream).toBe(false);
+    expect(res.body).toContain("data:");
+    expect(res.body).toContain("Hello");
+    expect(res.body).toContain("data: [DONE]");
+  });
+
+  it("records a completed proxy turn without exposing request headers", async () => {
+    const records: EvalRecordInput[] = [];
+    const server = recordingServer({
+      mode: "content",
+      async record(input) {
+        records.push(input);
+      },
+      async flush() {},
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq(
+        "/v1/chat/completions",
+        { model: "auto", messages: [{ role: "user", content: "hello" }] },
+        { authorization: "Bearer inbound-secret", "x-turn-id": "turn-recorded" }
+      ),
+      res as never
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ status: "completed", usageSource: "estimated", requiredCapabilities: ["text"] });
+    expect(records[0].sessionId).toMatch(/^session-[0-9a-f]{64}$/);
+    expect(records[0].turnId).toMatch(/^turn-[0-9a-f]{64}$/);
+    expect(records[0].sessionId).not.toBe("ses_test");
+    expect(records[0].turnId).not.toBe("turn-recorded");
+    expect(records[0].messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(records[0].output).toContain("Hello");
+    expect(JSON.stringify(records[0])).not.toContain("inbound-secret");
+    expect(records[0]).not.toHaveProperty("headers");
+  });
+
+  it("records a 200 Anthropic max-token response as incomplete", async () => {
+    const records: EvalRecordInput[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      recorder: {
+        mode: "metadata",
+        record: async (input) => {
+          records.push(input);
+        },
+        flush: async () => {},
+      },
+      backends: {
+        anthropic: {
+          baseUrl: "https://anthropic.test",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "msg_partial",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "partial" }],
+                stop_reason: "max_tokens",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            ),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(fakeReq("/v1/messages", { model: "auto", messages: [{ role: "user", content: "hello" }] }), collectRes() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(records).toHaveLength(1);
+    expect(records[0].status).toBe("incomplete");
+  });
+
+  it("records a 200 Responses failed status as failed", async () => {
+    const records: EvalRecordInput[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      recorder: {
+        mode: "metadata",
+        record: async (input) => {
+          records.push(input);
+        },
+        flush: async () => {},
+      },
+      backends: {
+        openai: {
+          baseUrl: "https://openai.test",
+          fetchImpl: async () => new Response(JSON.stringify({ id: "resp_failed", status: "failed", output: [] }), { status: 200 }),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/model",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(fakeReq("/v1/responses", { model: "auto", input: "hello" }), collectRes() as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(records).toHaveLength(1);
+    expect(records[0].status).toBe("failed");
+  });
+
+  it("records opaque IDs and hard capabilities without session headers", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
+    const recorder = createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30 });
+    const server = recordingServer(recorder);
+    const res = collectRes();
+    const prompt = "reset password using sk-ant-super-secret-value";
+
+    try {
+      await server.handle(
+        fakeReq(
+          "/v1/chat/completions",
+          {
+            model: "auto",
+            messages: [{ role: "user", content: prompt }],
+            tools: [{ type: "function", function: { name: "reset_password", parameters: { type: "object" } } }],
+          },
+          { "x-session-id": undefined, "x-turn-id": undefined }
+        ),
+        res as never
+      );
+      await recorder.flush();
+      const line = readFileSync(join(directory, readdirSync(directory)[0]), "utf8");
+      const record = JSON.parse(line);
+
+      expect(record.sessionId).toMatch(/^session-[0-9a-f]{64}$/);
+      expect(record.turnId).toMatch(/^turn-[0-9a-f]{64}$/);
+      expect(record.requiredCapabilities).toEqual(["text", "tools"]);
+      expect(line).not.toContain(prompt);
+      expect(line).not.toContain("super-secret-value");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails open when eval recording fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const server = recordingServer({
+      mode: "content",
+      async record() {
+        throw new Error("sensitive recorder failure");
+      },
+      async flush() {},
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hello" }] }),
+      res as never
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("Hello");
+    expect(warn).toHaveBeenCalledWith("[auto-router] eval recording failed");
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("sensitive recorder failure"));
+    warn.mockRestore();
+  });
+
+  it("bounds recorded response content and marks truncation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-proxy-recording-"));
+    const recorder = createJsonlRecorder({ mode: "content", directory, retentionDays: 30 });
+    const server = recordingServer(recorder, "x".repeat(1024 * 1024 + 1));
+    const res = collectRes();
+
+    try {
+      await server.handle(
+        fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hello" }] }),
+        res as never
+      );
+      await recorder.flush();
+      const line = JSON.parse(readFileSync(join(directory, readdirSync(directory)[0]), "utf8"));
+
+      expect(line.contentTruncated).toBe(true);
+      expect(Buffer.byteLength(String(line.output))).toBeLessThanOrEqual(512 * 1024);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requests buffered Gemini output when Anthropic stream translation is unavailable", async () => {
+    let upstreamUrl = "";
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "gemini-key",
+          fetchImpl: async (url) => {
+            upstreamUrl = String(url);
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Hello" }] } }] }), {
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3.6-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/messages", {
+        model: "auto",
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never
+    );
+
+    expect(upstreamUrl).toContain(":generateContent");
+    expect(upstreamUrl).not.toContain(":streamGenerateContent");
+    expect(res.body).toContain("event: content_block_delta");
+    expect(res.body).toContain("Hello");
+    expect(res.body).toContain("event: message_stop");
+  });
+
+  it("requests buffered Anthropic output when chat stream translation is unavailable", async () => {
+    let upstreamBody: any;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "anthropic-key",
+          fetchImpl: async (_url, init) => {
+            upstreamBody = JSON.parse(String(init?.body));
+            return new Response(
+              JSON.stringify({
+                id: "msg_1",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "Hello" }],
+                stop_reason: "end_turn",
+              }),
+              { headers: { "content-type": "application/json" } }
+            );
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", {
+        model: "auto",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never
+    );
+
+    expect(upstreamBody.stream).toBe(false);
+    expect(res.body).toContain("data:");
+    expect(res.body).toContain("Hello");
+    expect(res.body).toContain("data: [DONE]");
   });
 
   it("streams translated Gemini chat completions incrementally from upstream SSE", async () => {

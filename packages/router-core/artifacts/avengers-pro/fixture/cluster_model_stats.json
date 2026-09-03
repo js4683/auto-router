@@ -1,0 +1,42 @@
+{
+  "0": {
+    "paper/balanced": {
+      "completed": 2,
+      "failed": 0,
+      "observations": 2,
+      "qualityMean": 0.87
+    },
+    "paper/cheap": {
+      "completed": 2,
+      "failed": 0,
+      "observations": 2,
+      "qualityMean": 0.7
+    },
+    "paper/frontier": {
+      "completed": 2,
+      "failed": 0,
+      "observations": 2,
+      "qualityMean": 0.965
+    }
+  },
+  "1": {
+    "paper/balanced": {
+      "completed": 1,
+      "failed": 0,
+      "observations": 1,
+      "qualityMean": 0.82
+    },
+    "paper/cheap": {
+      "completed": 0,
+      "failed": 1,
+      "observations": 1,
+      "qualityMean": 0
+    },
+    "paper/frontier": {
+      "completed": 1,
+      "failed": 0,
+      "observations": 1,
+      "qualityMean": 0.92
+    }
+  }
+}
