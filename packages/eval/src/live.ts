@@ -9,6 +9,7 @@ import type {
   LiveCaseResult,
   LiveEvalResult,
   LiveOutput,
+  LiveTransport,
   ReplayResult,
   ReplayTurnResult,
   StrategyName,
@@ -39,7 +40,7 @@ export interface JudgeCaseInput {
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
-function endpoint(baseUrl: string): string {
+function endpoint(baseUrl: string, transport: LiveTransport = "chat"): string {
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -50,7 +51,13 @@ function endpoint(baseUrl: string): string {
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("live baseUrl must use HTTPS except for loopback");
   url.pathname = url.pathname.replace(/\/+$/, "");
-  return `${url.toString().replace(/\/$/, "")}/chat/completions`;
+  const path = transport === "responses" ? "responses" : "chat/completions";
+  return `${url.toString().replace(/\/$/, "")}/${path}`;
+}
+
+export function liveTransportFor(dataset: EvalDatasetV1, runtimeId?: string): LiveTransport {
+  if (runtimeId && dataset.liveTransports?.[runtimeId]) return dataset.liveTransports[runtimeId];
+  return dataset.liveTransportDefault ?? "chat";
 }
 
 async function readBounded(response: Response): Promise<string> {
@@ -141,25 +148,82 @@ function parseOutput(raw: string): LiveOutput {
   };
 }
 
+function parseResponsesUsage(value: any): EvalUsage | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("provider usage must be an object");
+  const parsed = {
+    inputTokens: usageToken(value.input_tokens, "input_tokens", true),
+    outputTokens: usageToken(value.output_tokens, "output_tokens", true),
+    cacheReadInputTokens: usageToken(value.input_tokens_details?.cached_tokens, "cached_tokens"),
+    cacheWriteInputTokens: usageToken(value.input_tokens_details?.cache_creation_tokens, "cache_creation_tokens"),
+  };
+  if (parsed.cacheReadInputTokens + parsed.cacheWriteInputTokens > parsed.inputTokens) {
+    throw new Error("provider usage cache tokens must not exceed input_tokens");
+  }
+  return parsed;
+}
+
+function responsesText(payload: any): string | undefined {
+  if (typeof payload?.output_text === "string") return payload.output_text;
+  const parts: string[] = [];
+  for (const item of Array.isArray(payload?.output) ? payload.output : []) {
+    if (!Array.isArray(item?.content)) continue;
+    for (const content of item.content) {
+      if (content?.type === "output_text" && typeof content.text === "string") parts.push(content.text);
+    }
+  }
+  if (parts.length) return parts.join("");
+  return undefined;
+}
+
+function parseResponsesOutput(raw: string): LiveOutput {
+  let payload: any;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    throw new Error("provider returned invalid JSON");
+  }
+  const text = responsesText(payload);
+  if (text === undefined) throw new Error("provider response is missing assistant content");
+  const usage = parseResponsesUsage(payload?.usage);
+  return {
+    text,
+    toolCalls: [],
+    terminalState: outputTerminalState(payload, undefined),
+    ...(usage ? { usage } : {}),
+  };
+}
+
 export async function requestCompletion(
   request: CompletionRequest,
   config: LiveClientConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  transport: LiveTransport = "chat"
 ): Promise<LiveOutput> {
-  const url = endpoint(config.baseUrl);
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({
+  const url = endpoint(config.baseUrl, transport);
+  const body = transport === "responses"
+    ? {
+        model: request.model,
+        input: request.messages,
+        max_output_tokens: config.maxOutputTokens,
+        stream: false,
+        ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+        ...(request.responseFormat?.type === "json_object" ? { text: { format: { type: "json_object" } } } : {}),
+      }
+    : {
         model: request.model,
         messages: request.messages,
         max_tokens: config.maxOutputTokens,
         stream: false,
         ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
-      }),
+      };
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey}` },
+      body: JSON.stringify(body),
       redirect: "error",
       signal: AbortSignal.timeout(config.timeoutMs),
     });
@@ -168,7 +232,8 @@ export async function requestCompletion(
     throw new Error("provider request failed");
   }
   if (!response.ok) throw new Error(`provider returned HTTP ${response.status}`);
-  return parseOutput(await readBounded(response));
+  const raw = await readBounded(response);
+  return transport === "responses" ? parseResponsesOutput(raw) : parseOutput(raw);
 }
 
 const JUDGE_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
