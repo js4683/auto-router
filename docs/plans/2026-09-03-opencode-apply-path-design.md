@@ -1,192 +1,237 @@
 # OpenCode Apply Path Design
 
-**Status:** Approved in design review on 2026-09-03
+**Status:** Approved after source audit on 2026-09-03
 **Implementation status:** Not started
-**Scope:** Apply auto-router selections inside OpenCode using connected providers, at confirmed task boundaries, without the API-key proxy
+**Scope:** Apply auto-router selections inside stock OpenCode using connected providers, at confirmed task boundaries, without the API-key proxy
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
 ## Context
 
-Phases 0–4 of auto-router are code-complete. The OpenCode plugin already:
+Phases 0-4 of auto-router are code-complete. The OpenCode plugin already:
 
-- Builds a live catalog from `client.provider.list({ query: { directory } })`
-- Detects task boundaries and calls `selectModel`
-- Logs `TASK SELECT` / `TASK RECOMMEND`
-- Does not change the outbound model
+- Builds a live catalog from `client.provider.list({ query: { directory } })`.
+- Detects task boundaries and calls `selectModel`.
+- Logs `TASK SELECT` / `TASK RECOMMEND`.
+- Does not change the outbound model.
 
-OpenCode 1.18.27 (`~/.opencode/bin/opencode`) still has no supported model override:
+An initial design proposed adding `output.model` to `chat.params`. An audit against
+OpenCode 1.18.27 rejected that approach: OpenCode resolves the language model,
+provider, auth, system prompt, variants, provider options, tool compatibility, and
+headers before or while invoking `chat.params`. Changing the model there would leave
+part of the request prepared for the previous provider/model.
 
-- `chat.params` output is `temperature`, `topP`, `topK`, `maxOutputTokens`, `options`
-- `session.update` accepts only `title`
-- [anomalyco/opencode#45764](https://github.com/anomalyco/opencode/issues/45764) remains open
+Stock OpenCode already exposes the correct earlier seam. `chat.message` receives a
+mutable pending `UserMessage` as `output.message` before OpenCode validates and saves
+it. The session run loop later resolves the model from that saved user message, before
+provider auth and request preparation. Therefore, assigning
+`output.message.model = { providerID, modelID }` applies the selected model to the
+complete current turn without an OpenCode patch.
 
-The local proxy can switch models but only through four API-key backends. That path cannot use OpenCode `/connect` providers (OAuth, Copilot, Bedrock, custom npm providers). This phase does not extend the proxy.
+The local proxy can switch models but only through four API-key backends. It cannot use
+all OpenCode `/connect` providers (OAuth, Copilot, Bedrock, and custom npm providers).
+This phase does not extend the proxy.
 
-Priority: the lightweight router must apply selections locally in OpenCode using the same providers the user already connected.
+Priority: the lightweight router must apply selections locally in OpenCode using the
+same providers the user already connected.
+
+## Source Evidence
+
+The design is pinned to official OpenCode 1.18.27 source:
+
+- [`@opencode-ai/plugin` declares mutable `chat.message` output](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/plugin/src/index.ts#L232-L256).
+- [`createUserMessage` invokes `chat.message` with the pending message](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/session/prompt.ts#L999-L1009), then [validates and saves that same message](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/session/prompt.ts#L1022-L1047).
+- [The run loop resolves the provider/model from the saved user message](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/session/prompt.ts#L1092-L1142).
+- [Provider, auth, and request preparation use that resolved model](https://github.com/anomalyco/opencode/blob/v1.18.27/packages/opencode/src/session/llm.ts#L85-L113).
+
+OpenCode updates its session-level selected model before `chat.message` runs. The
+plugin override is therefore request-scoped and does not change the TUI model picker.
+The plugin reapplies the held task target to every new user message and shows a
+boundary toast so actual model use is visible without changing the user's default.
 
 ## Goals
 
-- Auto-switch the **current** OpenCode turn at a confirmed task boundary.
-- Select only from models returned by connected OpenCode providers.
-- Keep auth on OpenCode `/connect`. No env API keys. No proxy.
-- Fail open when the hook is missing, the catalog is stale, or the target is disconnected.
-- Preserve existing stickiness: non-boundary turns do not set a model override.
-- Keep `router-core` policy, classification, and selection unchanged except for consuming a live catalog.
+- Auto-switch the current OpenCode turn at a confirmed task boundary.
+- Hold and apply that target to every user message inside the task.
+- Select and apply only models from a successful live connected-provider snapshot.
+- Keep auth on OpenCode `/connect`. No environment API keys. No proxy.
+- Fail open when live discovery or selection fails.
+- Preserve existing stickiness: only confirmed boundaries trigger reselection.
+- Keep `router-core` harness-agnostic and reuse its existing policy.
 
 ## Non-Goals
 
-- Reimplementing OpenCode’s provider SDK inside auto-router.
-- Changing the proxy apply path, adding OAuth/Copilot/Bedrock adapters to the proxy, or pointing OpenCode at `auto-router/auto`.
-- Per-turn switching inside a task.
+- Reimplementing OpenCode's provider SDK inside auto-router.
+- Changing the proxy or adding OAuth/Copilot/Bedrock adapters to it.
+- Changing models within one task.
+- Persisting the router target as the session or global OpenCode default.
+- Synchronizing the TUI model picker with the request-scoped target.
+- Adding or patching an OpenCode hook.
 - Abort-and-reprompt workarounds.
-- Tier-1 activation, live benchmark gate, or a Go proxy rewrite.
-- Waiting on upstream before a local OpenCode patch.
+- Tier-1 activation, the live benchmark gate, or a Go proxy rewrite.
 
 ## Decisions
 
-1. Extend existing `chat.params` with optional `output.model`. Do not add a second hook named `llm.request.before`.
-2. Patch OpenCode locally against 1.18.27 first; upstream a PR for the same hook after the local path works.
-3. The auto-router plugin is the apply path. `router-core` stays harness-agnostic.
-4. Override applies to this request only. Unset `output.model` means OpenCode keeps `input.model`.
-5. Fail open on every apply failure. Never crash a turn because routing failed.
-6. The plugin must not mutate `input.model`.
+1. Use existing `chat.message.output.message.model`; do not mutate `chat.params` or patch OpenCode.
+2. Select a new target only at a confirmed boundary or the first task message.
+3. Apply the held target to every user message in that task so the unchanged TUI default cannot cause drift.
+4. Apply only a provider-qualified target present in the latest successful live connected-model snapshot.
+5. Clear `variant` when switching models so a variant from the previous model cannot leak across providers.
+6. Use `chat.params` only to confirm which model OpenCode resolved.
+7. Fail open on every routing failure. Never block a turn because routing failed.
 
 ## Architecture
 
-```
+```text
 OpenCode TUI / session
-        │
-        ▼
-chat.message  →  detectBoundary + selectModel → store taskTarget
-        │
-        ▼
-chat.params   →  if boundary and target connected and different
-                     set output.model = { providerID, modelID }
-                 else leave unset (sticky)
-        │
-        ▼
-OpenCode LLM request path
-        │  uses output.model when present and valid
-        ▼
+        |
+        v
+chat.message
+        |-- refresh connected catalog (bounded)
+        |-- boundary: detectBoundary + selectModel
+        |-- sticky: reuse taskTarget
+        |-- validate target against live snapshot
+        `-- set output.message.model before save
+        |
+        v
+OpenCode saves UserMessage with selected provider/model
+        |
+        v
+OpenCode resolves model + provider + auth and prepares full request
+        |
+        v
+chat.params confirms resolved model (observation only)
+        |
+        v
 Connected provider (OpenCode auth)
 ```
 
-Two repositories:
+Only the auto-router repository changes. Stock OpenCode 1.18.27 is the supported host.
 
-| Repo | Change |
-|------|--------|
-| OpenCode 1.18.27 | Honor optional `chat.params` `output.model` |
-| auto-router | Plugin sets `output.model` at confirmed boundaries |
+## Existing Hook Contract
 
-## Hook Contract
-
-Existing hook, additive field only:
+No public interface change is required:
 
 ```ts
-"chat.params"?: (
+"chat.message"?: (
   input: {
     sessionID: string
-    agent: string
-    model: Model
-    provider: ProviderContext
-    message: UserMessage
-  },
-  output: {
-    temperature: number
-    topP: number
-    topK: number
-    maxOutputTokens: number | undefined
-    options: Record<string, any>
+    agent?: string
     model?: { providerID: string; modelID: string }
-  }
+    messageID?: string
+    variant?: string
+  },
+  output: { message: UserMessage; parts: Part[] },
 ) => Promise<void>
 ```
 
-OpenCode request-path rules:
+At apply time:
 
-1. After all `chat.params` plugins run, if `output.model` is set, resolve that `providerID`/`modelID` against the live provider catalog.
-2. If resolved, use it for this LLM call only.
-3. If missing, unknown, deprecated, or disconnected, ignore the override and use `input.model`.
-4. Do not persist the override as the session or global default model. A later user `/models` choice remains a separate OpenCode action.
+```ts
+output.message.model = { providerID, modelID }
+```
+
+The replacement intentionally omits `variant`. Model IDs may contain `/`, so a
+provider-qualified runtime ID must be split at its first `/`, not its last one.
 
 ## Plugin Flow
 
-1. **Startup / `config`:** `loadConfig()`, `loadCatalogSync()`, then start `client.provider.list` with a 1500 ms fail-open timeout. Replace the catalog only when the live list is non-empty.
-2. **`chat.message`:** Extract session state from the user message and session signals. `detectBoundary`. On a confirmed boundary (or first message), `selectModel` against the live catalog. Store `taskTarget` as a provider-qualified runtime id (`providerID/modelID`). Log `TASK SELECT`.
-3. **`chat.params`:** Parse `taskTarget` into `{ providerID, modelID }`. Set `output.model` only when all of these hold:
-   - this turn is a confirmed boundary (or the first message of a task)
-   - `taskTarget` is present
-   - the pair exists in the connected catalog
-   - it differs from `input.model.providerID` / `input.model.modelID`
-4. **Sticky turns:** leave `output.model` unset. Log `TASK HOLD`.
-5. **Logging:** append `TASK SELECT`, `TASK APPLY`, `TASK HOLD`, and `TASK APPLY skipped` lines to `~/.cache/auto-router-decisions.log` and `client.app.log`.
+1. **Startup / `config`:** load config and fallback catalog, then call
+   `client.provider.list` with a 1500 ms timeout. A successful non-empty response
+   replaces the selection catalog and the live connected-model ID set.
+2. **`chat.message`:** extract prompt text from `output.message` / `output.parts`, then
+   build session state and call `detectBoundary`.
+3. **Boundary:** call `selectModel` against the live catalog and store the resulting
+   provider-qualified `taskTarget`. Log `TASK SELECT`.
+4. **Sticky turn:** do not reselect; reuse `taskTarget`.
+5. **Apply:** if `taskTarget` is in the live connected-model ID set, compare it with
+   `output.message.model`. When different, replace `output.message.model` with the
+   target pair and omit `variant`. Store the expected message ID, agent, and model pair
+   for confirmation.
+6. **No live proof:** if the target came only from fallback/cache data, leave the
+   message unchanged and log `TASK RECOMMEND`. Fallback data is never proof that auth
+   is connected.
+7. **`chat.params`:** ignore calls whose message ID or agent does not match the pending
+   confirmation. This excludes title generation and subtask agents that can run in the
+   same session. On the first matching LLM call, compare `input.model.providerID` /
+   `input.model.id` with the expected pair. Log `TASK APPLY` or
+   `TASK APPLY mismatch`, then clear the pending confirmation.
+8. **Visibility:** show one fail-open TUI toast at a new boundary when a different
+   target is applied. Do not toast on sticky turns.
 
-Selection continues to use existing task-type policy, free-first / quality floors, context-fit, and stickiness inside `router-core`.
+Selection continues to use existing task-type policy, quality floors, context fit,
+free-first verification ordering, and task stickiness inside `router-core`.
 
 ## Failure Modes
 
 | Condition | Behavior |
 |-----------|----------|
-| Stock OpenCode without the patch | `output.model` is ignored by the host. Plugin logs `TASK RECOMMEND` as today. No crash. |
-| Invalid or disconnected target | OpenCode ignores override. Plugin logs `TASK APPLY skipped`. |
-| `provider.list` timeout or throw | Keep last catalog or fallback. Do not block the turn. |
-| `selectModel` throw | Catch, leave model unchanged, log error. |
-| Empty live catalog | Keep fallback catalog; apply only if the target still resolves. |
+| `provider.list` timeout, throw, or empty result | Keep selection available for recommendation, but do not mutate the message without a successful live snapshot. |
+| Target absent from live connected set | Leave message unchanged; log `TASK RECOMMEND`. |
+| `selectModel` throws | Catch, leave message unchanged, and log the error. |
+| Target runtime ID is malformed | Leave message unchanged; log `TASK APPLY skipped`. |
+| TUI toast or log call fails | Ignore; routing and the user turn continue. |
+| `chat.params` resolves a different model | Do not retry or reprompt; log `TASK APPLY mismatch` for diagnosis. |
+
+No prompt text, response content, credentials, or provider auth values are written to
+decision logs.
 
 ## Testing
 
 ### auto-router plugin
 
-- Boundary turn with a connected different target → `output.model` set to that pair.
-- Sticky follow-up → `output.model` unset.
-- Unknown target → `output.model` unset.
-- Catalog timeout → no throw; no false apply.
-- First session message → treated as a boundary and may apply.
-
-### OpenCode patch
-
-- Valid override used for exactly one request.
-- Invalid override ignored; `input.model` used.
-- Unset override keeps current model.
-- Existing `chat.params` temperature/options behavior unchanged.
+- Boundary with a connected different target replaces `output.message.model`.
+- First session message is treated as a boundary and may apply.
+- Sticky follow-up reuses the task target without calling `selectModel` again.
+- Sticky follow-up starting from a different TUI model is rewritten to the held target.
+- Same provider/model leaves the message model and valid variant unchanged.
+- Cross-model apply omits the previous model's variant.
+- Runtime IDs containing `/` preserve the complete model ID.
+- Target absent from the latest live snapshot is recommendation-only.
+- Catalog timeout/throw does not throw and does not apply fallback models.
+- First `chat.params` call confirms the expected applied model once.
+- A title-agent `chat.params` call does not consume the main agent's pending confirmation.
 
 ### Manual local gate
 
-On patched OpenCode with the plugin loaded and real `/connect` providers:
+On stock OpenCode 1.18.27 with the plugin loaded and real `/connect` providers:
 
 1. Start a session on any connected model.
-2. Planning prompt (`Plan the architecture for this project`) applies a quality-first connected model.
-3. A long corroborated `run …` verification prompt applies a free/lowest-cost connected model.
-4. `run that again, please` stays on the verification model.
-5. Decision log shows `TASK SELECT` / `TASK APPLY` / `TASK HOLD` matching those turns.
+2. A planning prompt applies a quality-first connected model.
+3. A long corroborated `run ...` verification prompt applies a free/lowest-cost connected model.
+4. `run that again, please` stays on the verification target.
+5. Saved user and assistant message metadata show the routed provider/model.
+6. Decision logs show `TASK SELECT` / `TASK APPLY` / sticky hold behavior matching those turns.
 
 ## Rollout
 
-1. Patch local OpenCode 1.18.27 so `chat.params` honors `output.model`.
-2. Wire the auto-router plugin apply path with fail-open.
-3. Pass plugin tests and the manual local gate.
-4. Open an upstream OpenCode PR for the hook (same contract as the local patch).
-5. Keep the plugin fail-open until upstream ships; local patched OpenCode is the supported apply runtime until then.
+1. Add focused plugin tests around existing hooks.
+2. Implement `chat.message` apply and `chat.params` confirmation.
+3. Run the repository test suite and build.
+4. Deploy the verified plugin to `~/.config/opencode/plugins/auto-router.ts`.
+5. Pass the manual local gate on stock OpenCode 1.18.27.
+6. Update `PLAN.md` and `roadmap.md` with the supported native apply path.
 
 ## Ownership
 
-- **OpenCode:** request-path override and catalog validity check.
-- **auto-router plugin:** boundary detection, selection, setting `output.model`, logging.
-- **router-core:** unchanged selection contract.
+- **OpenCode:** existing message persistence, provider/model resolution, auth, and request preparation.
+- **auto-router plugin:** discovery, boundary detection, selection, request-scoped model assignment, confirmation, and logging.
+- **router-core:** unchanged policy and selection contract.
 
-## Out of this change
+## Alternatives Rejected
 
-- Proxy backends, OpenRouter-only launchers, and `OPENCODE_CONFIG_CONTENT` pointing at `auto-router/auto`.
-- Mutating `input.model`.
-- Persisting a new global default model as a side effect of routing.
-- Competing for an assigned `llm.request.before` implementation beyond the additive `chat.params` field.
+- **`chat.params.output.model`:** too late in OpenCode's request pipeline and requires a host API change.
+- **Local OpenCode fork:** unnecessary once the earlier `chat.message` seam is used.
+- **Abort and reprompt:** risks duplicate or dropped messages.
+- **Proxy apply:** cannot reuse all OpenCode-managed provider connections.
+- **Recommendation only:** does not satisfy automatic application.
 
 ## Acceptance
 
 This phase is done when:
 
-- A local patched OpenCode session applies router targets at task boundaries using `/connect` providers.
-- Sticky turns do not switch models.
-- Stock OpenCode without the patch still runs the plugin without errors.
-- Tests listed above pass.
-- PLAN.md and roadmap.md record the apply-path decision and remaining upstream-PR item.
+- A stock OpenCode 1.18.27 session applies router targets using `/connect` providers.
+- Only task boundaries reselect; every sticky task turn keeps the held target.
+- No target is applied without proof from a successful live connected-provider snapshot.
+- The plugin confirms the resolved model through `chat.params` without mutating it.
+- Focused tests, the full repository test suite, build, and manual local gate pass.
+- `PLAN.md` and `roadmap.md` record the native apply path.
