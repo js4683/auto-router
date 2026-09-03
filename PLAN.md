@@ -60,14 +60,19 @@ A new model decision is allowed only when one of these establishes a task bounda
 - Compaction or cleared context.
 - High-confidence topic shift supported by multiple boundary signals.
 
+Substantive verification instructions beginning with `run` can provide the new-goal
+signal when another heuristic corroborates them. Short anaphoric follow-ups such as
+`run that again` (including trailing whitespace or punctuation and optional `please`)
+remain below the boundary threshold and keep the current task target.
+
 Errors, retries, file growth, and tool depth are complexity signals. They do not switch
 models in the middle of a task.
 
 ### Task locking
 
 - The first message in a task selects the task target.
-- Follow-up messages keep that target even if their individual wording looks easier or
-  harder.
+- Non-boundary follow-up messages keep that target even if their individual wording looks
+  easier or harder.
 - A confirmed new task performs a fresh selection immediately.
 - Task-level selection must not inherit the old task's downgrade delay. Downgrade delay
   is unnecessary once a new task has been confirmed.
@@ -226,7 +231,8 @@ Supported strategies:
   - [x] Clean and deploy `packages/router-core/dist` to the global plugin directory.
   - [x] Smoke-test a verification task against the live provider catalog.
   - [x] Smoke-test a planning/architecture task against the live provider catalog.
-  - [x] Verify follow-up messages do not produce additional task recommendations.
+  - [x] Verify long corroborated `run` verification instructions can reselect while
+    short anaphoric follow-ups remain sticky.
   - [x] Record final test counts and runtime evidence below.
 
 ### 6. Proxy apply path
@@ -263,7 +269,10 @@ Supported strategies:
   is available.
 - A prompt such as `Plan the architecture for this project` resolves to `planning`,
   enforces quality `>= 85`, and chooses the highest-quality eligible connected model.
-- A follow-up message in either task keeps the existing task target.
+- A non-boundary follow-up message in either task keeps the existing task target.
+- A long verification instruction beginning with `run` can establish a new boundary when
+  a second heuristic signal corroborates it; short anaphoric `run ... again` follow-ups
+  remain sticky.
 - A confirmed new task performs one new selection.
 - `chat.params` never receives unsupported model mutation fields.
 - The task log uses provider-qualified target IDs and distinguishes recommendation from
@@ -353,6 +362,8 @@ Supported strategies:
 - **2026-09-01:** The Phase 4 Tier-1 embedding architecture is approved as opt-in;
   the checked-in fixture path remains disabled by default and fails open to Tier 0;
   production activation requires the held-out validation gate.
+- **2026-09-03:** Substantive `run` verification instructions may establish a boundary
+  when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
 - [x] Phase 4 code complete
 - [ ] real observed-outcome corpus collected
 - [ ] production artifact trained
