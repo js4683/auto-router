@@ -10,6 +10,21 @@ import type { SessionState, Tier } from "../../packages/router-core/src/index.js
 // ---- Catalog / Config (loaded once, reloaded on config hook if desired) ----
 let config = loadConfig();
 let catalog = loadCatalogSync(config);
+let liveRuntimeIDs = new Set<string>();
+
+type RuntimeModel = { providerID: string; modelID: string };
+type PendingApply = RuntimeModel & { messageID: string; agent: string };
+
+function runtimeModelID(model: { providerID?: string; modelID?: string; id?: string } | undefined): string | undefined {
+  const modelID = model?.modelID ?? model?.id;
+  return model?.providerID && modelID ? `${model.providerID}/${modelID}` : undefined;
+}
+
+function parseRuntimeModelID(id: string): RuntimeModel | undefined {
+  const separator = id.indexOf("/");
+  if (separator <= 0 || separator === id.length - 1) return undefined;
+  return { providerID: id.slice(0, separator), modelID: id.slice(separator + 1) };
+}
 
 async function loadLiveCatalog(client: any, directory: string): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -20,8 +35,10 @@ async function loadLiveCatalog(client: any, directory: string): Promise<void> {
     });
     if (timer) clearTimeout(timer);
     const data = response?.data ?? response;
+    if (!data) return;
     const live = buildCatalogFromProviders(data, config);
-    if (live.models.length) catalog = live;
+    liveRuntimeIDs = new Set(live.models.map((model) => model.runtimeId).filter((id): id is string => Boolean(id)));
+    catalog = live.models.length ? live : loadCatalogSync(config);
   } catch {
     if (timer) clearTimeout(timer);
   }
@@ -38,7 +55,7 @@ type PerSession = {
   taskTarget: string | null;
   taskTier: Tier | null;
   actualModel: string | null;
-  pendingRecommendation: boolean;
+  pendingApply: PendingApply | null;
   prevAgent?: string;
   prevMessage?: string;
   isCompacted: boolean;
@@ -61,7 +78,7 @@ function getSession(id: string): PerSession {
       taskTarget: null,
       taskTier: null,
       actualModel: null,
-      pendingRecommendation: false,
+      pendingApply: null,
       isCompacted: false,
       isNewSession: true,
     };
@@ -77,7 +94,7 @@ function estimateTokens(text: string): number {
 
 function extractTextFromMessage(msg: any): string {
   if (!msg) return "";
-  // chat.message hook: input.message is UserMessage with parts
+  // OpenCode supplies message content separately in chat.message output.parts.
   if (Array.isArray(msg.parts)) return msg.parts.map((p: any) => p.text ?? p.content ?? "").join("\n");
   if (typeof msg.text === "string") return msg.text;
   if (typeof msg.content === "string") return msg.content;
@@ -152,12 +169,6 @@ async function appendDecision(line: string): Promise<void> {
 }
 
 export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
-  let liveCatalogPromise: Promise<void> | undefined;
-  const ensureLiveCatalog = () => {
-    if (!liveCatalogPromise) liveCatalogPromise = loadLiveCatalog(client, directory);
-    return liveCatalogPromise;
-  };
-
   await client.app.log({
     body: {
       service: "auto-router",
@@ -167,6 +178,109 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     },
   }).catch(() => {});
 
+  async function logDecision(line: string, level: "info" | "warn", extra: Record<string, unknown>): Promise<void> {
+    await client.app.log({
+      body: { service: "auto-router", level, message: line, extra },
+    }).catch(() => {});
+    await appendDecision(line);
+  }
+
+  async function selectTaskTarget(
+    sessionID: string,
+    session: PerSession,
+    sessionState: SessionState,
+    boundary: ReturnType<typeof detectBoundary>,
+    prevAgent?: string,
+    prevMessage?: string
+  ): Promise<boolean> {
+    await loadLiveCatalog(client, directory);
+    const selectionState: SessionState = {
+      ...sessionState,
+      currentTask: {
+        ...sessionState.currentTask,
+        taskTokens: sessionState.currentTask.promptTokens,
+        filesTouched: 0,
+        diffHunks: 0,
+        toolDepth: 0,
+        priorErrors: 0,
+      },
+    };
+
+    let result: ReturnType<typeof selectModel>;
+    try {
+      result = selectModel(selectionState, catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
+    } catch (error) {
+      session.taskTarget = null;
+      await logDecision("[auto-router] TASK ERROR selection failed", "warn", {
+        sessionID,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+
+    if (!liveRuntimeIDs.has(result.modelId)) {
+      session.taskTarget = null;
+      session.taskTier = null;
+      await logDecision(
+        `[auto-router] TASK RECOMMEND target=${result.modelId} source=${result.catalogSource} (no live connected proof)`,
+        "info",
+        { sessionID, target: result.modelId, catalogSource: result.catalogSource }
+      );
+      return false;
+    }
+
+    const taskType = resolveTaskType(selectionState, config);
+    session.taskTarget = result.modelId;
+    session.taskTier = result.tier;
+    resetTask(sessionID, selectionState.currentTask.promptTokens);
+
+    const line = `[auto-router] TASK SELECT s=${sessionID.slice(0, 8)} target=${result.modelId} tier=${result.tier} taskType=${taskType.type ?? "none"} via=${result.via} source=${result.catalogSource} boundary=${boundary.signals.join("+") || "initial"}`;
+    await logDecision(line, "info", {
+      sessionID,
+      tier: result.tier,
+      score: result.score,
+      confidence: result.confidence,
+      taskType: taskType.type,
+      via: result.via,
+      modelId: result.modelId,
+      lifetimeTokens: sessionState.lifetimeTokens,
+      boundary,
+      catalogSource: result.catalogSource,
+    });
+    return true;
+  }
+
+  async function applyTaskTarget(
+    sessionID: string,
+    session: PerSession,
+    message: { id: string; agent: string; model: RuntimeModel & { variant?: string } },
+    notify: boolean
+  ): Promise<void> {
+    if (!session.taskTarget || !liveRuntimeIDs.has(session.taskTarget)) return;
+    const target = parseRuntimeModelID(session.taskTarget);
+    if (!target) {
+      await logDecision(`[auto-router] TASK APPLY skipped malformed=${session.taskTarget}`, "warn", {
+        sessionID,
+        target: session.taskTarget,
+      });
+      return;
+    }
+    if (runtimeModelID(message.model) === session.taskTarget) return;
+
+    message.model = target;
+    session.pendingApply = { ...target, messageID: message.id, agent: message.agent };
+    if (!notify) return;
+
+    await client.tui.showToast({
+      body: {
+        title: "Auto-router",
+        message: `Using ${session.taskTarget} for this task`,
+        variant: "info",
+        duration: 3000,
+      },
+    }).catch(() => {});
+  }
+
   return {
     // Keep config live: if user edits auto-router.json, next turn picks it up
     // (opencode doesn't hot-reload plugin config, so we reload lazily on each turn)
@@ -174,17 +288,15 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       try {
         config = loadConfig();
         catalog = loadCatalogSync(config);
-        liveCatalogPromise = undefined;
+        liveRuntimeIDs = new Set();
       } catch {}
     },
 
     "chat.message": async (input, output) => {
-      await ensureLiveCatalog();
-      const sessionID: string = (input as any).sessionID ?? (input as any).sessionId ?? "global";
+      const sessionID = input.sessionID;
       const s = getSession(sessionID);
-      const hookMessage = (input as any).message ?? (Array.isArray((output as any).parts) ? { parts: (output as any).parts } : (output as any).message ?? input);
-      const msgText = extractTextFromMessage(hookMessage);
-      const agent: string | undefined = (input as any).agent;
+      const msgText = extractTextFromMessage({ parts: output.parts });
+      const agent = input.agent;
       if (agent) s.agent = agent;
 
       const prevAgent = s.prevAgent;
@@ -193,65 +305,29 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const boundary = detectBoundary(sessionState, prevAgent, prevMessage);
       s.prevAgent = agent ?? sessionState.activeAgent;
       s.prevMessage = msgText;
-      if (s.taskTarget && !boundary.isBoundary) return;
+      const shouldSelect = !s.taskTarget || boundary.isBoundary || !liveRuntimeIDs.has(s.taskTarget);
+      s.pendingApply = null;
 
-      const selectionState: SessionState = {
-        ...sessionState,
-        currentTask: {
-          ...sessionState.currentTask,
-          taskTokens: sessionState.currentTask.promptTokens,
-          filesTouched: 0,
-          diffHunks: 0,
-          toolDepth: 0,
-          priorErrors: 0,
-        },
-      };
-      const result = selectModel(selectionState, catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
-      const taskType = resolveTaskType(selectionState, config);
-      s.taskTarget = result.modelId;
-      s.taskTier = result.tier;
-      s.pendingRecommendation = true;
-      resetTask(sessionID, selectionState.currentTask.promptTokens);
-
-      const line = `[auto-router] TASK SELECT s=${sessionID.slice(0, 8)} target=${result.modelId} tier=${result.tier} taskType=${taskType.type ?? "none"} via=${result.via} source=${result.catalogSource} boundary=${boundary.signals.join("+") || "initial"}`;
-      await client.app.log({
-        body: {
-          service: "auto-router",
-          level: "info",
-          message: line,
-          extra: {
-            sessionID,
-            tier: result.tier,
-            score: result.score,
-            confidence: result.confidence,
-            taskType: taskType.type,
-            via: result.via,
-            modelId: result.modelId,
-            lifetimeTokens: sessionState.lifetimeTokens,
-            boundary,
-            catalogSource: result.catalogSource,
-          },
-        },
-      }).catch(() => {});
-      await appendDecision(line);
+      if (shouldSelect && !(await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage))) return;
+      await applyTaskTarget(sessionID, s, output.message, shouldSelect);
     },
 
-    "chat.params": async (input, output) => {
-      const sessionID: string = (input as any).sessionID ?? "global";
+    "chat.params": async (input) => {
+      const sessionID = input.sessionID;
       const s = getSession(sessionID);
-      const currentModelId = (input as any).model?.id ?? (input as any).model?.modelID;
-      const currentProviderId = (input as any).model?.providerID ?? (input as any).provider?.id;
-      const currentRuntimeId = currentProviderId && currentModelId ? `${currentProviderId}/${currentModelId}` : currentModelId;
-      s.actualModel = currentRuntimeId ?? s.actualModel;
-      if (!s.pendingRecommendation || !s.taskTarget) return;
-      s.pendingRecommendation = false;
-      const sameModel = s.taskTarget === currentRuntimeId || s.taskTarget === currentModelId;
-      if (sameModel) return;
+      const actual = runtimeModelID(input.model) ?? "undefined";
+      s.actualModel = actual;
+      const pending = s.pendingApply;
+      if (!pending) return;
+      if (input.message.id !== pending.messageID || input.agent !== pending.agent) return;
 
-      const before = currentRuntimeId ?? "undefined";
-      const line = `[auto-router] TASK RECOMMEND ${before} -> ${s.taskTarget} (model unchanged by chat.params)`;
-      await client.app.log({ body: { service: "auto-router", level: "info", message: line, extra: { from: before, to: s.taskTarget, sessionID } } }).catch(() => {});
-      await appendDecision(line);
+      s.pendingApply = null;
+      const expected = `${pending.providerID}/${pending.modelID}`;
+      const matches = actual === expected;
+      const line = matches
+        ? `[auto-router] TASK APPLY ${expected}`
+        : `[auto-router] TASK APPLY mismatch expected=${expected} actual=${actual}`;
+      await logDecision(line, matches ? "info" : "warn", { sessionID, expected, actual });
     },
 
     // ---- Tool hooks: wire filesTouched / toolDepth / priorErrors ----
@@ -319,7 +395,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
           s.taskTarget = null;
           s.taskTier = null;
           s.actualModel = null;
-          s.pendingRecommendation = false;
+          s.pendingApply = null;
           break;
         }
         case "session.updated": {
