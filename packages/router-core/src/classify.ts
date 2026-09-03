@@ -144,7 +144,7 @@ export function detectBoundary(
   const prev = (prevTaskMessage || "").toLowerCase();
 
   // 1. topic shift keyword (new goal language)
-  const newGoalPhrase = /^(build|create|implement|add|review|test|monitor|debug|fix|refactor)\b/.test(msg);
+  const newGoalPhrase = /^(build|create|implement|add|review|test|run|monitor|debug|fix|refactor)\b/.test(msg);
   if (newGoalPhrase && prev && !prev.startsWith(msg.slice(0, 10))) {
     signals.push("newGoalPhrase");
   }
