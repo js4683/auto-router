@@ -57,16 +57,10 @@ describe("planAvengersCollection", () => {
     });
   });
 
-  it("plans no judge call for a case without a rubric", () => {
+  it("rejects a case without a rubric or deterministic checks", () => {
     const noRubric = fixtureDataset([fixtureTurn({ judgeRubric: undefined })]);
 
-    expect(planAvengersCollection(noRubric, aliases())).toEqual({
-      exampleCount: 1,
-      candidateCount: 3,
-      generationCalls: 3,
-      judgeCalls: 0,
-      totalCalls: 3,
-    });
+    expect(() => planAvengersCollection(noRubric, aliases())).toThrow("turn turn-1 has no quality signal");
   });
 
   it("rejects candidate lists outside 2 through 26", () => {
@@ -77,7 +71,7 @@ describe("planAvengersCollection", () => {
 describe("collectAvengersOutcomes", () => {
   it("does not retry a timed-out candidate call", async () => {
     let calls = 0;
-    const oneTurn = fixtureDataset([fixtureTurn({ messages: [{ role: "user", content: "timeout" }] })]);
+    const oneTurn = fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "timeout" }] })]);
     await collectAvengersOutcomes(oneTurn, aliases(), config, async (_url, init) => {
       calls += 1;
       return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }));
@@ -128,6 +122,19 @@ describe("collectAvengersOutcomes", () => {
     expect(calls).toBe(0);
   });
 
+  it("rejects turns without a quality signal before making generation calls", async () => {
+    let calls = 0;
+    const unlabeled = fixtureDataset([fixtureTurn({ judgeRubric: undefined, checks: [] })]);
+
+    await expect(
+      collectAvengersOutcomes(unlabeled, aliases(), config, async () => {
+        calls += 1;
+        return completion("ok");
+      })
+    ).rejects.toThrow("turn turn-1 has no quality signal");
+    expect(calls).toBe(0);
+  });
+
   it("does not score recorded outcomes against newly generated responses", async () => {
     const records = await collectAvengersOutcomes(
       fixtureDataset([
@@ -149,14 +156,15 @@ describe("collectAvengersOutcomes", () => {
       }
     );
 
-    expect(records[0].outcomes.map((outcome: any) => outcome.quality)).toEqual([0.8, 0.8, 0.8]);
+    const outcomes = records[0].outcomes as Array<{ quality: number }>;
+    expect(outcomes.map((outcome) => outcome.quality)).toEqual([0.8, 0.8, 0.8]);
   });
 
   it("refuses to append to an existing collection output", async () => {
     const dir = mkdtempSync(join(tmpdir(), "avengers-output-"));
     tempDirs.push(dir);
     const output = join(dir, "collection.jsonl");
-    const source = fixtureDataset([fixtureTurn({ judgeRubric: undefined })]);
+    const source = fixtureDataset([fixtureTurn({ checks: [{ type: "exact-text", expected: "ok" }] })]);
     const fetchImpl: typeof fetch = async () => completion("ok");
     await collectAvengersOutcomes(source, aliases(), config, fetchImpl, output);
     let calls = 0;

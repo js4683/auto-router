@@ -36,12 +36,21 @@ export function parseAvengersAliases(raw: string): AvengersAliasMap {
 export function planAvengersCollection(dataset: EvalDatasetV1, aliases: AvengersAliasMap): AvengersCollectionPlan {
   if (aliases.size < 2 || aliases.size > 26) throw new Error("candidate list must contain between 2 and 26 aliases");
   const turns = dataset.sessions.flatMap((session) => session.turns);
-  for (const turn of turns) lastUserText(turn);
+  for (const turn of turns) {
+    lastUserText(turn);
+    if (!turn.judgeRubric?.trim() && !usableDeterministicChecks(turn).length) {
+      throw new Error(`turn ${turn.id} has no quality signal`);
+    }
+  }
   const exampleCount = turns.length;
   const candidateCount = aliases.size;
   const generationCalls = exampleCount * candidateCount;
-  const judgeCalls = turns.filter((turn) => Boolean(turn.judgeRubric)).length;
+  const judgeCalls = turns.filter((turn) => Boolean(turn.judgeRubric?.trim())).length;
   return { exampleCount, candidateCount, generationCalls, judgeCalls, totalCalls: generationCalls + judgeCalls };
+}
+
+function usableDeterministicChecks(turn: EvalTurnV1) {
+  return (turn.checks ?? []).filter((check) => check.type !== "recorded-outcome");
 }
 
 function lastUserText(turn: EvalTurnV1): string {
@@ -94,8 +103,7 @@ async function collectTurn(
     const output = item.output;
     const terminalState = output?.terminalState ?? "failed";
     const contentTruncated = output ? outputTruncated(output) : false;
-    const deterministicChecks = (turn.checks ?? []).filter((check) => check.type !== "recorded-outcome");
-    const deterministic = output ? runChecks(output, deterministicChecks) : null;
+    const deterministic = output ? runChecks(output, usableDeterministicChecks(turn)) : null;
     const judge = judged[item.paper];
     const quality = terminalState === "completed" ? (judge === undefined ? deterministic ?? 0 : compositeQuality(deterministic, judge)) : 0;
     const usage = output?.usage;
