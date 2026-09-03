@@ -3,6 +3,7 @@ import type { SessionState, ClassifyResult, Tier, RouterConfig, BoundaryResult }
 // Keyword lists per design.md:169
 const UP_KEYWORDS = ["refactor", "architecture", "design", "debug", "why", "race", "concurrency", "deadlock", "async", "migrate"];
 const DOWN_KEYWORDS = ["rename", "typo", "format", "comment", "bump version", "bump", "lint", "prettier"];
+const ANAPHORIC_RUN_FOLLOW_UP = /^run\s+(?:that|this|it)\s+again(?:(?:\s*,\s*|\s+)please)?[.!?]*$/;
 
 function keywordScore(message: string): number {
   const lower = (message || "").toLowerCase();
@@ -140,11 +141,11 @@ export function detectBoundary(
   }
 
   // Heuristic signals — need >=2 + high confidence
-  const msg = (session.currentTask.lastUserMessage || "").toLowerCase();
+  const msg = (session.currentTask.lastUserMessage || "").toLowerCase().trim();
   const prev = (prevTaskMessage || "").toLowerCase();
 
   // 1. topic shift keyword (new goal language)
-  const newGoalPhrase = /^(build|create|implement|add|review|test|monitor|debug|fix|refactor)\b/.test(msg);
+  const newGoalPhrase = !ANAPHORIC_RUN_FOLLOW_UP.test(msg) && /^(build|create|implement|add|review|test|run|monitor|debug|fix|refactor)\b/.test(msg);
   if (newGoalPhrase && prev && !prev.startsWith(msg.slice(0, 10))) {
     signals.push("newGoalPhrase");
   }

@@ -100,6 +100,25 @@ describe("detectBoundary", () => {
     if (r.confidence >= 0.8) expect(r.isBoundary).toBe(true);
   });
 
+  it("treats a long run instruction as a boundary when corroborated", () => {
+    const s = sess({
+      lastUserMessage:
+        "run the complete test suite, lint checks, type checks, build verification, and integration checks, then report every failure with the affected file and command",
+    });
+    const r = detectBoundary(s, "implement", "plan the implementation");
+    expect(r.isBoundary).toBe(true);
+    expect(r.signals).toEqual(expect.arrayContaining(["newGoalPhrase", "longNewMessage"]));
+  });
+
+  it.each(["run that again", "run that again, please", "run that again "])("keeps short run follow-up %j below the boundary threshold", (lastUserMessage) => {
+    const s = sess({ lastUserMessage, filesTouched: 8 });
+    const r = detectBoundary(s, "implement", "test the implementation");
+    expect(r.isBoundary).toBe(false);
+    expect(r.signals).toContain("manyFiles");
+    expect(r.signals).not.toContain("newGoalPhrase");
+    expect(r.confidence).toBeLessThan(0.8);
+  });
+
   it("hard signal increases confidence", () => {
     const s = sess({ lastUserMessage: "why doesn't this work not working error retry", priorErrors: 2 } as any);
     const r = detectBoundary(s, "implement", "old");
