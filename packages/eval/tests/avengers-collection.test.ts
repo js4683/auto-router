@@ -57,6 +57,18 @@ describe("planAvengersCollection", () => {
     });
   });
 
+  it("plans no judge call for a case without a rubric", () => {
+    const noRubric = fixtureDataset([fixtureTurn({ judgeRubric: undefined })]);
+
+    expect(planAvengersCollection(noRubric, aliases())).toEqual({
+      exampleCount: 1,
+      candidateCount: 3,
+      generationCalls: 3,
+      judgeCalls: 0,
+      totalCalls: 3,
+    });
+  });
+
   it("rejects candidate lists outside 2 through 26", () => {
     expect(() => parseAvengersAliases("only=one")).toThrow(/2 and 26/);
   });
@@ -101,6 +113,62 @@ describe("collectAvengersOutcomes", () => {
       return completion("ok");
     });
     expect(models).not.toContain("judge/model");
+  });
+
+  it("preflights user text before making generation calls", async () => {
+    let calls = 0;
+    const invalid = fixtureDataset([fixtureTurn({ messages: [{ role: "assistant", content: "not a task" }] })]);
+
+    await expect(
+      collectAvengersOutcomes(invalid, aliases(), config, async () => {
+        calls += 1;
+        return completion("ok");
+      })
+    ).rejects.toThrow("turn turn-1 has no user text");
+    expect(calls).toBe(0);
+  });
+
+  it("does not score recorded outcomes against newly generated responses", async () => {
+    const records = await collectAvengersOutcomes(
+      fixtureDataset([
+        fixtureTurn({
+          judgeRubric: "Score.",
+          checks: [{ type: "recorded-outcome", passed: false }],
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      ]),
+      aliases(),
+      config,
+      async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.model === "judge/model") {
+          const request = JSON.parse(body.messages[1].content);
+          return completion(JSON.stringify({ scores: Object.fromEntries(request.responses.map((item: any) => [item.label, 80])) }));
+        }
+        return completion("ok");
+      }
+    );
+
+    expect(records[0].outcomes.map((outcome: any) => outcome.quality)).toEqual([0.8, 0.8, 0.8]);
+  });
+
+  it("refuses to append to an existing collection output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avengers-output-"));
+    tempDirs.push(dir);
+    const output = join(dir, "collection.jsonl");
+    const source = fixtureDataset([fixtureTurn({ judgeRubric: undefined })]);
+    const fetchImpl: typeof fetch = async () => completion("ok");
+    await collectAvengersOutcomes(source, aliases(), config, fetchImpl, output);
+    let calls = 0;
+
+    await expect(
+      collectAvengersOutcomes(source, aliases(), config, async () => {
+        calls += 1;
+        return completion("again");
+      }, output)
+    ).rejects.toThrow("collection output already exists");
+    expect(calls).toBe(0);
+    expect(readFileSync(output, "utf8").trim().split("\n")).toHaveLength(1);
   });
 });
 

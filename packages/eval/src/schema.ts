@@ -236,15 +236,25 @@ function validateSessions(value: unknown): void {
   }
 }
 
+export function validateDatasetRoutingSnapshot(value: unknown): void {
+  const snapshot = record(value, "routingSnapshot");
+  validateCatalog(snapshot.catalog);
+  validateConfig(snapshot.config);
+  validatePrices(snapshot.prices);
+  if (snapshot.capabilities !== undefined) validateStringMap(snapshot.capabilities, "capabilities", true);
+}
+
 export function parseDataset(input: unknown): EvalDatasetV1 {
   const dataset = record(input, "dataset");
   if (dataset.schemaVersion !== 1) throw new Error(`unsupported schemaVersion ${String(dataset.schemaVersion)}`);
   string(dataset.id, "dataset.id");
   if (typeof dataset.description !== "string") throw new Error("dataset.description must be a string");
-  validateCatalog(dataset.catalog);
-  validateConfig(dataset.config);
-  validatePrices(dataset.prices);
-  if (dataset.capabilities !== undefined) validateStringMap(dataset.capabilities, "capabilities", true);
+  validateDatasetRoutingSnapshot({
+    catalog: dataset.catalog,
+    config: dataset.config,
+    prices: dataset.prices,
+    capabilities: dataset.capabilities,
+  });
   if (dataset.liveModelAliases !== undefined) {
     for (const [key, value] of Object.entries(record(dataset.liveModelAliases, "liveModelAliases"))) {
       string(key, "liveModelAliases key");

@@ -45,9 +45,30 @@ function stableStringify(value: unknown): string {
 }
 
 function l2Normalize(vector: number[]): number[] {
-  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
-  if (norm === 0) throw new Error("cannot normalize a zero vector");
-  return vector.map((value) => value / norm);
+  const scale = vector.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0);
+  if (!Number.isFinite(scale) || scale === 0) throw new Error("cannot normalize a zero vector");
+  const scaledNorm = Math.sqrt(vector.reduce((sum, value) => sum + (value / scale) ** 2, 0));
+  if (!Number.isFinite(scaledNorm) || scaledNorm === 0) throw new Error("cannot normalize a zero vector");
+  return vector.map((value) => (value / scale) / scaledNorm);
+}
+
+function positiveInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
+}
+
+function validateTrainingOptions(options: AvengersTrainingOptions): void {
+  if (!options.embeddingModel) throw new Error("embeddingModel must be non-empty");
+  if (!options.splitSeed) throw new Error("splitSeed must be non-empty");
+  positiveInteger(options.embeddingDimensions, "embeddingDimensions");
+  positiveInteger(options.maxInputChars, "maxInputChars");
+  if (!Number.isFinite(options.heldOutRatio) || options.heldOutRatio <= 0 || options.heldOutRatio >= 1) {
+    throw new Error("heldOutRatio must be within the open interval (0, 1)");
+  }
+  positiveInteger(options.clusters, "clusters");
+  positiveInteger(options.topK, "topK");
+  if (options.topK > options.clusters) throw new Error("topK must not exceed clusters");
+  if (!Number.isFinite(options.beta) || options.beta <= 0) throw new Error("beta must be positive and finite");
+  positiveInteger(options.minObservations, "minObservations");
 }
 
 function squaredDistance(left: number[], right: number[]): number {
@@ -155,7 +176,7 @@ export function trainAvengersArtifact(
   vectors: Map<string, number[]>,
   options: AvengersTrainingOptions
 ): AvengersProArtifactFiles {
-  if (options.clusters < 1) throw new Error("clusters must be a positive integer");
+  validateTrainingOptions(options);
   const split = splitAvengersCorpus(corpus, options.splitSeed, options.heldOutRatio);
   const train = [...split.train].sort((a, b) => (a.id < b.id ? -1 : 1));
   if (options.clusters > train.length) throw new Error("cluster count is greater than train examples");

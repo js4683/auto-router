@@ -53,6 +53,29 @@ describe("requestCompletion", () => {
     }
   });
 
+  it("rejects endpoint credentials, queries, and fragments and rejects redirects", async () => {
+    for (const baseUrl of ["https://example.com/v1?token=secret", "https://user:pass@example.com/v1", "https://example.com/v1#secret"]) {
+      await expect(
+        requestCompletion({ model: "provider/model", messages: [{ role: "user", content: "hi" }] }, config(baseUrl), async () => new Response("{}"))
+      ).rejects.toThrow("live baseUrl must not include credentials, query, or fragment");
+    }
+
+    let requestedUrl = "";
+    let requestInit: RequestInit | undefined;
+    await requestCompletion(
+      { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
+      config("https://example.com/v1/"),
+      async (url, init) => {
+        requestedUrl = String(url);
+        requestInit = init;
+        return new Response(chatResponse("Hello"));
+      }
+    );
+
+    expect(requestedUrl).toBe("https://example.com/v1/chat/completions");
+    expect(requestInit?.redirect).toBe("error");
+  });
+
   it("preserves non-completed provider terminal states", async () => {
     const fetchImpl: typeof fetch = async () =>
       new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "partial" }, finish_reason: "length" }] }));

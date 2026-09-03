@@ -2,7 +2,9 @@ import { chmodSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   embeddingEndpointDigest,
+  normalizeEmbeddingText,
   requestEmbeddings,
+  resolveMappedModels,
   scoreAvengersPro,
   type AvengersProArtifactFiles,
   type AvengersProPrediction,
@@ -40,6 +42,7 @@ export interface AvengersValidationReport {
 }
 
 type StrategyName = "tier1" | "tier0" | "always-frontier" | "always-cheap";
+type WeightedObservation = { id: string; score: number; weight: number };
 
 function gate(passed: boolean, reason: string): { passed: boolean; reason: string } {
   return { passed, reason };
@@ -121,6 +124,14 @@ function outcomeForRuntime(example: AvengersCorpusExampleV1, runtimeId: string) 
   return example.outcomes.find((outcome) => outcome.runtimeModelId === runtimeId || outcome.paperModelId === runtimeId);
 }
 
+function hasMappedLearnedEvidence(dataset: EvalDatasetV1, prediction: AvengersProPrediction | undefined, runtimeId: string | null): boolean {
+  if (!prediction || !runtimeId || !dataset.config.modelMap) return false;
+  return resolveMappedModels(prediction.paperIds, dataset.config.modelMap, dataset.catalog).some((entry) => {
+    const model = dataset.catalog.models.find((item) => item.id === entry.runtimeId || modelRuntimeId(item) === entry.runtimeId);
+    return (model ? modelRuntimeId(model) : entry.runtimeId) === runtimeId;
+  });
+}
+
 function aggregate(values: Array<{ score: number; weight: number }>): number | null {
   return weightedMean(values);
 }
@@ -141,13 +152,13 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
   const clock = input.now ?? (() => performance.now());
   const latencies: number[] = [];
   const cases: AvengersValidationReport["cases"] = [];
-  const quality: Record<StrategyName, Array<{ score: number; weight: number }>> = {
+  const quality: Record<StrategyName, WeightedObservation[]> = {
     tier1: [],
     tier0: [],
     "always-frontier": [],
     "always-cheap": [],
   };
-  const cost: Record<StrategyName, Array<{ score: number; weight: number }>> = {
+  const cost: Record<StrategyName, WeightedObservation[]> = {
     tier1: [],
     tier0: [],
     "always-frontier": [],
@@ -182,7 +193,11 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
       if (network) {
         const started = clock();
         try {
-          const vectors = await requestEmbeddings([example.text], input.embedding, input.fetchImpl);
+          const vectors = await requestEmbeddings(
+            [normalizeEmbeddingText(example.text, input.artifact.metadata.maxInputChars)],
+            input.embedding,
+            input.fetchImpl
+          );
           latencies.push(clock() - started);
           if (vectors[0].length !== input.artifact.metadata.embeddingDimensions) {
             reasons.push("embedding dimension mismatch");
@@ -209,6 +224,10 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
         reasons.push(error instanceof Error ? error.message : "selection failed");
       }
 
+      if (!hasMappedLearnedEvidence(dataset, prediction, selectedRuntimeIds.tier1)) {
+        reasons.push("tier1 selection lacks mapped learned evidence");
+      }
+
       for (const name of ["tier1", "tier0", "always-frontier", "always-cheap"] as const) {
         const runtimeId = selectedRuntimeIds[name];
         if (!runtimeId) {
@@ -223,8 +242,8 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
         if (outcome.terminalState !== "completed" || outcome.contentTruncated) reasons.push(`${name} outcome is incomplete`);
         if (outcome.costUsd === undefined || !outcome.costSource) reasons.push(`${name} outcome is missing cost provenance`);
         else {
-          quality[name].push({ score: outcome.quality, weight: example.weight });
-          cost[name].push({ score: outcome.costUsd, weight: example.weight });
+          quality[name].push({ id: example.id, score: outcome.quality, weight: example.weight });
+          cost[name].push({ id: example.id, score: outcome.costUsd, weight: example.weight });
         }
       }
       cases.push({ id: example.id, selectedRuntimeIds, complete: reasons.length === 0, reasons });
@@ -241,15 +260,13 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
   const savings = tier1Cost !== null && frontierCost !== null && frontierCost !== 0 ? 1 - tier1Cost / frontierCost : null;
   const qualityDelta = tier1Quality !== null && tier0Quality !== null ? tier1Quality - tier0Quality : null;
   const costDelta = tier1Cost !== null && tier0Cost !== null ? tier1Cost - tier0Cost : null;
-  const interval = quality.tier1.length && quality["always-frontier"].length
-    ? bootstrapRetentionInterval(
-        quality.tier1.map((item, index) => ({
-          routerScore: item.score,
-          frontierScore: quality["always-frontier"][index]?.score ?? 0,
-          weight: item.weight,
-        })),
-        input.bootstrapSeed
-      )
+  const frontierQualityById = new Map(quality["always-frontier"].map((item) => [item.id, item]));
+  const pairedQuality = quality.tier1.flatMap((item) => {
+    const frontier = frontierQualityById.get(item.id);
+    return frontier ? [{ routerScore: item.score, frontierScore: frontier.score, weight: item.weight }] : [];
+  });
+  const interval = pairedQuality.length
+    ? bootstrapRetentionInterval(pairedQuality, input.bootstrapSeed)
     : null;
   const sortedLatency = [...latencies].sort((a, b) => a - b);
   const p95 = sortedLatency.length ? sortedLatency[Math.ceil(0.95 * sortedLatency.length) - 1] : 0;

@@ -211,6 +211,39 @@ describe("parseAvengersCorpus", () => {
     expect(() => parseAvengersCorpus(value)).toThrow(/cost/i);
   });
 
+  it("rejects negative usage and cache totals outside the input total", () => {
+    const negativeUsage = validCorpus();
+    negativeUsage.examples[0].outcomes[0] = {
+      ...negativeUsage.examples[0].outcomes[0],
+      usage: { inputTokens: -1, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+      usageSource: "provider",
+    };
+    expect(() => parseAvengersCorpus(negativeUsage)).toThrow("usage.inputTokens must be non-negative");
+
+    const invalidCache = validCorpus();
+    invalidCache.examples[0].outcomes[0] = {
+      ...invalidCache.examples[0].outcomes[0],
+      usage: { inputTokens: 1, outputTokens: 0, cacheReadInputTokens: 2, cacheWriteInputTokens: 0 },
+      usageSource: "provider",
+    };
+    expect(() => parseAvengersCorpus(invalidCache)).toThrow("usage cache token total must not exceed inputTokens");
+  });
+
+  it("rejects negative session-state counters", () => {
+    const value = validCorpus();
+    value.examples[0].sessionState.lifetimeTokens = -1;
+
+    expect(() => parseAvengersCorpus(value)).toThrow("sessionState.lifetimeTokens must be non-negative");
+  });
+
+  it("validates the routing snapshot through the dataset schema", () => {
+    const value = validCorpus();
+    const model = value.routingSnapshot.catalog.models[0] as unknown as Record<string, unknown>;
+    delete model.codingIndex;
+
+    expect(() => parseAvengersCorpus(value)).toThrow("model.codingIndex must be non-negative");
+  });
+
   it("rejects malformed usage provenance", () => {
     const value = validCorpus();
     value.examples[0].outcomes[0] = {

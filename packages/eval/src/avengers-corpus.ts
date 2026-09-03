@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Catalog, ModelMap, RouterConfig, SessionState, TaskType } from "@auto-router/router-core";
+import { validateDatasetRoutingSnapshot } from "./schema.js";
 import type { EvalPrice, EvalUsage, UsageSource } from "./types.js";
 
 const MAX_EXAMPLES = 10_000;
@@ -77,18 +78,28 @@ function finiteNumber(value: unknown, label: string): number {
   return value;
 }
 
+function nonNegativeNumber(value: unknown, label: string): number {
+  const number = finiteNumber(value, label);
+  if (number < 0) throw new Error(`${label} must be non-negative`);
+  return number;
+}
+
 function stringArray(value: unknown, label: string): string[] {
   return array(value, label).map((item) => nonEmptyString(item, `${label} item`));
 }
 
 function validateUsage(value: unknown, label: string): EvalUsage {
   const usage = record(value, label);
-  return {
-    inputTokens: finiteNumber(usage.inputTokens, `${label}.inputTokens`),
-    outputTokens: finiteNumber(usage.outputTokens, `${label}.outputTokens`),
-    cacheReadInputTokens: finiteNumber(usage.cacheReadInputTokens, `${label}.cacheReadInputTokens`),
-    cacheWriteInputTokens: finiteNumber(usage.cacheWriteInputTokens, `${label}.cacheWriteInputTokens`),
+  const parsed = {
+    inputTokens: nonNegativeNumber(usage.inputTokens, `${label}.inputTokens`),
+    outputTokens: nonNegativeNumber(usage.outputTokens, `${label}.outputTokens`),
+    cacheReadInputTokens: nonNegativeNumber(usage.cacheReadInputTokens, `${label}.cacheReadInputTokens`),
+    cacheWriteInputTokens: nonNegativeNumber(usage.cacheWriteInputTokens, `${label}.cacheWriteInputTokens`),
   };
+  if (parsed.cacheReadInputTokens + parsed.cacheWriteInputTokens > parsed.inputTokens) {
+    throw new Error(`${label} cache token total must not exceed inputTokens`);
+  }
+  return parsed;
 }
 
 function validateOutcome(value: unknown, label: string, knownRuntimeIds: Set<string>): AvengersOutcomeV1 {
@@ -133,10 +144,12 @@ function validateSessionState(value: unknown): SessionState {
   const state = record(value, "sessionState");
   const task = record(state.currentTask, "sessionState.currentTask");
   for (const field of ["promptTokens", "taskTokens", "filesTouched", "diffHunks", "toolDepth"] as const) {
-    finiteNumber(task[field], `sessionState.currentTask.${field}`);
+    nonNegativeNumber(task[field], `sessionState.currentTask.${field}`);
   }
   nonEmptyString(task.lastUserMessage, "sessionState.currentTask.lastUserMessage");
-  finiteNumber(state.lifetimeTokens, "sessionState.lifetimeTokens");
+  if (task.priorErrors !== undefined) nonNegativeNumber(task.priorErrors, "sessionState.currentTask.priorErrors");
+  if (task.diffTokens !== undefined) nonNegativeNumber(task.diffTokens, "sessionState.currentTask.diffTokens");
+  nonNegativeNumber(state.lifetimeTokens, "sessionState.lifetimeTokens");
   return value as SessionState;
 }
 
@@ -181,6 +194,7 @@ function validateExample(value: unknown, index: number, candidatePaperModelIds: 
 
 function validateRoutingSnapshot(value: unknown): { snapshot: AvengersCorpusV1["routingSnapshot"]; knownRuntimeIds: Set<string> } {
   const snapshot = record(value, "routingSnapshot");
+  validateDatasetRoutingSnapshot(snapshot);
   const catalog = record(snapshot.catalog, "routingSnapshot.catalog");
   const config = record(snapshot.config, "routingSnapshot.config");
   const prices = record(snapshot.prices, "routingSnapshot.prices");
@@ -190,8 +204,22 @@ function validateRoutingSnapshot(value: unknown): { snapshot: AvengersCorpusV1["
   const knownRuntimeIds = new Set<string>();
   for (const model of array(catalog.models, "routingSnapshot.catalog.models")) {
     const entry = record(model, "routingSnapshot.catalog.models item");
-    const runtimeId = entry.runtimeId !== undefined ? nonEmptyString(entry.runtimeId, "model.runtimeId") : nonEmptyString(entry.id, "model.id");
-    knownRuntimeIds.add(runtimeId);
+    knownRuntimeIds.add(nonEmptyString(entry.id, "model.id"));
+    if (entry.runtimeId !== undefined) knownRuntimeIds.add(nonEmptyString(entry.runtimeId, "model.runtimeId"));
+  }
+
+  const validatedModelMap: ModelMap = {};
+  for (const [paperId, rawEntries] of Object.entries(modelMap)) {
+    nonEmptyString(paperId, "routingSnapshot.modelMap key");
+    validatedModelMap[paperId] = array(rawEntries, `routingSnapshot.modelMap.${paperId}`).map((rawEntry, index) => {
+      const entry = record(rawEntry, `routingSnapshot.modelMap.${paperId}[${index}]`);
+      const runtimeId = nonEmptyString(entry.runtimeId, `routingSnapshot.modelMap.${paperId}[${index}].runtimeId`);
+      if (!knownRuntimeIds.has(runtimeId)) throw new Error(`routingSnapshot.modelMap.${paperId}[${index}].runtimeId is unknown`);
+      if (!["bench", "hand"].includes(String(entry.source))) {
+        throw new Error(`routingSnapshot.modelMap.${paperId}[${index}].source is invalid`);
+      }
+      return { runtimeId, source: entry.source as "bench" | "hand" };
+    });
   }
 
   return {
@@ -200,7 +228,7 @@ function validateRoutingSnapshot(value: unknown): { snapshot: AvengersCorpusV1["
       config: config as unknown as RouterConfig,
       prices: prices as unknown as Record<string, EvalPrice>,
       capabilities: capabilities as unknown as Record<string, string[]>,
-      modelMap: modelMap as unknown as ModelMap,
+      modelMap: validatedModelMap,
     },
     knownRuntimeIds,
   };

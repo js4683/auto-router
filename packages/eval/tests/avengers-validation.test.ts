@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { artifactDigest, type AvengersProArtifactFiles, type EmbeddingClientConfig } from "@auto-router/router-core";
-import { avengersCorpusDigest, parseAvengersCorpus, type AvengersCorpusV1 } from "../src/avengers-corpus.js";
+import { artifactDigest, normalizeEmbeddingText, type AvengersProArtifactFiles, type EmbeddingClientConfig } from "@auto-router/router-core";
+import { avengersCorpusDigest, parseAvengersCorpus, splitAvengersCorpus, type AvengersCorpusV1 } from "../src/avengers-corpus.js";
 import { validateAvengersArtifact } from "../src/avengers-validation.js";
 
 const embedding: EmbeddingClientConfig = {
@@ -177,5 +177,63 @@ describe("validateAvengersArtifact", () => {
     });
     expect(called).toBe(false);
     expect(report.validation.gates.embedding.passed).toBe(false);
+  });
+
+  it("normalizes held-out text with the artifact input bound", async () => {
+    const source = corpus();
+    for (const example of source.examples) example.text = ` \r\n${"x".repeat(20_000)}\r\n `;
+    const artifact = artifactFor(source);
+    const inputs: string[] = [];
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact,
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { input: string[] };
+        inputs.push(body.input[0]);
+        return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] }));
+      },
+      now: clock(),
+    });
+
+    expect(inputs).toHaveLength(report.sampleIds.length);
+    expect(inputs.every((input) => input === normalizeEmbeddingText(source.examples[0].text, artifact.metadata.maxInputChars))).toBe(true);
+  });
+
+  it("marks a case incomplete when Tier 1 has no mapped learned evidence", async () => {
+    const source = corpus();
+    source.routingSnapshot.modelMap = {};
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.cases.length).toBeGreaterThan(0);
+    expect(report.cases.every((item) => item.complete)).toBe(false);
+    expect(report.cases.some((item) => item.reasons.includes("tier1 selection lacks mapped learned evidence"))).toBe(true);
+    expect(report.validation.gates.requiredCases.passed).toBe(false);
+  });
+
+  it("bootstraps only quality observations paired by case ID", async () => {
+    const source = corpus();
+    const firstHeldOutId = splitAvengersCorpus(source, "seed-1", 0.4).heldOut[0].id;
+    const firstHeldOut = source.examples.find((example) => example.id === firstHeldOutId)!;
+    delete firstHeldOut.outcomes[0].costUsd;
+    delete firstHeldOut.outcomes[0].costSource;
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.validation.qualityRetentionConfidenceInterval).toMatchObject({ lower: 1, upper: 1 });
   });
 });

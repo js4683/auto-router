@@ -135,6 +135,28 @@ describe("trainAvengersArtifact", () => {
     }
   });
 
+  it("normalizes finite large vectors without overflowing", () => {
+    const corpus = trainingCorpus();
+    const split = splitAvengersCorpus(corpus, options.splitSeed, options.heldOutRatio);
+    const vectors = new Map(split.train.map((item) => [item.id, [1e308, 0]]));
+
+    const trained = trainAvengersArtifact(corpus, vectors, { ...options, clusters: 1 });
+
+    expect(trained.centers[0]).toEqual([1, 0]);
+  });
+
+  it("rejects a topK value greater than the cluster count before training", () => {
+    const corpus = trainingCorpus();
+
+    expect(() => trainAvengersArtifact(corpus, new Map(), { ...options, topK: 3 })).toThrow("topK must not exceed clusters");
+  });
+
+  it("rejects non-positive finite training parameters before training", () => {
+    const corpus = trainingCorpus();
+
+    expect(() => trainAvengersArtifact(corpus, new Map(), { ...options, beta: 0 })).toThrow("beta must be positive and finite");
+  });
+
   it("writes mode-0600 files that reload through loadAvengersProArtifactFiles", () => {
     const corpus = trainingCorpus();
     const trained = trainAvengersArtifact(corpus, trainVectors(corpus), options);

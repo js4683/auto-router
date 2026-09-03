@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import type { ModelMap } from "@auto-router/router-core";
 import { runChecks } from "./checks.js";
 import { calculateCost, compositeQuality } from "./metrics.js";
@@ -35,10 +35,12 @@ export function parseAvengersAliases(raw: string): AvengersAliasMap {
 
 export function planAvengersCollection(dataset: EvalDatasetV1, aliases: AvengersAliasMap): AvengersCollectionPlan {
   if (aliases.size < 2 || aliases.size > 26) throw new Error("candidate list must contain between 2 and 26 aliases");
-  const exampleCount = dataset.sessions.reduce((total, session) => total + session.turns.length, 0);
+  const turns = dataset.sessions.flatMap((session) => session.turns);
+  for (const turn of turns) lastUserText(turn);
+  const exampleCount = turns.length;
   const candidateCount = aliases.size;
   const generationCalls = exampleCount * candidateCount;
-  const judgeCalls = exampleCount;
+  const judgeCalls = turns.filter((turn) => Boolean(turn.judgeRubric)).length;
   return { exampleCount, candidateCount, generationCalls, judgeCalls, totalCalls: generationCalls + judgeCalls };
 }
 
@@ -92,7 +94,8 @@ async function collectTurn(
     const output = item.output;
     const terminalState = output?.terminalState ?? "failed";
     const contentTruncated = output ? outputTruncated(output) : false;
-    const deterministic = output ? runChecks(output, turn.checks ?? []) : null;
+    const deterministicChecks = (turn.checks ?? []).filter((check) => check.type !== "recorded-outcome");
+    const deterministic = output ? runChecks(output, deterministicChecks) : null;
     const judge = judged[item.paper];
     const quality = terminalState === "completed" ? (judge === undefined ? deterministic ?? 0 : compositeQuality(deterministic, judge)) : 0;
     const usage = output?.usage;
@@ -131,6 +134,7 @@ export async function collectAvengersOutcomes(
   fetchImpl: typeof fetch = fetch,
   outputPath?: string
 ): Promise<Record<string, unknown>[]> {
+  if (outputPath && existsSync(outputPath)) throw new Error(`collection output already exists: ${outputPath}`);
   planAvengersCollection(dataset, aliases);
   const records: Record<string, unknown>[] = [];
   for (const session of dataset.sessions) {

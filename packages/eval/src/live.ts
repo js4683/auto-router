@@ -46,9 +46,11 @@ function endpoint(baseUrl: string): string {
   } catch {
     throw new Error("live baseUrl is invalid");
   }
+  if (url.username || url.password || url.search || url.hash) throw new Error("live baseUrl must not include credentials, query, or fragment");
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("live baseUrl must use HTTPS except for loopback");
-  return `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  return `${url.toString().replace(/\/$/, "")}/chat/completions`;
 }
 
 async function readBounded(response: Response): Promise<string> {
@@ -158,6 +160,7 @@ export async function requestCompletion(
         ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
       }),
+      redirect: "error",
       signal: AbortSignal.timeout(config.timeoutMs),
     });
   } catch (error) {

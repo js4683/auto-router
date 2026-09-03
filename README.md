@@ -76,12 +76,14 @@ incrementally as upstream chunks arrive. Cross-protocol paths without an increme
 translator request buffered upstream JSON, then synthesize a client-compatible event
 stream instead of attempting to parse upstream SSE as JSON.
 
-When enabled, the proxy scores the first message of a task with Avengers-Pro fixture
-ranking, applies free-first / planning-quality overlays, then holds that target until a
-confirmed boundary. The checked-in configuration leaves this Tier-1 path disabled by
-default; failures fall back to Tier 0. Routing state is reconstructed conservatively from
-normalized messages, tool schemas, and tool-call history so context size, tool depth,
-file/patch hints, and prior tool errors inform selection when the request exposes them.
+When enabled, the proxy scores the first message of a task with a validated Avengers-Pro
+artifact, applies free-first / planning-quality overlays, then holds that target until a
+confirmed boundary. The checked-in synthetic fixture is for scoring and tests only; production
+activation requires a validated non-synthetic artifact. The checked-in configuration leaves
+this Tier-1 path disabled by default; failures fall back to Tier 0. Routing state is
+reconstructed conservatively from normalized messages, tool schemas, and tool-call history so
+context size, tool depth, file/patch hints, and prior tool errors inform selection when the
+request exposes them.
 
 ## Evaluation
 
