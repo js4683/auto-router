@@ -111,10 +111,12 @@ describe("detectBoundary", () => {
   });
 
   it("keeps a short run follow-up below the boundary threshold", () => {
-    const s = sess({ lastUserMessage: "run that again" });
+    const s = sess({ lastUserMessage: "run that again", filesTouched: 8 });
     const r = detectBoundary(s, "implement", "test the implementation");
     expect(r.isBoundary).toBe(false);
-    expect(r.signals).toEqual(["newGoalPhrase"]);
+    expect(r.signals).toContain("manyFiles");
+    expect(r.signals).not.toContain("newGoalPhrase");
+    expect(r.confidence).toBeLessThan(0.8);
   });
 
   it("hard signal increases confidence", () => {

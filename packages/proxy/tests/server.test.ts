@@ -289,6 +289,55 @@ describe("proxy", () => {
     expect(rankCalls).toBe(1);
   });
 
+  it("reselects for a long run task but holds the target for a short follow-up", async () => {
+    const selections: ReturnType<typeof selectModel>[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      select: ((...args: Parameters<typeof selectModel>) => {
+        const result = selectModel(...args);
+        selections.push(result);
+        return result;
+      }) as typeof selectModel,
+    });
+    const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+      id: `read-${index}`,
+      type: "function",
+      function: { name: "read", arguments: JSON.stringify({ path: `src/file-${index}.ts` }) },
+    }));
+    const history = [
+      { role: "user", content: "plan the architecture" },
+      { role: "assistant", content: null, tool_calls: toolCalls },
+    ];
+    const route = async (messages: unknown[]) => {
+      const res = collectRes();
+      await server.handle(
+        fakeReq("/v1/route", { model: "auto", messages }, { "x-session-id": "run-boundary" }),
+        res as never
+      );
+      return JSON.parse(res.body) as { modelId: string; via: string };
+    };
+
+    const initial = await route([{ role: "user", content: "plan the architecture" }]);
+    const longRun = await route([
+      ...history,
+      {
+        role: "user",
+        content:
+          "run the complete test suite, lint checks, type checks, build verification, and integration checks, then report every failure with the affected file and command",
+      },
+    ]);
+    const shortRun = await route([...history, { role: "user", content: "run that again" }]);
+
+    expect(initial.modelId).toBe("openai/gpt-5.6-sol");
+    expect(longRun.modelId).toBe("opencode/muse-spark-1.2-contributor-free");
+    expect(selections).toHaveLength(2);
+    expect(selections.map((selection) => selection.boundary.isBoundary)).toEqual([true, true]);
+    expect(shortRun).toEqual({ modelId: longRun.modelId, via: "stay-sticky" });
+  });
+
   it("returns a route decision without calling a backend", async () => {
     let backendCalls = 0;
     const server = createProxyServer({
