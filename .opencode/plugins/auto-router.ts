@@ -24,6 +24,10 @@ function createLiveCatalogSnapshot(catalog: Catalog, runtimeIDs: Iterable<string
   return Object.freeze({ catalog, runtimeIDs: new Set(runtimeIDs) });
 }
 
+function pendingApplyKey(messageID: string, agent: string | undefined): string {
+  return `${messageID}\u0000${agent ?? ""}`;
+}
+
 function runtimeModelID(model: { providerID?: string; modelID?: string; id?: string } | undefined): string | undefined {
   const modelID = model?.modelID ?? model?.id;
   return model?.providerID && modelID ? `${model.providerID}/${modelID}` : undefined;
@@ -46,7 +50,7 @@ type PerSession = {
   taskTarget: string | null;
   taskTier: Tier | null;
   actualModel: string | null;
-  pendingApply: PendingApply | null;
+  pendingApplies: Map<string, PendingApply>;
   prevAgent?: string;
   prevMessage?: string;
   isCompacted: boolean;
@@ -69,7 +73,7 @@ function getSession(id: string): PerSession {
       taskTarget: null,
       taskTier: null,
       actualModel: null,
-      pendingApply: null,
+      pendingApplies: new Map(),
       isCompacted: false,
       isNewSession: true,
     };
@@ -165,10 +169,6 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
   let currentLiveSnapshot = createLiveCatalogSnapshot(catalog, []);
   let providerListPromise: Promise<unknown> | undefined;
 
-  function emptyLiveSnapshot(): LiveCatalogSnapshot {
-    return createLiveCatalogSnapshot(catalog, []);
-  }
-
   function providerList(): Promise<unknown> {
     if (!providerListPromise) {
       const request = Promise.resolve().then(() => client.provider.list({ query: { directory } }));
@@ -198,21 +198,19 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       });
       if (timer) clearTimeout(timer);
       const data = (response as any)?.data ?? response;
-      if (!data) {
-        currentLiveSnapshot = emptyLiveSnapshot();
-        return currentLiveSnapshot;
-      }
+      if (!data) return currentLiveSnapshot;
 
       const live = buildCatalogFromProviders(data, config);
-      catalog = live.models.length ? live : loadCatalogSync(config);
+      if (!live.models.length) return currentLiveSnapshot;
+
+      catalog = live;
       currentLiveSnapshot = createLiveCatalogSnapshot(
-        catalog,
+        live,
         live.models.map((model) => model.runtimeId).filter((id): id is string => Boolean(id))
       );
       return currentLiveSnapshot;
     } catch {
       if (timer) clearTimeout(timer);
-      currentLiveSnapshot = emptyLiveSnapshot();
       return currentLiveSnapshot;
     }
   }
@@ -318,7 +316,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     if (runtimeModelID(message.model) === taskTarget) return;
 
     message.model = target;
-    session.pendingApply = { ...target, messageID: message.id, agent: message.agent };
+    session.pendingApplies.set(pendingApplyKey(message.id, message.agent), { ...target, messageID: message.id, agent: message.agent });
     if (!notify) return;
 
     await client.tui.showToast({
@@ -358,7 +356,6 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const requestSnapshot = currentLiveSnapshot;
       const requestTarget = s.taskTarget;
       const shouldSelect = !requestTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(requestTarget);
-      s.pendingApply = null;
 
       if (shouldSelect) {
         const selection = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage);
@@ -374,11 +371,11 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const s = getSession(sessionID);
       const actual = runtimeModelID(input.model) ?? "undefined";
       s.actualModel = actual;
-      const pending = s.pendingApply;
+      const confirmationKey = pendingApplyKey(input.message.id, input.agent);
+      const pending = s.pendingApplies.get(confirmationKey);
       if (!pending) return;
-      if (input.message.id !== pending.messageID || input.agent !== pending.agent) return;
 
-      s.pendingApply = null;
+      s.pendingApplies.delete(confirmationKey);
       const expected = `${pending.providerID}/${pending.modelID}`;
       const matches = actual === expected;
       const line = matches
@@ -452,7 +449,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
           s.taskTarget = null;
           s.taskTier = null;
           s.actualModel = null;
-          s.pendingApply = null;
+          s.pendingApplies.clear();
           break;
         }
         case "session.updated": {

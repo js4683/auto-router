@@ -34,11 +34,12 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 
 - [x] Plugin scaffold (`@opencode-ai/plugin`), context hook wiring
 - [x] Map opencode session -> `SessionState`
-- [x] Lock one target per task and emit at most one apply confirmation or recommendation
+- [x] Lock one target per task and emit at most one `TASK RECOMMEND`
 - [x] Config surface in `opencode.json` (tier/task policy, stickiness, guards)
 - [x] Live connected-provider discovery with bounded fallback
 - [x] Decision logging (target model and actual runtime model)
-- [x] Apply the locked target through mutable `chat.message.output.message.model`
+- [x] Apply each rewritten message through mutable `chat.message.output.message.model`
+      and confirm it with observational `chat.params`
 - [x] Manual multi-task test on stock OpenCode 1.18.27 with connected providers
 
 ## Phase 2 — proxy adapter

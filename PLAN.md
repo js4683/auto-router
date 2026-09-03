@@ -26,8 +26,8 @@ policy, integration behavior, scope, or verification evidence changes.
   model.
 - For planning and architecture tasks, use a high quality floor and quality-first
   ordering so Sol, Fable, Opus, or equivalent frontier models win when connected.
-- Log one task-level apply confirmation or recommendation when the actual model differs
-  from the target or live proof is unavailable.
+- Log `TASK RECOMMEND` when live proof is unavailable and confirm each rewritten message
+  through observational `chat.params`.
 - Apply the selected target to OpenCode's pending user message; retain the local
   OpenAI/Anthropic-compatible proxy for other harnesses.
 - Reconstruct conservative routing signals from normalized request messages, tool
@@ -223,8 +223,9 @@ Supported strategies:
   - [x] Store a task target separately from the model OpenCode actually used.
   - [x] Select only on the first task message or a confirmed boundary.
   - [x] Prevent errors and complexity changes from switching targets mid-task.
-  - [x] Emit at most one apply confirmation or recommendation per task.
-  - [x] Keep `chat.params` observational and leave its output unchanged.
+  - [x] Emit at most one `TASK RECOMMEND` per task when live proof is unavailable.
+  - [x] Apply each rewritten message through `chat.message.output.message.model`; keep
+    `chat.params` observational and leave its output unchanged.
   - [x] Add red-green plugin integration tests.
 
 ### 5. Validation and deployment

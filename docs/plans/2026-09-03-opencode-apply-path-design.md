@@ -32,9 +32,9 @@ provider auth and request preparation. Therefore, assigning
 `output.message.model = { providerID, modelID }` applies the selected model to the
 complete current turn without an OpenCode patch.
 
-The local proxy can switch models but only through four API-key backends. It cannot use
-all OpenCode `/connect` providers (OAuth, Copilot, Bedrock, and custom npm providers).
-This phase does not extend the proxy.
+For other harnesses, the local proxy remains an apply path but can switch models only
+through four API-key backends. It cannot use all OpenCode `/connect` providers (OAuth,
+Copilot, Bedrock, and custom npm providers). This phase does not extend the proxy.
 
 Priority: the lightweight router must apply selections locally in OpenCode using the
 same providers the user already connected.
@@ -145,10 +145,11 @@ provider-qualified runtime ID must be split at its first `/`, not its last one.
 2. **`chat.message`:** extract prompt text from `output.parts`, then build session state
    and call `detectBoundary`.
 3. **Boundary or missing target:** call `client.provider.list` with a 1500 ms timeout,
-   then call `selectModel`. A successful response replaces the selection catalog and
-   live connected-model ID set. Store a selected `taskTarget` only when it is backed by
-   that live set; otherwise log a recommendation and retry discovery on the next user
-   message.
+   then call `selectModel`. A non-empty successful response replaces the selection
+   catalog and live connected-model ID set. A timeout, rejection, or empty response
+   retains the last successful live snapshot. Store a selected `taskTarget` only when it
+   is backed by that snapshot; otherwise log a recommendation and retry discovery on the
+   next user message.
 4. **Sticky turn:** do not reselect; reuse `taskTarget`.
 5. **Apply:** if `taskTarget` is in the live connected-model ID set, compare it with
    `output.message.model`. When different, replace `output.message.model` with the
@@ -157,11 +158,11 @@ provider-qualified runtime ID must be split at its first `/`, not its last one.
 6. **No live proof:** if the target came only from fallback/cache data, leave the
    message unchanged and log `TASK RECOMMEND`. Fallback data is never proof that auth
    is connected, and an unbacked recommendation is not locked as the task target.
-7. **`chat.params`:** ignore calls whose message ID or agent does not match the pending
+7. **`chat.params`:** ignore calls whose message ID or agent does not match a pending
    confirmation. This excludes title generation and subtask agents that can run in the
-   same session. On the first matching LLM call, compare `input.model.providerID` /
-   `input.model.id` with the expected pair. Log `TASK APPLY` or
-   `TASK APPLY mismatch`, then clear the pending confirmation.
+   same session. For each matching message/agent pair, compare `input.model.providerID`
+   / `input.model.id` with the expected pair. Log `TASK APPLY` or `TASK APPLY mismatch`,
+   then clear that pending confirmation.
 8. **Visibility:** show one fail-open TUI toast at a new boundary when a different
    target is applied. Do not toast on sticky turns.
 
@@ -172,7 +173,7 @@ free-first verification ordering, and task stickiness inside `router-core`.
 
 | Condition | Behavior |
 |-----------|----------|
-| `provider.list` timeout, throw, or empty result | Keep selection available for recommendation, but do not mutate the message without a successful live snapshot. |
+| `provider.list` timeout, throw, or empty result | Retain the last successful live snapshot; if none exists, keep selection available for recommendation but do not mutate the message. |
 | Target absent from live connected set | Leave message unchanged; log `TASK RECOMMEND`. |
 | `selectModel` throws | Catch, leave message unchanged, and log the error. |
 | Target runtime ID is malformed | Leave message unchanged; log `TASK APPLY skipped`. |

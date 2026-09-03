@@ -206,6 +206,31 @@ describe("auto-router provider discovery", () => {
     expect(second.message.model.providerID).toBe("opencode");
   });
 
+  it("retains a sticky target after a transient discovery failure", async () => {
+    let calls = 0;
+    const fixture = testClient(async () => {
+      calls += 1;
+      if (calls === 1) return { data: providerData };
+      throw new Error("transient");
+    });
+    const hooks = await plugin(fixture.client);
+    const first = message("fix typo", { sessionID: "sticky-failure", messageID: "message-1" });
+    await hooks["chat.message"]!({ sessionID: "sticky-failure", agent: "build" } as any, first as any);
+
+    await hooks["chat.message"]!(
+      { sessionID: "other-task", agent: "build" } as any,
+      message("plan the architecture", { sessionID: "other-task", messageID: "message-1" }) as any
+    );
+    const followUp = message("report the failures", { sessionID: "sticky-failure", messageID: "message-2" });
+    await hooks["chat.message"]!({ sessionID: "sticky-failure", agent: "build" } as any, followUp as any);
+
+    expect(followUp.message.model).toEqual({
+      providerID: "opencode",
+      modelID: "muse-spark-1.2-contributor-free",
+    });
+    expect(calls).toBe(2);
+  });
+
   it("preserves slashes inside the model ID", async () => {
     const data = {
       connected: ["openrouter"],
@@ -382,6 +407,26 @@ describe("auto-router provider discovery", () => {
       modelID: "muse-spark-1.2-contributor-free",
     });
     expect(second.message.model).toEqual({ providerID: "openai", modelID: "fable-latest" });
+
+    await hooks["chat.params"]!(
+      {
+        sessionID: "overlap",
+        agent: "build",
+        model: { id: "fable-latest", providerID: "openai" },
+        message: second.message,
+      } as any,
+      { options: {} } as any
+    );
+    await hooks["chat.params"]!(
+      {
+        sessionID: "overlap",
+        agent: "build",
+        model: { id: "muse-spark-1.2-contributor-free", providerID: "opencode" },
+        message: first.message,
+      } as any,
+      { options: {} } as any
+    );
+    expect(fixture.logs.filter((entry) => entry.includes("TASK APPLY "))).toHaveLength(2);
   });
 
   it("confirms the applied model only for the matching message and agent", async () => {
