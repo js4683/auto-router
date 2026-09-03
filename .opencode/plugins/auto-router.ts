@@ -5,15 +5,19 @@
  */
 import type { Plugin } from "@opencode-ai/plugin";
 import { selectModel, loadConfig, loadCatalogSync, resolveTaskType, buildCatalogFromProviders, detectBoundary } from "../../packages/router-core/src/index.js";
-import type { SessionState, Tier } from "../../packages/router-core/src/index.js";
+import type { Catalog, SessionState, Tier } from "../../packages/router-core/src/index.js";
 
-// ---- Catalog / Config (loaded once, reloaded on config hook if desired) ----
-let config = loadConfig();
-let catalog = loadCatalogSync(config);
-let liveRuntimeIDs = new Set<string>();
+type LiveCatalogSnapshot = Readonly<{
+  catalog: Catalog;
+  runtimeIDs: ReadonlySet<string>;
+}>;
 
 type RuntimeModel = { providerID: string; modelID: string };
 type PendingApply = RuntimeModel & { messageID: string; agent: string };
+
+function createLiveCatalogSnapshot(catalog: Catalog, runtimeIDs: Iterable<string>): LiveCatalogSnapshot {
+  return Object.freeze({ catalog, runtimeIDs: new Set(runtimeIDs) });
+}
 
 function runtimeModelID(model: { providerID?: string; modelID?: string; id?: string } | undefined): string | undefined {
   const modelID = model?.modelID ?? model?.id;
@@ -24,24 +28,6 @@ function parseRuntimeModelID(id: string): RuntimeModel | undefined {
   const separator = id.indexOf("/");
   if (separator <= 0 || separator === id.length - 1) return undefined;
   return { providerID: id.slice(0, separator), modelID: id.slice(separator + 1) };
-}
-
-async function loadLiveCatalog(client: any, directory: string): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const response = await new Promise<any>((resolve) => {
-      timer = setTimeout(() => resolve(undefined), 1500);
-      client.provider.list({ query: { directory } }).then(resolve, () => resolve(undefined));
-    });
-    if (timer) clearTimeout(timer);
-    const data = response?.data ?? response;
-    if (!data) return;
-    const live = buildCatalogFromProviders(data, config);
-    liveRuntimeIDs = new Set(live.models.map((model) => model.runtimeId).filter((id): id is string => Boolean(id)));
-    catalog = live.models.length ? live : loadCatalogSync(config);
-  } catch {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 // ---- Per-session state (the real wiring) ----
@@ -169,6 +155,63 @@ async function appendDecision(line: string): Promise<void> {
 }
 
 export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
+  let config = loadConfig();
+  let catalog = loadCatalogSync(config);
+  let currentLiveSnapshot = createLiveCatalogSnapshot(catalog, []);
+  let providerListPromise: Promise<unknown> | undefined;
+
+  function emptyLiveSnapshot(): LiveCatalogSnapshot {
+    return createLiveCatalogSnapshot(catalog, []);
+  }
+
+  function providerList(): Promise<unknown> {
+    if (!providerListPromise) {
+      const request = Promise.resolve().then(() => client.provider.list({ query: { directory } }));
+      const tracked = request.finally(() => {
+        providerListPromise = undefined;
+      });
+      providerListPromise = tracked;
+    }
+    return providerListPromise!;
+  }
+
+  async function loadLiveCatalog(): Promise<LiveCatalogSnapshot> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await new Promise<unknown>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), 1500);
+        providerList().then(
+          (value) => {
+            if (timer) clearTimeout(timer);
+            resolve(value);
+          },
+          () => {
+            if (timer) clearTimeout(timer);
+            resolve(undefined);
+          }
+        );
+      });
+      if (timer) clearTimeout(timer);
+      const data = (response as any)?.data ?? response;
+      if (!data) {
+        currentLiveSnapshot = emptyLiveSnapshot();
+        return currentLiveSnapshot;
+      }
+
+      const live = buildCatalogFromProviders(data, config);
+      catalog = live.models.length ? live : loadCatalogSync(config);
+      currentLiveSnapshot = createLiveCatalogSnapshot(
+        catalog,
+        live.models.map((model) => model.runtimeId).filter((id): id is string => Boolean(id))
+      );
+      return currentLiveSnapshot;
+    } catch {
+      if (timer) clearTimeout(timer);
+      currentLiveSnapshot = emptyLiveSnapshot();
+      return currentLiveSnapshot;
+    }
+  }
+
   await client.app.log({
     body: {
       service: "auto-router",
@@ -192,8 +235,8 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     boundary: ReturnType<typeof detectBoundary>,
     prevAgent?: string,
     prevMessage?: string
-  ): Promise<boolean> {
-    await loadLiveCatalog(client, directory);
+  ): Promise<LiveCatalogSnapshot | undefined> {
+    const liveSnapshot = await loadLiveCatalog();
     const selectionState: SessionState = {
       ...sessionState,
       currentTask: {
@@ -208,17 +251,17 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
 
     let result: ReturnType<typeof selectModel>;
     try {
-      result = selectModel(selectionState, catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
+      result = selectModel(selectionState, liveSnapshot.catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
     } catch (error) {
       session.taskTarget = null;
       await logDecision("[auto-router] TASK ERROR selection failed", "warn", {
         sessionID,
         error: error instanceof Error ? error.message : String(error),
       });
-      return false;
+      return undefined;
     }
 
-    if (!liveRuntimeIDs.has(result.modelId)) {
+    if (!liveSnapshot.runtimeIDs.has(result.modelId)) {
       session.taskTarget = null;
       session.taskTier = null;
       await logDecision(
@@ -226,7 +269,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
         "info",
         { sessionID, target: result.modelId, catalogSource: result.catalogSource }
       );
-      return false;
+      return undefined;
     }
 
     const taskType = resolveTaskType(selectionState, config);
@@ -247,16 +290,17 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       boundary,
       catalogSource: result.catalogSource,
     });
-    return true;
+    return liveSnapshot;
   }
 
   async function applyTaskTarget(
     sessionID: string,
     session: PerSession,
     message: { id: string; agent: string; model: RuntimeModel & { variant?: string } },
+    liveSnapshot: LiveCatalogSnapshot,
     notify: boolean
   ): Promise<void> {
-    if (!session.taskTarget || !liveRuntimeIDs.has(session.taskTarget)) return;
+    if (!session.taskTarget || !liveSnapshot.runtimeIDs.has(session.taskTarget)) return;
     const target = parseRuntimeModelID(session.taskTarget);
     if (!target) {
       await logDecision(`[auto-router] TASK APPLY skipped malformed=${session.taskTarget}`, "warn", {
@@ -288,7 +332,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       try {
         config = loadConfig();
         catalog = loadCatalogSync(config);
-        liveRuntimeIDs = new Set();
+        currentLiveSnapshot = createLiveCatalogSnapshot(catalog, []);
       } catch {}
     },
 
@@ -305,11 +349,17 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const boundary = detectBoundary(sessionState, prevAgent, prevMessage);
       s.prevAgent = agent ?? sessionState.activeAgent;
       s.prevMessage = msgText;
-      const shouldSelect = !s.taskTarget || boundary.isBoundary || !liveRuntimeIDs.has(s.taskTarget);
+      const requestSnapshot = currentLiveSnapshot;
+      const shouldSelect = !s.taskTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(s.taskTarget);
       s.pendingApply = null;
 
-      if (shouldSelect && !(await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage))) return;
-      await applyTaskTarget(sessionID, s, output.message, shouldSelect);
+      if (shouldSelect) {
+        const selectedSnapshot = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage);
+        if (!selectedSnapshot) return;
+        await applyTaskTarget(sessionID, s, output.message, selectedSnapshot, true);
+        return;
+      }
+      await applyTaskTarget(sessionID, s, output.message, requestSnapshot, false);
     },
 
     "chat.params": async (input) => {

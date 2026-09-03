@@ -7,12 +7,17 @@
 
 ## Context
 
-Phases 0-4 of auto-router are code-complete. The OpenCode plugin already:
+### Pre-implementation state (historical)
 
-- Builds a live catalog from `client.provider.list({ query: { directory } })`.
-- Detects task boundaries and calls `selectModel`.
-- Logs `TASK SELECT` / `TASK RECOMMEND`.
-- Does not change the outbound model.
+Before this apply-path implementation, the OpenCode plugin:
+
+- Built a live catalog from `client.provider.list({ query: { directory } })`.
+- Detected task boundaries and called `selectModel`.
+- Logged `TASK SELECT` / `TASK RECOMMEND`.
+- Did not change the outbound model.
+
+The recommendation-only behavior above is retained to explain the design transition;
+it is superseded by the native apply path documented below.
 
 An initial design proposed adding `output.model` to `chat.params`. An audit against
 OpenCode 1.18.27 rejected that approach: OpenCode resolves the language model,
@@ -204,7 +209,7 @@ On stock OpenCode 1.18.27 with the plugin loaded and real `/connect` providers:
 5. Saved user and assistant message metadata show the routed provider/model.
 6. Decision logs show `TASK SELECT` / `TASK APPLY` / sticky hold behavior matching those turns.
 
-## Rollout
+## Completed rollout
 
 1. Add focused plugin tests around existing hooks.
 2. Implement `chat.message` apply and `chat.params` confirmation.

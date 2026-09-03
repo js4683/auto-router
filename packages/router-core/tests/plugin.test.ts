@@ -245,6 +245,87 @@ describe("auto-router provider discovery", () => {
     expect(output.message.model).toEqual({ providerID: "openai", modelID: "gpt-5.6-luna" });
   });
 
+  it("shares one unresolved provider lookup across retries", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const fixture = testClient(async () => {
+      calls += 1;
+      return new Promise(() => {});
+    });
+    const hooks = await plugin(fixture.client);
+    const first = hooks["chat.message"]!(
+      { sessionID: "unresolved", agent: "build" } as any,
+      message("fix typo", { sessionID: "unresolved", messageID: "message-1" }) as any
+    );
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await first;
+
+    const second = hooks["chat.message"]!(
+      { sessionID: "unresolved", agent: "build" } as any,
+      message("fix another typo", { sessionID: "unresolved", messageID: "message-2" }) as any
+    );
+    await vi.advanceTimersByTimeAsync(1500);
+    await second;
+
+    expect(calls).toBe(1);
+  });
+
+  it("applies the selection from its own live snapshot", async () => {
+    let calls = 0;
+    let releaseFirstSelection: (() => void) | undefined;
+    let firstSelectionLogged: (() => void) | undefined;
+    const selectionLogged = new Promise<void>((resolve) => {
+      firstSelectionLogged = resolve;
+    });
+    const fixture = testClient(async () => {
+      calls += 1;
+      return {
+        data: calls === 1
+          ? providerData
+          : {
+              connected: ["openai"],
+              all: [{
+                id: "openai",
+                models: {
+                  "fable-latest": {
+                    id: "fable-latest",
+                    name: "Fable",
+                    cost: { input: 2, output: 8 },
+                    limit: { context: 272000, output: 65536 },
+                    status: "active",
+                  },
+                },
+              }],
+            },
+      };
+    });
+    const appLog = fixture.client.app.log;
+    fixture.client.app.log = async ({ body }: any) => {
+      await appLog({ body });
+      if (body.message.includes("TASK SELECT s=first")) {
+        firstSelectionLogged?.();
+        await new Promise<void>((resolve) => {
+          releaseFirstSelection = resolve;
+        });
+      }
+    };
+    const hooks = await plugin(fixture.client);
+    const first = message("fix typo", { sessionID: "first", messageID: "message-1" });
+    const firstTurn = hooks["chat.message"]!({ sessionID: "first", agent: "build" } as any, first as any);
+
+    await selectionLogged;
+    const second = message("plan the architecture", { sessionID: "second", messageID: "message-1" });
+    await hooks["chat.message"]!({ sessionID: "second", agent: "build" } as any, second as any);
+    releaseFirstSelection?.();
+    await firstTurn;
+
+    expect(first.message.model).toEqual({
+      providerID: "opencode",
+      modelID: "muse-spark-1.2-contributor-free",
+    });
+  });
+
   it("confirms the applied model only for the matching message and agent", async () => {
     const fixture = testClient();
     const hooks = await plugin(fixture.client);

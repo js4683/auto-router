@@ -9,7 +9,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 |-------|-------------|--------|
 | **0** | `router-core` (TS): `classify()` + policy config + Tier-0 heuristics + context-fit + task stickiness | ~3-4 days |
 | **0.5** | **Model catalog**: Artificial Analysis client, live provider catalog, value/cost strategies + window registry join | ~2-3 days |
-| **1** | opencode plugin adapter with task-boundary recommendations and decision logging | ~2-3 days |
+| **1** | opencode plugin adapter with task-boundary selection/application and decision logging | ~2-3 days |
 | **2** | OpenAI-compatible proxy adapter (any harness via base_url) | ~2-3 days |
 | **3** | Eval harness: replay real sessions, measure cost saved vs quality retained | ~3 days |
 | **4** | Tier-1 embedding classifier (code complete; opt-in, disabled by default) | activation later |
@@ -34,7 +34,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 
 - [x] Plugin scaffold (`@opencode-ai/plugin`), context hook wiring
 - [x] Map opencode session -> `SessionState`
-- [x] Lock one target per task and emit at most one recommendation per task
+- [x] Lock one target per task and emit at most one apply confirmation or recommendation
 - [x] Config surface in `opencode.json` (tier/task policy, stickiness, guards)
 - [x] Live connected-provider discovery with bounded fallback
 - [x] Decision logging (target model and actual runtime model)

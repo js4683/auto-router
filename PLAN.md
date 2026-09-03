@@ -26,8 +26,10 @@ policy, integration behavior, scope, or verification evidence changes.
   model.
 - For planning and architecture tasks, use a high quality floor and quality-first
   ordering so Sol, Fable, Opus, or equivalent frontier models win when connected.
-- Log one task-level recommendation when OpenCode's actual model differs from the target.
-- Apply the selected target through the local OpenAI/Anthropic-compatible proxy.
+- Log one task-level apply confirmation or recommendation when the actual model differs
+  from the target or live proof is unavailable.
+- Apply the selected target to OpenCode's pending user message; retain the local
+  OpenAI/Anthropic-compatible proxy for other harnesses.
 - Reconstruct conservative routing signals from normalized request messages, tool
   schemas, and tool-call history.
 - Replay versioned datasets against router, always-frontier, and always-cheap strategies.
@@ -153,12 +155,13 @@ The installed global adapter at
 repository adapter. Its compiled core is deployed under
 `~/.config/opencode/plugins/router-core/dist`.
 
-### Integration limitation
+### Historical integration limitation (superseded 2026-09-03)
 
-OpenCode 1.18.25 does not expose a supported provider/model mutation through
-`chat.params`. The adapter must leave generation output untouched, observe the actual
-model, and log the task target once. Automatic application remains blocked on an
-upstream model-routing hook such as `llm.request.before`.
+Before the OpenCode 1.18.27 source audit, the adapter used `chat.params` only for
+observation because OpenCode 1.18.25 did not expose a supported provider/model mutation
+there. That recommendation-only path and its dependency on an upstream hook are
+retained as historical context; the current adapter applies the target through the
+mutable `chat.message.output.message.model` seam.
 
 ## Configuration Contract
 
@@ -220,7 +223,7 @@ Supported strategies:
   - [x] Store a task target separately from the model OpenCode actually used.
   - [x] Select only on the first task message or a confirmed boundary.
   - [x] Prevent errors and complexity changes from switching targets mid-task.
-  - [x] Emit at most one recommendation per task.
+  - [x] Emit at most one apply confirmation or recommendation per task.
   - [x] Keep `chat.params` observational and leave its output unchanged.
   - [x] Add red-green plugin integration tests.
 
