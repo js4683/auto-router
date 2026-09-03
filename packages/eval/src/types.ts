@@ -4,6 +4,7 @@ export const EVAL_SCHEMA_VERSION = 1 as const;
 
 export type StrategyName = "router" | "always-frontier" | "always-cheap";
 export type EvalTerminalState = "completed" | "incomplete" | "failed";
+export type LiveTransport = "chat" | "responses";
 
 export interface EvalUsage {
   inputTokens: number;
@@ -65,6 +66,8 @@ export interface EvalDatasetV1 {
   prices: Record<string, EvalPrice>;
   capabilities?: Record<string, string[]>;
   liveModelAliases?: Record<string, string>;
+  liveTransportDefault?: LiveTransport;
+  liveTransports?: Record<string, LiveTransport>;
   sessions: EvalSessionV1[];
 }
 

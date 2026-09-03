@@ -142,4 +142,19 @@ describe("parseDataset", () => {
       })
     ).toThrow("config.taskTypeModels.implement.minQuality must be non-negative");
   });
+
+  it("accepts liveTransportDefault and liveTransports", () => {
+    const dataset = {
+      ...validDataset(),
+      liveTransportDefault: "responses",
+      liveTransports: { "provider/cheap": "chat" },
+    };
+    expect(parseDataset(dataset).liveTransportDefault).toBe("responses");
+    expect(parseDataset(dataset).liveTransports).toEqual({ "provider/cheap": "chat" });
+  });
+
+  it("rejects invalid live transports", () => {
+    expect(() => parseDataset({ ...validDataset(), liveTransportDefault: "sse" })).toThrow("liveTransportDefault");
+    expect(() => parseDataset({ ...validDataset(), liveTransports: { "provider/cheap": "sse" } })).toThrow("liveTransports.provider/cheap");
+  });
 });
