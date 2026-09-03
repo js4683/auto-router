@@ -1,7 +1,7 @@
 # OpenCode Apply Path Design
 
 **Status:** Approved after source audit on 2026-09-03
-**Implementation status:** Not started
+**Implementation status:** Native plugin application implemented and locally verified on stock OpenCode 1.18.27
 **Scope:** Apply auto-router selections inside stock OpenCode using connected providers, at confirmed task boundaries, without the API-key proxy
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
@@ -135,13 +135,15 @@ provider-qualified runtime ID must be split at its first `/`, not its last one.
 
 ## Plugin Flow
 
-1. **Startup / `config`:** load config and fallback catalog, then call
-   `client.provider.list` with a 1500 ms timeout. A successful non-empty response
-   replaces the selection catalog and the live connected-model ID set.
-2. **`chat.message`:** extract prompt text from `output.message` / `output.parts`, then
-   build session state and call `detectBoundary`.
-3. **Boundary:** call `selectModel` against the live catalog and store the resulting
-   provider-qualified `taskTarget`. Log `TASK SELECT`.
+1. **Startup / `config`:** load config and fallback catalog without calling the provider
+   API. Clear the live connected-model ID set when config reloads.
+2. **`chat.message`:** extract prompt text from `output.parts`, then build session state
+   and call `detectBoundary`.
+3. **Boundary or missing target:** call `client.provider.list` with a 1500 ms timeout,
+   then call `selectModel`. A successful response replaces the selection catalog and
+   live connected-model ID set. Store a selected `taskTarget` only when it is backed by
+   that live set; otherwise log a recommendation and retry discovery on the next user
+   message.
 4. **Sticky turn:** do not reselect; reuse `taskTarget`.
 5. **Apply:** if `taskTarget` is in the live connected-model ID set, compare it with
    `output.message.model`. When different, replace `output.message.model` with the
@@ -149,7 +151,7 @@ provider-qualified runtime ID must be split at its first `/`, not its last one.
    for confirmation.
 6. **No live proof:** if the target came only from fallback/cache data, leave the
    message unchanged and log `TASK RECOMMEND`. Fallback data is never proof that auth
-   is connected.
+   is connected, and an unbacked recommendation is not locked as the task target.
 7. **`chat.params`:** ignore calls whose message ID or agent does not match the pending
    confirmation. This excludes title generation and subtask agents that can run in the
    same session. On the first matching LLM call, compare `input.model.providerID` /
@@ -209,7 +211,7 @@ On stock OpenCode 1.18.27 with the plugin loaded and real `/connect` providers:
 3. Run the repository test suite and build.
 4. Deploy the verified plugin to `~/.config/opencode/plugins/auto-router.ts`.
 5. Pass the manual local gate on stock OpenCode 1.18.27.
-6. Update `PLAN.md` and `roadmap.md` with the supported native apply path.
+6. Update `README.md`, `PLAN.md`, and `roadmap.md` with the supported native apply path.
 
 ## Ownership
 
@@ -234,4 +236,4 @@ This phase is done when:
 - No target is applied without proof from a successful live connected-provider snapshot.
 - The plugin confirms the resolved model through `chat.params` without mutating it.
 - Focused tests, the full repository test suite, build, and manual local gate pass.
-- `PLAN.md` and `roadmap.md` record the native apply path.
+- `README.md`, `PLAN.md`, and `roadmap.md` record the native apply path.

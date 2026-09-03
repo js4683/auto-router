@@ -27,7 +27,9 @@ of the above do.
    Avengers-Pro scorer is an opt-in Tier-1 reranker that fails open to Tier 0. Overlap
    models join through LLMRouterBench; Muse/Grok/Luna use an explicit hand map until we
    have our own labels.
-3. **Apply path:** a local OpenAI/Anthropic proxy. The OpenCode plugin stays observational.
+3. **Apply paths:** the OpenCode plugin applies connected-provider targets natively at
+   task boundaries. The local OpenAI/Anthropic proxy remains available for other
+   harnesses that cannot load the plugin.
 4. **Model selection data:** Artificial Analysis free API for quality (coding index)
    + price -> a "bang-for-buck" score per model, refreshed daily and cached.
 5. **Free-first:** within the tier a task needs, prefer models that are free *to the
@@ -43,11 +45,21 @@ of the above do.
 
 ## Apply path
 
-The OpenCode plugin can recommend a model but cannot change the outbound request.
-`chat.params` has no model field, and `anomalyco/opencode#45764` is assigned to someone
-else, so we do not implement that hook.
+For OpenCode 1.18.27, load `.opencode/plugins/auto-router.ts` and connect providers
+with `/connect`. The plugin selects only from the live connected catalog, writes the
+chosen provider/model to the pending user message before OpenCode resolves auth, and
+holds that target until a confirmed task boundary. No router API key or proxy is
+required.
 
-To actually switch models, run the local proxy and point the harness at it:
+The routed model is request-scoped: the TUI picker remains the user's default. A toast
+announces boundary switches that change the model, and
+`~/.cache/auto-router-decisions.log` records selection and confirmation without prompt
+or credential content.
+
+### Other harnesses
+
+For harnesses that cannot load the plugin, run the local proxy and point the harness at
+it:
 
 ```bash
 export OPENCODE_API_KEY="..."
@@ -61,9 +73,6 @@ select (`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, or
 
 Default listen address is `http://127.0.0.1:8787`.
 
-- OpenCode: add an `@ai-sdk/openai-compatible` custom provider whose `baseURL` is
-  `http://127.0.0.1:8787/v1` and whose model is a virtual id such as
-  `auto-router/auto`.
 - Other OpenAI Chat Completions clients can use `http://127.0.0.1:8787/v1`.
 - Claude Code can use `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
 - Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.

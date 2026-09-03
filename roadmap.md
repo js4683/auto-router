@@ -38,8 +38,8 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 - [x] Config surface in `opencode.json` (tier/task policy, stickiness, guards)
 - [x] Live connected-provider discovery with bounded fallback
 - [x] Decision logging (target model and actual runtime model)
-- [ ] Apply the locked target automatically when OpenCode exposes a routing hook
-- [ ] Manual multi-task test after upstream model-routing support
+- [x] Apply the locked target through mutable `chat.message.output.message.model`
+- [x] Manual multi-task test on stock OpenCode 1.18.27 with connected providers
 
 ## Phase 2 — proxy adapter
 
@@ -73,14 +73,13 @@ unchecked benchmark gate passes.
 - [ ] production artifact trained
 - [ ] production artifact activation gate passed
 - [ ] Tier-2 LLM judge (flagged)
-- [ ] Upstream `llm.request.before` hook to opencode (ref #45764) if v2 hook is
-      insufficient
 - [ ] Go rewrite of the proxy for perf / single-binary distribution
 
 ## Key references
 
 - opencode plugins: https://opencode.ai/docs/plugins/ (+ v2 build/plugins)
-- Feature request (model routing hook): `sst/opencode#45764`
+- Broader per-request hook request (not required by the native apply path):
+  `anomalyco/opencode#45764`
 - RouteLLM: https://github.com/lm-sys/RouteLLM
 - Not-Diamond RoRF: https://github.com/Not-Diamond/RoRF
 - vLLM semantic-router (classification signals): https://github.com/vllm-project/semantic-router

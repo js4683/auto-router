@@ -313,6 +313,19 @@ Supported strategies:
   `31b58f71b360d950516305e0b412cbe9c7214781742b27cd35b8d6e754ab5e09`, Markdown
   SHA-256 `5f75240b793d45e3e98dcca9f55e85ac54cdf5c068fb613f1d30511cb3119e26`.
   External benchmark acceptance remains unproven pending a complete 30-case live run.
+- **2026-09-03, native OpenCode apply:** `npm test` passed all 344 tests,
+  `npm run build` passed for all workspaces, and `git diff --check` was clean.
+  Stock OpenCode 1.18.27 loaded the globally deployed plugin and connected-provider
+  catalog without an Auto-Router proxy or injected provider credentials.
+- **2026-09-03, attached multi-task smoke:** a planning turn submitted as
+  `opencode/muse-spark-1.3-contributor-free` selected, applied, streamed, and persisted
+  as `openai/gpt-5.6-sol`. A `[task:run_tests]` boundary then selected, streamed, and
+  persisted as `opencode/muse-spark-1.3-contributor-free`.
+- **2026-09-03, sticky apply smoke:** an untagged follow-up deliberately submitted as
+  `openai/gpt-5.6-sol` emitted no new `TASK SELECT`, logged
+  `TASK APPLY opencode/muse-spark-1.3-contributor-free`, and streamed and persisted on
+  that held target. `opencode export ses_f973afb18ffeND36o1JTbs7eT7 --sanitize`
+  confirmed all three user and assistant model assignments.
 
 ## Decision Log
 
@@ -364,6 +377,11 @@ Supported strategies:
   production activation requires the held-out validation gate.
 - **2026-09-03:** Substantive `run` verification instructions may establish a boundary
   when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
+- **2026-09-03:** Supersede the recommendation-only OpenCode decisions above after a
+  source audit of OpenCode 1.18.27. The existing mutable
+  `chat.message.output.message.model` seam applies a complete request before provider,
+  auth, and request preparation. `chat.params` remains observation-only; no OpenCode
+  patch or upstream hook is required for user-message routing.
 - [x] Phase 4 code complete
 - [ ] real observed-outcome corpus collected
 - [ ] production artifact trained
@@ -377,3 +395,5 @@ Supported strategies:
   data contracts, trust boundaries, and acceptance gates.
 - `docs/plans/2026-09-01-phase-4-embedding-classifier-design.md`: approved Tier-1
   embedding architecture, privacy boundaries, and activation gates.
+- `docs/plans/2026-09-03-opencode-apply-path-design.md`: audited native OpenCode apply
+  lifecycle, live-provider proof, and fail-open behavior.
