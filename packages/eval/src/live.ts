@@ -243,7 +243,8 @@ export async function judgeLabeledOutputs(
   rubric: string,
   outputs: Array<{ id: string; output: LiveOutput }>,
   config: JudgeClientConfig,
-  fetchImpl?: typeof fetch
+  fetchImpl?: typeof fetch,
+  transport: LiveTransport = "chat"
 ): Promise<Record<string, number>> {
   if (outputs.length < 2 || outputs.length > 26) throw new Error("judge outputs must contain between 2 and 26 items");
   const labels = [...JUDGE_LABELS.slice(0, outputs.length)];
@@ -271,7 +272,8 @@ export async function judgeLabeledOutputs(
       ],
     },
     config,
-    fetchImpl
+    fetchImpl,
+    transport
   );
   if (judged.terminalState !== "completed") throw new Error(`judge response terminal state is ${judged.terminalState}`);
   const scores = parseJudgeScores(judged.text, labels);
@@ -284,7 +286,8 @@ export async function judgeOutputs(
   input: JudgeCaseInput,
   outputs: Record<StrategyName, LiveOutput>,
   config: JudgeClientConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  transport: LiveTransport = "chat"
 ): Promise<Record<StrategyName, number>> {
   const names: StrategyName[] = ["router", "always-frontier", "always-cheap"];
   const scored = await judgeLabeledOutputs(
@@ -292,7 +295,8 @@ export async function judgeOutputs(
     input.rubric,
     names.map((name) => ({ id: name, output: outputs[name] })),
     config,
-    fetchImpl
+    fetchImpl,
+    transport
   );
   return {
     router: scored.router,
@@ -394,7 +398,8 @@ async function generateCase(
       requestCompletion(
         { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
         config,
-        fetchImpl
+        fetchImpl,
+        liveTransportFor(dataset, selections[strategy].modelId)
       )
     )
   );
@@ -411,7 +416,7 @@ async function generateCase(
   if (terminalErrors.length) return { ...base, complete: false, errors: terminalErrors };
   let judged: Record<StrategyName, number>;
   try {
-    judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl);
+    judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl, liveTransportFor(dataset));
   } catch (error) {
     return { ...base, complete: false, errors: [`judge: ${errorMessage(error)}`] };
   }
