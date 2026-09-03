@@ -132,9 +132,9 @@ requirements. Any connected model with equivalent or better quality may win.
 
 - Mapping OpenCode events to router session state.
 - Lazy connected-provider discovery with a 1500 ms fail-open timeout.
-- Task target persistence.
-- Actual-model observation.
-- One-shot task-level recommendation logging.
+- Task target persistence with instance-local live proof.
+- Native apply through `chat.message.output.message.model`.
+- Observational `chat.params` confirmation and fallback `TASK RECOMMEND` logging.
 - Tool, diff, token, and error signal collection.
 
 ### Proxy adapter
@@ -330,6 +330,16 @@ Supported strategies:
   `TASK APPLY opencode/muse-spark-1.3-contributor-free`, and streamed and persisted on
   that held target. `opencode export ses_f973afb18ffeND36o1JTbs7eT7 --sanitize`
   confirmed all three user and assistant model assignments.
+- **2026-09-03, Zen live eval transport:** eval live mode accepts `liveTransportDefault`
+  and per-runtime `liveTransports`, posts Muse/GPT-class calls to `/responses`, and
+  keeps `/chat/completions` as the default. `npm test --workspace=@auto-router/eval`
+  passed 143 tests.
+- **2026-09-03, Zen live dataset replay:** local ignored
+  `phase-3-zen-live.eval-dataset.local.json` (30 turns) replayed complete. Verification
+  selected Muse, planning selected Sol, sticky follow-ups used `stay-sticky`. Planned
+  live calls are 90 generation + 30 judge. `--confirm-live` against
+  `https://opencode.ai/zen/v1` is pending `AUTO_ROUTER_EVAL_API_KEY`. Phase 4 corpus
+  remains deferred.
 
 ## Decision Log
 
@@ -397,6 +407,8 @@ Supported strategies:
 - `roadmap.md`: broader project phases and implementation status.
 - `docs/plans/2026-08-31-phase-3-eval-harness-design.md`: accepted eval architecture,
   data contracts, trust boundaries, and acceptance gates.
+- `docs/plans/2026-09-03-phase-3-zen-live-eval-design.md`: Zen Responses live transport,
+  local 30-turn dataset, and deferred Phase 4 corpus.
 - `docs/plans/2026-09-01-phase-4-embedding-classifier-design.md`: approved Tier-1
   embedding architecture, privacy boundaries, and activation gates.
 - `docs/plans/2026-09-03-opencode-apply-path-design.md`: audited native OpenCode apply
