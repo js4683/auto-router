@@ -126,6 +126,10 @@ Incomplete and failed outcomes train as quality zero. Missing outcomes are not s
 treated as failures; they remain missing and cannot satisfy a complete held-out candidate
 matrix.
 
+Collection planning rejects any turn that has neither a non-empty judge rubric nor a
+usable deterministic check (recorded-outcome checks do not count), so a completed turn
+can never be silently scored as quality zero for lacking a quality signal.
+
 Collection may retain bounded responses locally long enough to run deterministic checks
 and blinded judging. A separate curation step removes responses before producing the
 training corpus. Corpora, collection output, and embedding caches remain ignored local
