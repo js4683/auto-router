@@ -110,8 +110,8 @@ describe("detectBoundary", () => {
     expect(r.signals).toEqual(expect.arrayContaining(["newGoalPhrase", "longNewMessage"]));
   });
 
-  it("keeps a short run follow-up below the boundary threshold", () => {
-    const s = sess({ lastUserMessage: "run that again", filesTouched: 8 });
+  it.each(["run that again", "run that again, please", "run that again "])("keeps short run follow-up %j below the boundary threshold", (lastUserMessage) => {
+    const s = sess({ lastUserMessage, filesTouched: 8 });
     const r = detectBoundary(s, "implement", "test the implementation");
     expect(r.isBoundary).toBe(false);
     expect(r.signals).toContain("manyFiles");

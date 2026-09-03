@@ -329,7 +329,7 @@ describe("proxy", () => {
           "run the complete test suite, lint checks, type checks, build verification, and integration checks, then report every failure with the affected file and command",
       },
     ]);
-    const shortRun = await route([...history, { role: "user", content: "run that again" }]);
+    const shortRun = await route([...history, { role: "user", content: "run that again, please" }]);
 
     expect(initial.modelId).toBe("openai/gpt-5.6-sol");
     expect(longRun.modelId).toBe("opencode/muse-spark-1.2-contributor-free");
