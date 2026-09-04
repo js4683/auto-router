@@ -20,6 +20,7 @@ import { providerLoginSet, resolveCredential, UI_PROVIDERS } from "./credentials
 import { defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
+import { loginProviderId, startProviderLogin } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
 
 export interface ProxyBackend {
@@ -984,6 +985,20 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           envSet: Boolean(env[provider.envKey] || process.env[provider.envKey]),
         }));
         html(res, 200, settingsPage(providers, true));
+        return;
+      }
+      if (req.method === "GET" && path?.startsWith("/login/")) {
+        const id = path.slice("/login/".length);
+        if (!loginProviderId(id) || !startProviderLogin(id)) {
+          json(res, 404, { error: "unknown provider" });
+          return;
+        }
+        if (typeof res.writeHead === "function") res.writeHead(303, { location: "/?login=1" });
+        else {
+          res.statusCode = 303;
+          res.setHeader?.("location", "/?login=1");
+        }
+        res.end();
         return;
       }
       if (req.method === "POST" && path === "/settings") {

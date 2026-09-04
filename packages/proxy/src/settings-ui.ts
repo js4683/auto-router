@@ -19,7 +19,8 @@ export function settingsPage(providers: ProviderRow[], healthy: boolean): string
     <h2>${p.label}</h2>
     <div class="pills">${pill(p.login, "login", "no login")} ${pill(p.envSet, "api key", "no key")}</div>
   </div>
-  <p class="hint">Uses OpenCode/Claude login first, then this key.</p>
+  <p class="hint">Login first (opens Terminal). API key is fallback.</p>
+  <p><a class="login" href="/login/${p.id}">Log in with ${p.label}</a></p>
   <label for="${p.envKey}">${p.envKey}</label>
   <input id="${p.envKey}" name="${p.envKey}" type="password" autocomplete="off" spellcheck="false">
 </article>`
@@ -50,6 +51,8 @@ label { display:block; font-size:0.75rem; color:var(--muted); margin-bottom:0.25
 input { width:100%; background:#0c0c0e; color:var(--fg); border:1px solid var(--line); padding:0.5rem 0.6rem; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 input:focus { outline:1px solid #6e6e78; }
 .note { font-size:0.8125rem; color:var(--muted); margin:1rem 0; }
+a.login { display:inline-block; margin:0 0 0.75rem; color:var(--fg); border:1px solid var(--line); padding:0.35rem 0.65rem; text-decoration:none; font-size:0.8125rem; font-weight:600; }
+a.login:focus { outline:2px solid #6e6e78; outline-offset:2px; }
 button { margin-top:0.5rem; background:var(--btn); color:var(--btn-fg); border:0; padding:0.55rem 1rem; font: inherit; font-weight:600; cursor:pointer; }
 button:focus { outline:2px solid #6e6e78; outline-offset:2px; }
 </style>
