@@ -11,7 +11,16 @@ const ENV_BY_PROVIDER: Record<string, string[]> = {
   opencode: ["OPENCODE_API_KEY"],
   anthropic: ["ANTHROPIC_API_KEY"],
   google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+  xai: ["XAI_API_KEY"],
 };
+
+export const UI_PROVIDERS = [
+  { id: "openai", label: "OpenAI", runtimeId: "openai/gpt-4o", envKey: "OPENAI_API_KEY" },
+  { id: "anthropic", label: "Claude", runtimeId: "anthropic/claude-sonnet", envKey: "ANTHROPIC_API_KEY" },
+  { id: "xai", label: "Grok", runtimeId: "xai/grok-4.6", envKey: "XAI_API_KEY" },
+  { id: "google", label: "Gemini", runtimeId: "google/gemini-3.6-flash", envKey: "GEMINI_API_KEY" },
+  { id: "opencode", label: "OpenCode Zen", runtimeId: "opencode/muse-spark-1.3-contributor-free", envKey: "OPENCODE_API_KEY" },
+] as const;
 
 function providerOf(runtimeId: string): string | undefined {
   const separator = runtimeId.indexOf("/");
@@ -46,22 +55,30 @@ function tokenFromClaudeFile(path: string): string | undefined {
   return stringField(record.token) ?? stringField(record.key) ?? stringField(oauth?.accessToken);
 }
 
-export function resolveCredential(runtimeId: string, opts: ResolveCredentialOptions): string | undefined {
-  const provider = providerOf(runtimeId);
-  if (!provider) return undefined;
-  for (const name of ENV_BY_PROVIDER[provider] ?? []) {
-    const value = opts.env[name];
-    if (value) return value;
-  }
-  const authPath = opts.authPath;
-  const auth = authPath ? readJson(authPath) : undefined;
+function loginToken(provider: string, opts: ResolveCredentialOptions): string | undefined {
+  const auth = opts.authPath ? readJson(opts.authPath) : undefined;
   if (auth && typeof auth === "object") {
     const fromAuth = fromAuthEntry((auth as Record<string, unknown>)[provider]);
     if (fromAuth) return fromAuth;
   }
-  if (provider === "anthropic" && opts.claudePath) {
-    const fromClaude = tokenFromClaudeFile(opts.claudePath);
-    if (fromClaude) return fromClaude;
+  if (provider === "anthropic" && opts.claudePath) return tokenFromClaudeFile(opts.claudePath);
+  return undefined;
+}
+
+function envToken(provider: string, env: NodeJS.ProcessEnv): string | undefined {
+  for (const name of ENV_BY_PROVIDER[provider] ?? []) {
+    const value = env[name];
+    if (value) return value;
   }
   return undefined;
+}
+
+export function resolveCredential(runtimeId: string, opts: ResolveCredentialOptions): string | undefined {
+  const provider = providerOf(runtimeId);
+  if (!provider) return undefined;
+  return loginToken(provider, opts) ?? envToken(provider, opts.env);
+}
+
+export function providerLoginSet(provider: string, opts: ResolveCredentialOptions): boolean {
+  return Boolean(loginToken(provider, opts));
 }

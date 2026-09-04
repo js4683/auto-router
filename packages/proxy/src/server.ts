@@ -16,8 +16,8 @@ import {
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
 import { createAvengersRuntime } from "./avengers-runtime.js";
-import { resolveCredential } from "./credentials.js";
-import { defaultEnvPath, ENV_KEYS, readEnvFile, writeEnvFile } from "./env-file.js";
+import { providerLoginSet, resolveCredential, UI_PROVIDERS } from "./credentials.js";
+import { defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 import { settingsPage } from "./settings-ui.js";
@@ -973,9 +973,17 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         return;
       }
       if (req.method === "GET" && (path === "/" || path === "/ui")) {
-        const env = readEnvFile(opts.envPath ?? defaultEnvPath());
-        const masked = Object.fromEntries(ENV_KEYS.map((key) => [key, env[key] ? "set" : "missing"]));
-        html(res, 200, settingsPage(masked));
+        const envPath = opts.envPath ?? defaultEnvPath();
+        const env = readEnvFile(envPath);
+        const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
+        const providers = UI_PROVIDERS.map((provider) => ({
+          id: provider.id,
+          label: provider.label,
+          envKey: provider.envKey,
+          login: providerLoginSet(provider.id, credOpts),
+          envSet: Boolean(env[provider.envKey] || process.env[provider.envKey]),
+        }));
+        html(res, 200, settingsPage(providers, true));
         return;
       }
       if (req.method === "POST" && path === "/settings") {
