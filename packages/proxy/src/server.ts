@@ -1005,6 +1005,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         const raw = await readBody(req);
         const updates = Object.fromEntries(new URLSearchParams(raw));
         writeEnvFile(opts.envPath ?? defaultEnvPath(), updates);
+        for (const [key, value] of Object.entries(updates)) {
+          if (value) process.env[key] = value;
+        }
         if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
         else {
           res.statusCode = 303;

@@ -2208,4 +2208,33 @@ describe("proxy", () => {
     expect(authorization).toBe("Bearer tok-from-auth");
     if (previous) process.env.OPENAI_API_KEY = previous;
   });
+
+  it("rejects unknown login providers", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/login/cursor";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(404);
+  });
 });
