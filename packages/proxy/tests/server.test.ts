@@ -2095,4 +2095,57 @@ describe("proxy", () => {
     expect(all).toContain("World");
     expect(writes.length).toBeGreaterThan(1);
   });
+
+  it("serves a settings page without leaking env values", async () => {
+    process.env.OPENAI_API_KEY = "sk-secret-test";
+    const dir = mkdtempSync(join(tmpdir(), "ar-settings-"));
+    writeFileSync(join(dir, ".env"), "OPENAI_API_KEY=sk-secret-test\n", { mode: 0o600 });
+    const server = recordingServer({ recordTurn: async () => undefined });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.body).toContain("auto-router");
+    expect(res.body).not.toContain("sk-secret-test");
+  });
+
+  it("saves non-empty settings to the env file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-settings-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: { opencode: { baseUrl: "https://opencode.ai/zen", fetchImpl: async () => new Response("{}") } },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/settings";
+    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-ant-1&GEMINI_API_KEY="));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(303);
+    expect(readFileSync(envPath, "utf8")).toContain("ANTHROPIC_API_KEY=sk-ant-1");
+    expect(readFileSync(envPath, "utf8")).not.toContain("GEMINI_API_KEY=");
+  });
 });

@@ -15,8 +15,10 @@ import {
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
 import { createAvengersRuntime } from "./avengers-runtime.js";
+import { defaultEnvPath, ENV_KEYS, readEnvFile, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
+import { settingsPage } from "./settings-ui.js";
 
 export interface ProxyBackend {
   baseUrl: string;
@@ -32,6 +34,7 @@ export interface CreateProxyServerOptions {
   backends: Record<string, ProxyBackend>;
   rankAvengers?: (text: string) => AvengersProPrediction | Promise<AvengersProPrediction>;
   recorder?: EvalRecorder;
+  envPath?: string;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -622,6 +625,15 @@ function sessionState(body: any, text: string, isNewSession: boolean): SessionSt
   };
 }
 
+function html(res: ServerResponse, status: number, body: string): void {
+  if (typeof res.writeHead === "function") res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  else {
+    res.statusCode = status;
+    res.setHeader?.("content-type", "text/html; charset=utf-8");
+  }
+  res.end(body);
+}
+
 function json(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   if (typeof res.writeHead === "function") res.writeHead(status, { "content-type": "application/json" });
@@ -954,6 +966,24 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const path = req.url?.split("?", 1)[0];
       if (path === "/health") {
         json(res, 200, { ok: true });
+        return;
+      }
+      if (req.method === "GET" && (path === "/" || path === "/ui")) {
+        const env = readEnvFile(opts.envPath ?? defaultEnvPath());
+        const masked = Object.fromEntries(ENV_KEYS.map((key) => [key, env[key] ? "set" : "missing"]));
+        html(res, 200, settingsPage(masked));
+        return;
+      }
+      if (req.method === "POST" && path === "/settings") {
+        const raw = await readBody(req);
+        const updates = Object.fromEntries(new URLSearchParams(raw));
+        writeEnvFile(opts.envPath ?? defaultEnvPath(), updates);
+        if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
+        else {
+          res.statusCode = 303;
+          res.setHeader?.("location", "/");
+        }
+        res.end();
         return;
       }
       if (req.method === "GET" && path === "/v1/models") {
