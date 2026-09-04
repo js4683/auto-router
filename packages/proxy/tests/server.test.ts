@@ -2237,4 +2237,40 @@ describe("proxy", () => {
     await server.handle(req, res as never);
     expect(res.statusCode).toBe(404);
   });
+
+  it("does not crash on GET /favicon.ico", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/favicon.ico";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(404);
+  });
 });

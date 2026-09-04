@@ -1030,6 +1030,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         res.end();
         return;
       }
+      if (req.method === "GET" || req.method === "HEAD") {
+        json(res, 404, { error: "not found" });
+        return;
+      }
 
       const raw = await readBody(req);
       const body = raw ? JSON.parse(raw) : {};
@@ -1246,7 +1250,12 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";
   const port = Number(process.env.AUTO_ROUTER_PORT ?? 8787);
   createServer((req, res) => {
-    void server.handle(req, res);
+    void server.handle(req, res).catch(() => {
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: "internal error" }));
+      }
+    });
   }).listen(port, host, () => {
     console.log(`[auto-router-proxy] listening on http://${host}:${port}`);
   });
