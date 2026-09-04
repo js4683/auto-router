@@ -1,6 +1,4 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 export interface ResolveCredentialOptions {
   env: NodeJS.ProcessEnv;
@@ -55,15 +53,14 @@ export function resolveCredential(runtimeId: string, opts: ResolveCredentialOpti
     const value = opts.env[name];
     if (value) return value;
   }
-  const authPath = opts.authPath ?? join(homedir(), ".local/share/opencode/auth.json");
-  const auth = readJson(authPath);
+  const authPath = opts.authPath;
+  const auth = authPath ? readJson(authPath) : undefined;
   if (auth && typeof auth === "object") {
     const fromAuth = fromAuthEntry((auth as Record<string, unknown>)[provider]);
     if (fromAuth) return fromAuth;
   }
-  if (provider === "anthropic") {
-    const claudePath = opts.claudePath ?? join(homedir(), ".claude/.credentials.json");
-    const fromClaude = fromClaude(claudePath);
+  if (provider === "anthropic" && opts.claudePath) {
+    const fromClaude = fromClaude(opts.claudePath);
     if (fromClaude) return fromClaude;
   }
   return undefined;

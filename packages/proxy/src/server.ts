@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   detectBoundary,
@@ -15,6 +16,7 @@ import {
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
 import { createAvengersRuntime } from "./avengers-runtime.js";
+import { resolveCredential } from "./credentials.js";
 import { defaultEnvPath, ENV_KEYS, readEnvFile, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
@@ -35,6 +37,8 @@ export interface CreateProxyServerOptions {
   rankAvengers?: (text: string) => AvengersProPrediction | Promise<AvengersProPrediction>;
   recorder?: EvalRecorder;
   envPath?: string;
+  authPath?: string;
+  claudePath?: string;
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -1039,8 +1043,13 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       }
 
       const inbound = inboundCredentials(req.headers, protocol, provider);
-      const authorization = backend.apiKey ? `Bearer ${backend.apiKey}` : inbound.authorization;
-      const token = backend.apiKey ?? inbound.token;
+      const resolved = backend.apiKey ?? resolveCredential(result.modelId, {
+        env: process.env,
+        authPath: opts.authPath,
+        claudePath: opts.claudePath,
+      });
+      const authorization = resolved ? `Bearer ${resolved}` : inbound.authorization;
+      const token = resolved ?? inbound.token;
       const upstreamRequestPlan = upstreamRequest(protocol, body, normalizedBody, provider, bareModel, token, req.url);
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (provider === "anthropic") {
@@ -1174,6 +1183,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 }
 
 export function bootstrapProxyOptions(): CreateProxyServerOptions {
+  const stored = readEnvFile(defaultEnvPath());
+  for (const [key, value] of Object.entries(stored)) {
+    if (!process.env[key]) process.env[key] = value;
+  }
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
   const runtime = createAvengersRuntime({
@@ -1197,6 +1210,8 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
     },
     rankAvengers: runtime ? (text) => runtime.rank(text) : undefined,
     recorder: createProxyRecorderFromEnv(),
+    authPath: join(homedir(), ".local/share/opencode/auth.json"),
+    claudePath: join(homedir(), ".claude/.credentials.json"),
   };
 }
 

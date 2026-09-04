@@ -2100,7 +2100,25 @@ describe("proxy", () => {
     process.env.OPENAI_API_KEY = "sk-secret-test";
     const dir = mkdtempSync(join(tmpdir(), "ar-settings-"));
     writeFileSync(join(dir, ".env"), "OPENAI_API_KEY=sk-secret-test\n", { mode: 0o600 });
-    const server = recordingServer({ recordTurn: async () => undefined });
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath: join(dir, ".env"),
+      backends: { opencode: { baseUrl: "https://opencode.ai/zen", fetchImpl: async () => new Response("{}") } },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
     const req = new IncomingMessage(new Socket());
     req.method = "GET";
     req.url = "/";
@@ -2147,5 +2165,47 @@ describe("proxy", () => {
     expect(res.statusCode).toBe(303);
     expect(readFileSync(envPath, "utf8")).toContain("ANTHROPIC_API_KEY=sk-ant-1");
     expect(readFileSync(envPath, "utf8")).not.toContain("GEMINI_API_KEY=");
+  });
+
+  it("attaches OpenCode auth token when backend apiKey is missing", async () => {
+    const previous = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const dir = mkdtempSync(join(tmpdir(), "ar-auth-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "oauth", access: "tok-from-auth" } }));
+    let authorization = "";
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (_url, init) => {
+            authorization = String(new Headers(init?.headers).get("authorization") ?? "");
+            return new Response(JSON.stringify({
+              choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            }), { headers: { "content-type": "application/json" } });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+    expect(authorization).toBe("Bearer tok-from-auth");
+    if (previous) process.env.OPENAI_API_KEY = previous;
   });
 });
