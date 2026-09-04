@@ -396,6 +396,9 @@ Supported strategies:
   production activation requires the held-out validation gate.
 - **2026-09-03:** Substantive `run` verification instructions may establish a boundary
   when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
+- **2026-09-04:** Proxy credentials prefer settings `.env`, then OpenCode
+  `auth.json`, then Claude Code login. Multi-provider; Cursor Pro unused. Live eval
+  may call the same proxy.
 - **2026-09-04:** Public apply path is the local proxy plus an installer (Claude Code,
   Codex, Cursor, OpenCode) and a loopback settings UI. Task stickiness and fail-open
   stay. The OpenCode `/connect` plugin remains private and is not shipped. No Postgres

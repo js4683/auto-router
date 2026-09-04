@@ -53,9 +53,18 @@ npm start --workspace=@auto-router/proxy
 npm run install-clients -- --claude --codex --opencode --cursor
 ```
 
-Open http://127.0.0.1:8787 and paste provider keys (`OPENAI_API_KEY`,
-`OPENCODE_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`). Keys are written to
-`~/.config/auto-router/.env` mode `0600`.
+Open http://127.0.0.1:8787 and paste provider keys if you want them
+(`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`).
+Keys are written to `~/.config/auto-router/.env` mode `0600`. If a key is
+missing, the proxy uses OpenCode `auth.json` or Claude Code’s local login for
+that provider. Cursor Pro quota is not used.
+
+Live eval can target the same proxy:
+
+```bash
+AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 AUTO_ROUTER_EVAL_API_KEY=local \
+  npm run eval -- live --dataset path/to/dataset.json --confirm-live
+```
 
 - Claude Code and OpenCode use Anthropic Messages at `http://127.0.0.1:8787`.
 - Codex and Cursor use OpenAI Chat Completions at `http://127.0.0.1:8787/v1`.
