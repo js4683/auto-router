@@ -38,7 +38,7 @@ function fromAuthEntry(entry: unknown): string | undefined {
   return stringField(record.key) ?? stringField(record.token) ?? stringField(record.access);
 }
 
-function fromClaude(path: string): string | undefined {
+function tokenFromClaudeFile(path: string): string | undefined {
   const parsed = readJson(path);
   if (!parsed || typeof parsed !== "object") return undefined;
   const record = parsed as Record<string, unknown>;
@@ -60,7 +60,7 @@ export function resolveCredential(runtimeId: string, opts: ResolveCredentialOpti
     if (fromAuth) return fromAuth;
   }
   if (provider === "anthropic" && opts.claudePath) {
-    const fromClaude = fromClaude(opts.claudePath);
+    const fromClaude = tokenFromClaudeFile(opts.claudePath);
     if (fromClaude) return fromClaude;
   }
   return undefined;
