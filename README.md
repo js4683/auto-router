@@ -45,31 +45,20 @@ of the above do.
 
 ## Apply path
 
-For OpenCode 1.18.27, load `.opencode/plugins/auto-router.ts` and connect providers
-with `/connect`. The plugin selects only from the live connected catalog, writes the
-chosen provider/model to the pending user message before OpenCode resolves auth, and
-holds that target until a confirmed task boundary. No router API key or proxy is
-required.
-
-The routed model is request-scoped: the TUI picker remains the user's default. A toast
-announces boundary switches that change the model, and
-`~/.cache/auto-router-decisions.log` records selection and confirmation without prompt
-or credential content.
-
-### Other harnesses
-
-For harnesses that cannot load the plugin, run the local proxy and point the harness at
-it:
+Public v1 is a local proxy plus an installer. The OpenCode plugin is private and is
+not part of this distribution.
 
 ```bash
-export OPENCODE_API_KEY="..."
-export GEMINI_API_KEY="..."
 npm start --workspace=@auto-router/proxy
+npm run install-clients -- --claude --codex --opencode --cursor
 ```
 
-Set the matching API-key environment variable for every provider the router may
-select (`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, or
-`ANTHROPIC_API_KEY`).
+Open http://127.0.0.1:8787 and paste provider keys (`OPENAI_API_KEY`,
+`OPENCODE_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`). Keys are written to
+`~/.config/auto-router/.env` mode `0600`.
+
+- Claude Code and OpenCode use Anthropic Messages at `http://127.0.0.1:8787`.
+- Codex and Cursor use OpenAI Chat Completions at `http://127.0.0.1:8787/v1`.
 
 Default listen address is `http://127.0.0.1:8787`.
 

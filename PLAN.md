@@ -337,9 +337,14 @@ Supported strategies:
 - **2026-09-03, Zen live dataset replay:** local ignored
   `phase-3-zen-live.eval-dataset.local.json` (30 turns) replayed complete. Verification
   selected Muse, planning selected Sol, sticky follow-ups used `stay-sticky`. Planned
-  live calls are 90 generation + 30 judge. `--confirm-live` against
-  `https://opencode.ai/zen/v1` is pending `AUTO_ROUTER_EVAL_API_KEY`. Phase 4 corpus
-  remains deferred.
+  live calls are 90 generation + 30 judge. Phase 4 corpus remains deferred.
+- **2026-09-03, Zen free-only live run:** paid Sol/Luna returned `CreditsError` (no
+  payment method). Reran locally with Muse (Responses) + Nemotron 3.5 Lightning Free
+  (chat) + Muse judge, `MAX_OUTPUT_TOKENS=4096`. Report
+  `phase-3-zen-live-free.live.eval-report.local.json`: 24/30 complete live cases,
+  router judge quality 0.873, live quality gate failed (`requires at least 30 complete
+  live cases`). Six incomplete cases were Muse incomplete output, missing judge
+  content, or Nemotron timeout. No dataset or report was committed.
 
 ## Decision Log
 
@@ -391,6 +396,10 @@ Supported strategies:
   production activation requires the held-out validation gate.
 - **2026-09-03:** Substantive `run` verification instructions may establish a boundary
   when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
+- **2026-09-04:** Public apply path is the local proxy plus an installer (Claude Code,
+  Codex, Cursor, OpenCode) and a loopback settings UI. Task stickiness and fail-open
+  stay. The OpenCode `/connect` plugin remains private and is not shipped. No Postgres
+  or `rk_` keys in v1.
 - **2026-09-03:** Supersede the recommendation-only OpenCode decisions above after a
   source audit of OpenCode 1.18.27. The existing mutable
   `chat.message.output.message.model` seam applies a complete request before provider,
@@ -413,3 +422,5 @@ Supported strategies:
   embedding architecture, privacy boundaries, and activation gates.
 - `docs/plans/2026-09-03-opencode-apply-path-design.md`: audited native OpenCode apply
   lifecycle, live-provider proof, and fail-open behavior.
+- `docs/plans/2026-09-04-universal-proxy-installer-design.md`: public v1 proxy, installer,
+  and loopback settings UI.
