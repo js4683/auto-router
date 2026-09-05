@@ -5,26 +5,38 @@
  */
 import type { Plugin } from "@opencode-ai/plugin";
 import { selectModel, loadConfig, loadCatalogSync, resolveTaskType, buildCatalogFromProviders, detectBoundary } from "../../packages/router-core/src/index.js";
-import type { SessionState, Tier } from "../../packages/router-core/src/index.js";
+import type { Catalog, SessionState, Tier } from "../../packages/router-core/src/index.js";
 
-// ---- Catalog / Config (loaded once, reloaded on config hook if desired) ----
-let config = loadConfig();
-let catalog = loadCatalogSync(config);
+type LiveCatalogSnapshot = Readonly<{
+  catalog: Catalog;
+  runtimeIDs: ReadonlySet<string>;
+}>;
 
-async function loadLiveCatalog(client: any, directory: string): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const response = await new Promise<any>((resolve) => {
-      timer = setTimeout(() => resolve(undefined), 1500);
-      client.provider.list({ query: { directory } }).then(resolve, () => resolve(undefined));
-    });
-    if (timer) clearTimeout(timer);
-    const data = response?.data ?? response;
-    const live = buildCatalogFromProviders(data, config);
-    if (live.models.length) catalog = live;
-  } catch {
-    if (timer) clearTimeout(timer);
-  }
+type TaskSelection = Readonly<{
+  target: string;
+  liveSnapshot: LiveCatalogSnapshot;
+}>;
+
+type RuntimeModel = { providerID: string; modelID: string };
+type PendingApply = RuntimeModel & { messageID: string; agent: string };
+
+function createLiveCatalogSnapshot(catalog: Catalog, runtimeIDs: Iterable<string>): LiveCatalogSnapshot {
+  return Object.freeze({ catalog, runtimeIDs: new Set(runtimeIDs) });
+}
+
+function pendingApplyKey(messageID: string, agent: string | undefined): string {
+  return `${messageID}\u0000${agent ?? ""}`;
+}
+
+function runtimeModelID(model: { providerID?: string; modelID?: string; id?: string } | undefined): string | undefined {
+  const modelID = model?.modelID ?? model?.id;
+  return model?.providerID && modelID ? `${model.providerID}/${modelID}` : undefined;
+}
+
+function parseRuntimeModelID(id: string): RuntimeModel | undefined {
+  const separator = id.indexOf("/");
+  if (separator <= 0 || separator === id.length - 1) return undefined;
+  return { providerID: id.slice(0, separator), modelID: id.slice(separator + 1) };
 }
 
 // ---- Per-session state (the real wiring) ----
@@ -38,7 +50,7 @@ type PerSession = {
   taskTarget: string | null;
   taskTier: Tier | null;
   actualModel: string | null;
-  pendingRecommendation: boolean;
+  pendingApplies: Map<string, PendingApply>;
   prevAgent?: string;
   prevMessage?: string;
   isCompacted: boolean;
@@ -61,7 +73,7 @@ function getSession(id: string): PerSession {
       taskTarget: null,
       taskTier: null,
       actualModel: null,
-      pendingRecommendation: false,
+      pendingApplies: new Map(),
       isCompacted: false,
       isNewSession: true,
     };
@@ -77,7 +89,7 @@ function estimateTokens(text: string): number {
 
 function extractTextFromMessage(msg: any): string {
   if (!msg) return "";
-  // chat.message hook: input.message is UserMessage with parts
+  // OpenCode supplies message content separately in chat.message output.parts.
   if (Array.isArray(msg.parts)) return msg.parts.map((p: any) => p.text ?? p.content ?? "").join("\n");
   if (typeof msg.text === "string") return msg.text;
   if (typeof msg.content === "string") return msg.content;
@@ -152,11 +164,56 @@ async function appendDecision(line: string): Promise<void> {
 }
 
 export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
-  let liveCatalogPromise: Promise<void> | undefined;
-  const ensureLiveCatalog = () => {
-    if (!liveCatalogPromise) liveCatalogPromise = loadLiveCatalog(client, directory);
-    return liveCatalogPromise;
-  };
+  let config = loadConfig();
+  let catalog = loadCatalogSync(config);
+  let currentLiveSnapshot = createLiveCatalogSnapshot(catalog, []);
+  let providerListPromise: Promise<unknown> | undefined;
+
+  function providerList(): Promise<unknown> {
+    if (!providerListPromise) {
+      const request = Promise.resolve().then(() => client.provider.list({ query: { directory } }));
+      const tracked = request.finally(() => {
+        providerListPromise = undefined;
+      });
+      providerListPromise = tracked;
+    }
+    return providerListPromise!;
+  }
+
+  async function loadLiveCatalog(): Promise<LiveCatalogSnapshot> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await new Promise<unknown>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), 1500);
+        providerList().then(
+          (value) => {
+            if (timer) clearTimeout(timer);
+            resolve(value);
+          },
+          () => {
+            if (timer) clearTimeout(timer);
+            resolve(undefined);
+          }
+        );
+      });
+      if (timer) clearTimeout(timer);
+      const data = (response as any)?.data ?? response;
+      if (!data) return currentLiveSnapshot;
+
+      const live = buildCatalogFromProviders(data, config);
+      if (!live.models.length) return currentLiveSnapshot;
+
+      catalog = live;
+      currentLiveSnapshot = createLiveCatalogSnapshot(
+        live,
+        live.models.map((model) => model.runtimeId).filter((id): id is string => Boolean(id))
+      );
+      return currentLiveSnapshot;
+    } catch {
+      if (timer) clearTimeout(timer);
+      return currentLiveSnapshot;
+    }
+  }
 
   await client.app.log({
     body: {
@@ -167,6 +224,111 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     },
   }).catch(() => {});
 
+  async function logDecision(line: string, level: "info" | "warn", extra: Record<string, unknown>): Promise<void> {
+    await client.app.log({
+      body: { service: "auto-router", level, message: line, extra },
+    }).catch(() => {});
+    await appendDecision(line);
+  }
+
+  async function selectTaskTarget(
+    sessionID: string,
+    session: PerSession,
+    sessionState: SessionState,
+    boundary: ReturnType<typeof detectBoundary>,
+    prevAgent?: string,
+    prevMessage?: string
+  ): Promise<TaskSelection | undefined> {
+    const liveSnapshot = await loadLiveCatalog();
+    const selectionState: SessionState = {
+      ...sessionState,
+      currentTask: {
+        ...sessionState.currentTask,
+        taskTokens: sessionState.currentTask.promptTokens,
+        filesTouched: 0,
+        diffHunks: 0,
+        toolDepth: 0,
+        priorErrors: 0,
+      },
+    };
+
+    let result: ReturnType<typeof selectModel>;
+    try {
+      result = selectModel(selectionState, liveSnapshot.catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
+    } catch (error) {
+      session.taskTarget = null;
+      await logDecision("[auto-router] TASK ERROR selection failed", "warn", {
+        sessionID,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+
+    if (!liveSnapshot.runtimeIDs.has(result.modelId)) {
+      session.taskTarget = null;
+      session.taskTier = null;
+      await logDecision(
+        `[auto-router] TASK RECOMMEND target=${result.modelId} source=${result.catalogSource} (no live connected proof)`,
+        "info",
+        { sessionID, target: result.modelId, catalogSource: result.catalogSource }
+      );
+      return undefined;
+    }
+
+    const taskType = resolveTaskType(selectionState, config);
+    session.taskTarget = result.modelId;
+    session.taskTier = result.tier;
+    resetTask(sessionID, selectionState.currentTask.promptTokens);
+
+    const line = `[auto-router] TASK SELECT s=${sessionID.slice(0, 8)} target=${result.modelId} tier=${result.tier} taskType=${taskType.type ?? "none"} via=${result.via} source=${result.catalogSource} boundary=${boundary.signals.join("+") || "initial"}`;
+    await logDecision(line, "info", {
+      sessionID,
+      tier: result.tier,
+      score: result.score,
+      confidence: result.confidence,
+      taskType: taskType.type,
+      via: result.via,
+      modelId: result.modelId,
+      lifetimeTokens: sessionState.lifetimeTokens,
+      boundary,
+      catalogSource: result.catalogSource,
+    });
+    return { target: result.modelId, liveSnapshot };
+  }
+
+  async function applyTaskTarget(
+    sessionID: string,
+    session: PerSession,
+    taskTarget: string | null,
+    message: { id: string; agent: string; model: RuntimeModel & { variant?: string } },
+    liveSnapshot: LiveCatalogSnapshot,
+    notify: boolean
+  ): Promise<void> {
+    if (!taskTarget || !liveSnapshot.runtimeIDs.has(taskTarget)) return;
+    const target = parseRuntimeModelID(taskTarget);
+    if (!target) {
+      await logDecision(`[auto-router] TASK APPLY skipped malformed=${taskTarget}`, "warn", {
+        sessionID,
+        target: taskTarget,
+      });
+      return;
+    }
+    if (runtimeModelID(message.model) === taskTarget) return;
+
+    message.model = target;
+    session.pendingApplies.set(pendingApplyKey(message.id, message.agent), { ...target, messageID: message.id, agent: message.agent });
+    if (!notify) return;
+
+    await client.tui.showToast({
+      body: {
+        title: "Auto-router",
+        message: `Using ${taskTarget} for this task`,
+        variant: "info",
+        duration: 3000,
+      },
+    }).catch(() => {});
+  }
+
   return {
     // Keep config live: if user edits auto-router.json, next turn picks it up
     // (opencode doesn't hot-reload plugin config, so we reload lazily on each turn)
@@ -174,17 +336,15 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       try {
         config = loadConfig();
         catalog = loadCatalogSync(config);
-        liveCatalogPromise = undefined;
+        currentLiveSnapshot = createLiveCatalogSnapshot(catalog, []);
       } catch {}
     },
 
     "chat.message": async (input, output) => {
-      await ensureLiveCatalog();
-      const sessionID: string = (input as any).sessionID ?? (input as any).sessionId ?? "global";
+      const sessionID = input.sessionID;
       const s = getSession(sessionID);
-      const hookMessage = (input as any).message ?? (Array.isArray((output as any).parts) ? { parts: (output as any).parts } : (output as any).message ?? input);
-      const msgText = extractTextFromMessage(hookMessage);
-      const agent: string | undefined = (input as any).agent;
+      const msgText = extractTextFromMessage({ parts: output.parts });
+      const agent = input.agent;
       if (agent) s.agent = agent;
 
       const prevAgent = s.prevAgent;
@@ -193,65 +353,35 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const boundary = detectBoundary(sessionState, prevAgent, prevMessage);
       s.prevAgent = agent ?? sessionState.activeAgent;
       s.prevMessage = msgText;
-      if (s.taskTarget && !boundary.isBoundary) return;
+      const requestSnapshot = currentLiveSnapshot;
+      const requestTarget = s.taskTarget;
+      const shouldSelect = !requestTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(requestTarget);
 
-      const selectionState: SessionState = {
-        ...sessionState,
-        currentTask: {
-          ...sessionState.currentTask,
-          taskTokens: sessionState.currentTask.promptTokens,
-          filesTouched: 0,
-          diffHunks: 0,
-          toolDepth: 0,
-          priorErrors: 0,
-        },
-      };
-      const result = selectModel(selectionState, catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
-      const taskType = resolveTaskType(selectionState, config);
-      s.taskTarget = result.modelId;
-      s.taskTier = result.tier;
-      s.pendingRecommendation = true;
-      resetTask(sessionID, selectionState.currentTask.promptTokens);
-
-      const line = `[auto-router] TASK SELECT s=${sessionID.slice(0, 8)} target=${result.modelId} tier=${result.tier} taskType=${taskType.type ?? "none"} via=${result.via} source=${result.catalogSource} boundary=${boundary.signals.join("+") || "initial"}`;
-      await client.app.log({
-        body: {
-          service: "auto-router",
-          level: "info",
-          message: line,
-          extra: {
-            sessionID,
-            tier: result.tier,
-            score: result.score,
-            confidence: result.confidence,
-            taskType: taskType.type,
-            via: result.via,
-            modelId: result.modelId,
-            lifetimeTokens: sessionState.lifetimeTokens,
-            boundary,
-            catalogSource: result.catalogSource,
-          },
-        },
-      }).catch(() => {});
-      await appendDecision(line);
+      if (shouldSelect) {
+        const selection = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage);
+        if (!selection) return;
+        await applyTaskTarget(sessionID, s, selection.target, output.message, selection.liveSnapshot, true);
+        return;
+      }
+      await applyTaskTarget(sessionID, s, requestTarget, output.message, requestSnapshot, false);
     },
 
-    "chat.params": async (input, output) => {
-      const sessionID: string = (input as any).sessionID ?? "global";
+    "chat.params": async (input) => {
+      const sessionID = input.sessionID;
       const s = getSession(sessionID);
-      const currentModelId = (input as any).model?.id ?? (input as any).model?.modelID;
-      const currentProviderId = (input as any).model?.providerID ?? (input as any).provider?.id;
-      const currentRuntimeId = currentProviderId && currentModelId ? `${currentProviderId}/${currentModelId}` : currentModelId;
-      s.actualModel = currentRuntimeId ?? s.actualModel;
-      if (!s.pendingRecommendation || !s.taskTarget) return;
-      s.pendingRecommendation = false;
-      const sameModel = s.taskTarget === currentRuntimeId || s.taskTarget === currentModelId;
-      if (sameModel) return;
+      const actual = runtimeModelID(input.model) ?? "undefined";
+      s.actualModel = actual;
+      const confirmationKey = pendingApplyKey(input.message.id, input.agent);
+      const pending = s.pendingApplies.get(confirmationKey);
+      if (!pending) return;
 
-      const before = currentRuntimeId ?? "undefined";
-      const line = `[auto-router] TASK RECOMMEND ${before} -> ${s.taskTarget} (model unchanged by chat.params)`;
-      await client.app.log({ body: { service: "auto-router", level: "info", message: line, extra: { from: before, to: s.taskTarget, sessionID } } }).catch(() => {});
-      await appendDecision(line);
+      s.pendingApplies.delete(confirmationKey);
+      const expected = `${pending.providerID}/${pending.modelID}`;
+      const matches = actual === expected;
+      const line = matches
+        ? `[auto-router] TASK APPLY ${expected}`
+        : `[auto-router] TASK APPLY mismatch expected=${expected} actual=${actual}`;
+      await logDecision(line, matches ? "info" : "warn", { sessionID, expected, actual });
     },
 
     // ---- Tool hooks: wire filesTouched / toolDepth / priorErrors ----
@@ -319,7 +449,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
           s.taskTarget = null;
           s.taskTier = null;
           s.actualModel = null;
-          s.pendingRecommendation = false;
+          s.pendingApplies.clear();
           break;
         }
         case "session.updated": {

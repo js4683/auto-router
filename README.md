@@ -27,7 +27,9 @@ of the above do.
    Avengers-Pro scorer is an opt-in Tier-1 reranker that fails open to Tier 0. Overlap
    models join through LLMRouterBench; Muse/Grok/Luna use an explicit hand map until we
    have our own labels.
-3. **Apply path:** a local OpenAI/Anthropic proxy. The OpenCode plugin stays observational.
+3. **Apply paths:** the OpenCode plugin applies connected-provider targets natively at
+   task boundaries. The local OpenAI/Anthropic proxy remains available for other
+   harnesses that cannot load the plugin.
 4. **Model selection data:** Artificial Analysis free API for quality (coding index)
    + price -> a "bang-for-buck" score per model, refreshed daily and cached.
 5. **Free-first:** within the tier a task needs, prefer models that are free *to the
@@ -43,27 +45,32 @@ of the above do.
 
 ## Apply path
 
-The OpenCode plugin can recommend a model but cannot change the outbound request.
-`chat.params` has no model field, and `anomalyco/opencode#45764` is assigned to someone
-else, so we do not implement that hook.
-
-To actually switch models, run the local proxy and point the harness at it:
+Public v1 is a local proxy plus an installer. The OpenCode plugin is private and is
+not part of this distribution.
 
 ```bash
-export OPENCODE_API_KEY="..."
-export GEMINI_API_KEY="..."
 npm start --workspace=@auto-router/proxy
+npm run install-clients -- --claude --codex --opencode --cursor
 ```
 
-Set the matching API-key environment variable for every provider the router may
-select (`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, or
-`ANTHROPIC_API_KEY`).
+Open http://127.0.0.1:8787 and paste provider keys if you want them
+(`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`).
+Keys are written to `~/.config/auto-router/.env` mode `0600`. If a key is
+missing, the proxy uses OpenCode `auth.json` or Claude Code’s local login for
+that provider. Cursor Pro quota is not used.
+
+Live eval can target the same proxy:
+
+```bash
+AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 AUTO_ROUTER_EVAL_API_KEY=local \
+  npm run eval -- live --dataset path/to/dataset.json --confirm-live
+```
+
+- Claude Code and OpenCode use Anthropic Messages at `http://127.0.0.1:8787`.
+- Codex and Cursor use OpenAI Chat Completions at `http://127.0.0.1:8787/v1`.
 
 Default listen address is `http://127.0.0.1:8787`.
 
-- OpenCode: add an `@ai-sdk/openai-compatible` custom provider whose `baseURL` is
-  `http://127.0.0.1:8787/v1` and whose model is a virtual id such as
-  `auto-router/auto`.
 - Other OpenAI Chat Completions clients can use `http://127.0.0.1:8787/v1`.
 - Claude Code can use `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
 - Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.

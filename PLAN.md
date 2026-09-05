@@ -26,8 +26,10 @@ policy, integration behavior, scope, or verification evidence changes.
   model.
 - For planning and architecture tasks, use a high quality floor and quality-first
   ordering so Sol, Fable, Opus, or equivalent frontier models win when connected.
-- Log one task-level recommendation when OpenCode's actual model differs from the target.
-- Apply the selected target through the local OpenAI/Anthropic-compatible proxy.
+- Log `TASK RECOMMEND` when live proof is unavailable and confirm each rewritten message
+  through observational `chat.params`.
+- Apply the selected target to OpenCode's pending user message; retain the local
+  OpenAI/Anthropic-compatible proxy for other harnesses.
 - Reconstruct conservative routing signals from normalized request messages, tool
   schemas, and tool-call history.
 - Replay versioned datasets against router, always-frontier, and always-cheap strategies.
@@ -130,9 +132,9 @@ requirements. Any connected model with equivalent or better quality may win.
 
 - Mapping OpenCode events to router session state.
 - Lazy connected-provider discovery with a 1500 ms fail-open timeout.
-- Task target persistence.
-- Actual-model observation.
-- One-shot task-level recommendation logging.
+- Task target persistence with instance-local live proof.
+- Native apply through `chat.message.output.message.model`.
+- Observational `chat.params` confirmation and fallback `TASK RECOMMEND` logging.
 - Tool, diff, token, and error signal collection.
 
 ### Proxy adapter
@@ -153,12 +155,13 @@ The installed global adapter at
 repository adapter. Its compiled core is deployed under
 `~/.config/opencode/plugins/router-core/dist`.
 
-### Integration limitation
+### Historical integration limitation (superseded 2026-09-03)
 
-OpenCode 1.18.25 does not expose a supported provider/model mutation through
-`chat.params`. The adapter must leave generation output untouched, observe the actual
-model, and log the task target once. Automatic application remains blocked on an
-upstream model-routing hook such as `llm.request.before`.
+Before the OpenCode 1.18.27 source audit, the adapter used `chat.params` only for
+observation because OpenCode 1.18.25 did not expose a supported provider/model mutation
+there. That recommendation-only path and its dependency on an upstream hook are
+retained as historical context; the current adapter applies the target through the
+mutable `chat.message.output.message.model` seam.
 
 ## Configuration Contract
 
@@ -220,8 +223,9 @@ Supported strategies:
   - [x] Store a task target separately from the model OpenCode actually used.
   - [x] Select only on the first task message or a confirmed boundary.
   - [x] Prevent errors and complexity changes from switching targets mid-task.
-  - [x] Emit at most one recommendation per task.
-  - [x] Keep `chat.params` observational and leave its output unchanged.
+  - [x] Emit at most one `TASK RECOMMEND` per task when live proof is unavailable.
+  - [x] Apply each rewritten message through `chat.message.output.message.model`; keep
+    `chat.params` observational and leave its output unchanged.
   - [x] Add red-green plugin integration tests.
 
 ### 5. Validation and deployment
@@ -313,6 +317,34 @@ Supported strategies:
   `31b58f71b360d950516305e0b412cbe9c7214781742b27cd35b8d6e754ab5e09`, Markdown
   SHA-256 `5f75240b793d45e3e98dcca9f55e85ac54cdf5c068fb613f1d30511cb3119e26`.
   External benchmark acceptance remains unproven pending a complete 30-case live run.
+- **2026-09-03, native OpenCode apply:** `npm test` passed all 344 tests,
+  `npm run build` passed for all workspaces, and `git diff --check` was clean.
+  Stock OpenCode 1.18.27 loaded the globally deployed plugin and connected-provider
+  catalog without an Auto-Router proxy or injected provider credentials.
+- **2026-09-03, attached multi-task smoke:** a planning turn submitted as
+  `opencode/muse-spark-1.3-contributor-free` selected, applied, streamed, and persisted
+  as `openai/gpt-5.6-sol`. A `[task:run_tests]` boundary then selected, streamed, and
+  persisted as `opencode/muse-spark-1.3-contributor-free`.
+- **2026-09-03, sticky apply smoke:** an untagged follow-up deliberately submitted as
+  `openai/gpt-5.6-sol` emitted no new `TASK SELECT`, logged
+  `TASK APPLY opencode/muse-spark-1.3-contributor-free`, and streamed and persisted on
+  that held target. `opencode export ses_f973afb18ffeND36o1JTbs7eT7 --sanitize`
+  confirmed all three user and assistant model assignments.
+- **2026-09-03, Zen live eval transport:** eval live mode accepts `liveTransportDefault`
+  and per-runtime `liveTransports`, posts Muse/GPT-class calls to `/responses`, and
+  keeps `/chat/completions` as the default. `npm test --workspace=@auto-router/eval`
+  passed 143 tests.
+- **2026-09-03, Zen live dataset replay:** local ignored
+  `phase-3-zen-live.eval-dataset.local.json` (30 turns) replayed complete. Verification
+  selected Muse, planning selected Sol, sticky follow-ups used `stay-sticky`. Planned
+  live calls are 90 generation + 30 judge. Phase 4 corpus remains deferred.
+- **2026-09-03, Zen free-only live run:** paid Sol/Luna returned `CreditsError` (no
+  payment method). Reran locally with Muse (Responses) + Nemotron 3.5 Lightning Free
+  (chat) + Muse judge, `MAX_OUTPUT_TOKENS=4096`. Report
+  `phase-3-zen-live-free.live.eval-report.local.json`: 24/30 complete live cases,
+  router judge quality 0.873, live quality gate failed (`requires at least 30 complete
+  live cases`). Six incomplete cases were Muse incomplete output, missing judge
+  content, or Nemotron timeout. No dataset or report was committed.
 
 ## Decision Log
 
@@ -364,6 +396,18 @@ Supported strategies:
   production activation requires the held-out validation gate.
 - **2026-09-03:** Substantive `run` verification instructions may establish a boundary
   when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
+- **2026-09-04:** Proxy credentials prefer settings `.env`, then OpenCode
+  `auth.json`, then Claude Code login. Multi-provider; Cursor Pro unused. Live eval
+  may call the same proxy.
+- **2026-09-04:** Public apply path is the local proxy plus an installer (Claude Code,
+  Codex, Cursor, OpenCode) and a loopback settings UI. Task stickiness and fail-open
+  stay. The OpenCode `/connect` plugin remains private and is not shipped. No Postgres
+  or `rk_` keys in v1.
+- **2026-09-03:** Supersede the recommendation-only OpenCode decisions above after a
+  source audit of OpenCode 1.18.27. The existing mutable
+  `chat.message.output.message.model` seam applies a complete request before provider,
+  auth, and request preparation. `chat.params` remains observation-only; no OpenCode
+  patch or upstream hook is required for user-message routing.
 - [x] Phase 4 code complete
 - [ ] real observed-outcome corpus collected
 - [ ] production artifact trained
@@ -375,5 +419,11 @@ Supported strategies:
 - `roadmap.md`: broader project phases and implementation status.
 - `docs/plans/2026-08-31-phase-3-eval-harness-design.md`: accepted eval architecture,
   data contracts, trust boundaries, and acceptance gates.
+- `docs/plans/2026-09-03-phase-3-zen-live-eval-design.md`: Zen Responses live transport,
+  local 30-turn dataset, and deferred Phase 4 corpus.
 - `docs/plans/2026-09-01-phase-4-embedding-classifier-design.md`: approved Tier-1
   embedding architecture, privacy boundaries, and activation gates.
+- `docs/plans/2026-09-03-opencode-apply-path-design.md`: audited native OpenCode apply
+  lifecycle, live-provider proof, and fail-open behavior.
+- `docs/plans/2026-09-04-universal-proxy-installer-design.md`: public v1 proxy, installer,
+  and loopback settings UI.

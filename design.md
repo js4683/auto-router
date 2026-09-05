@@ -19,13 +19,14 @@
 
 Two adapters deliver "opencode **or any harness**":
 
-- **opencode plugin** — session signals and one-shot recommendations. It cannot change
-  the outbound model while `llm.request.before` is assigned to someone else.
-- **OpenAI/Anthropic proxy** — the apply path. Point OpenCode, Claude Code, Codex, or
-  Cursor at `http://127.0.0.1:8787`. It accepts OpenAI Chat Completions, Anthropic
-  Messages, and OpenAI Responses requests, selects the target `model`, and translates
-  text and function calls across Zen's Responses API and Gemini's `generateContent` API,
-  forwarding with each provider's backend key.
+- **opencode plugin** — session signals and native apply. On OpenCode 1.18.27 it writes
+  the connected task target to `chat.message.output.message.model` and confirms the
+  resolved model through observational `chat.params`.
+- **OpenAI/Anthropic proxy** — the apply path for harnesses that cannot load the plugin.
+  Point Claude Code, Codex, or Cursor at `http://127.0.0.1:8787`. It accepts OpenAI Chat
+  Completions, Anthropic Messages, and OpenAI Responses requests, selects the target
+  `model`, and translates text and function calls across Zen's Responses API and Gemini's
+  `generateContent` API, forwarding with each provider's backend key.
 
 `router-core` has zero harness dependencies. Both adapters call the same
 `classify()` + policy engine.
@@ -229,12 +230,11 @@ Tiny model rates difficulty 1-5. Adds a call; gate behind a flag.
 
 ## OpenCode integration boundary
 
-OpenCode 1.18.25 exposes `chat.message` and `chat.params`, but `chat.params` only
-supports generation options such as temperature and provider options. It does not expose
-a supported provider/model mutation. The adapter therefore selects and locks a task
-target, observes the model OpenCode actually runs, and writes one task-level
-recommendation when they differ. Automatic task-level application can use the same
-target state once an upstream `llm.request.before`-style hook exists.
+OpenCode 1.18.27 invokes `chat.message` before it validates and saves the pending user
+message. Assigning `output.message.model = { providerID, modelID }` therefore applies
+the selected connected target to the current turn. `chat.params` remains observation
+only: it confirms the resolved model and must not mutate request options. The proxy is
+not required for OpenCode.
 
 ## Decision log
 
@@ -246,6 +246,9 @@ target state once an upstream `llm.request.before`-style hook exists.
   ordering so high-class models such as Sol, Fable, or Opus win when connected.
 - **2026-08-29:** Unsupported OpenCode model mutations are not attempted; task-level
   recommendations are logged until an upstream model-routing hook is available.
+- **2026-09-03:** Supersede the recommendation-only OpenCode boundary. Stock 1.18.27
+  applies connected targets through `chat.message.output.message.model`; `chat.params`
+  confirms without mutation.
 
 ## Eval harness
 

@@ -244,6 +244,11 @@ export function validateDatasetRoutingSnapshot(value: unknown): void {
   if (snapshot.capabilities !== undefined) validateStringMap(snapshot.capabilities, "capabilities", true);
 }
 
+function liveTransport(value: unknown, label: string): "chat" | "responses" {
+  if (value !== "chat" && value !== "responses") throw new Error(`${label} must be chat or responses`);
+  return value;
+}
+
 export function parseDataset(input: unknown): EvalDatasetV1 {
   const dataset = record(input, "dataset");
   if (dataset.schemaVersion !== 1) throw new Error(`unsupported schemaVersion ${String(dataset.schemaVersion)}`);
@@ -259,6 +264,15 @@ export function parseDataset(input: unknown): EvalDatasetV1 {
     for (const [key, value] of Object.entries(record(dataset.liveModelAliases, "liveModelAliases"))) {
       string(key, "liveModelAliases key");
       string(value, `liveModelAliases.${key}`);
+    }
+  }
+  if (dataset.liveTransportDefault !== undefined) {
+    liveTransport(dataset.liveTransportDefault, "liveTransportDefault");
+  }
+  if (dataset.liveTransports !== undefined) {
+    for (const [key, value] of Object.entries(record(dataset.liveTransports, "liveTransports"))) {
+      string(key, "liveTransports key");
+      liveTransport(value, `liveTransports.${key}`);
     }
   }
   validateSessions(dataset.sessions);

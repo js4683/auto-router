@@ -9,6 +9,7 @@ import type {
   LiveCaseResult,
   LiveEvalResult,
   LiveOutput,
+  LiveTransport,
   ReplayResult,
   ReplayTurnResult,
   StrategyName,
@@ -39,7 +40,7 @@ export interface JudgeCaseInput {
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
-function endpoint(baseUrl: string): string {
+function endpoint(baseUrl: string, transport: LiveTransport = "chat"): string {
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -50,7 +51,13 @@ function endpoint(baseUrl: string): string {
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("live baseUrl must use HTTPS except for loopback");
   url.pathname = url.pathname.replace(/\/+$/, "");
-  return `${url.toString().replace(/\/$/, "")}/chat/completions`;
+  const path = transport === "responses" ? "responses" : "chat/completions";
+  return `${url.toString().replace(/\/$/, "")}/${path}`;
+}
+
+export function liveTransportFor(dataset: EvalDatasetV1, runtimeId?: string): LiveTransport {
+  if (runtimeId && dataset.liveTransports?.[runtimeId]) return dataset.liveTransports[runtimeId];
+  return dataset.liveTransportDefault ?? "chat";
 }
 
 async function readBounded(response: Response): Promise<string> {
@@ -141,25 +148,89 @@ function parseOutput(raw: string): LiveOutput {
   };
 }
 
+function parseResponsesUsage(value: any): EvalUsage | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("provider usage must be an object");
+  const parsed = {
+    inputTokens: usageToken(value.input_tokens, "input_tokens", true),
+    outputTokens: usageToken(value.output_tokens, "output_tokens", true),
+    cacheReadInputTokens: usageToken(value.input_tokens_details?.cached_tokens, "cached_tokens"),
+    cacheWriteInputTokens: usageToken(value.input_tokens_details?.cache_creation_tokens, "cache_creation_tokens"),
+  };
+  if (parsed.cacheReadInputTokens + parsed.cacheWriteInputTokens > parsed.inputTokens) {
+    throw new Error("provider usage cache tokens must not exceed input_tokens");
+  }
+  return parsed;
+}
+
+function responsesText(payload: any): string | undefined {
+  if (typeof payload?.output_text === "string") return payload.output_text;
+  const parts: string[] = [];
+  for (const item of Array.isArray(payload?.output) ? payload.output : []) {
+    if (!Array.isArray(item?.content)) continue;
+    for (const content of item.content) {
+      if (content?.type === "output_text" && typeof content.text === "string") parts.push(content.text);
+    }
+  }
+  if (parts.length) return parts.join("");
+  return undefined;
+}
+
+function parseResponsesOutput(raw: string): LiveOutput {
+  let payload: any;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    throw new Error("provider returned invalid JSON");
+  }
+  const text = responsesText(payload);
+  if (text === undefined) throw new Error("provider response is missing assistant content");
+  const usage = parseResponsesUsage(payload?.usage);
+  return {
+    text,
+    toolCalls: [],
+    terminalState: outputTerminalState(payload, undefined),
+    ...(usage ? { usage } : {}),
+  };
+}
+
 export async function requestCompletion(
   request: CompletionRequest,
   config: LiveClientConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  transport: LiveTransport = "chat"
 ): Promise<LiveOutput> {
-  const url = endpoint(config.baseUrl);
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({
+  const url = endpoint(config.baseUrl, transport);
+  const body = transport === "responses"
+    ? {
+        model: request.model,
+        input: request.messages,
+        max_output_tokens: config.maxOutputTokens,
+        stream: false,
+        ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+        ...(request.responseFormat?.type === "json_object" ? { text: { format: { type: "json_object" } } } : {}),
+      }
+    : {
         model: request.model,
         messages: request.messages,
         max_tokens: config.maxOutputTokens,
         stream: false,
         ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
-      }),
+      };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${config.apiKey}`,
+  };
+  if (new URL(url).hostname === "generativelanguage.googleapis.com") {
+    headers["x-goog-api-key"] = config.apiKey;
+  }
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
       redirect: "error",
       signal: AbortSignal.timeout(config.timeoutMs),
     });
@@ -168,7 +239,8 @@ export async function requestCompletion(
     throw new Error("provider request failed");
   }
   if (!response.ok) throw new Error(`provider returned HTTP ${response.status}`);
-  return parseOutput(await readBounded(response));
+  const raw = await readBounded(response);
+  return transport === "responses" ? parseResponsesOutput(raw) : parseOutput(raw);
 }
 
 const JUDGE_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -178,7 +250,8 @@ export async function judgeLabeledOutputs(
   rubric: string,
   outputs: Array<{ id: string; output: LiveOutput }>,
   config: JudgeClientConfig,
-  fetchImpl?: typeof fetch
+  fetchImpl?: typeof fetch,
+  transport: LiveTransport = "chat"
 ): Promise<Record<string, number>> {
   if (outputs.length < 2 || outputs.length > 26) throw new Error("judge outputs must contain between 2 and 26 items");
   const labels = [...JUDGE_LABELS.slice(0, outputs.length)];
@@ -206,7 +279,8 @@ export async function judgeLabeledOutputs(
       ],
     },
     config,
-    fetchImpl
+    fetchImpl,
+    transport
   );
   if (judged.terminalState !== "completed") throw new Error(`judge response terminal state is ${judged.terminalState}`);
   const scores = parseJudgeScores(judged.text, labels);
@@ -219,7 +293,8 @@ export async function judgeOutputs(
   input: JudgeCaseInput,
   outputs: Record<StrategyName, LiveOutput>,
   config: JudgeClientConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  transport: LiveTransport = "chat"
 ): Promise<Record<StrategyName, number>> {
   const names: StrategyName[] = ["router", "always-frontier", "always-cheap"];
   const scored = await judgeLabeledOutputs(
@@ -227,7 +302,8 @@ export async function judgeOutputs(
     input.rubric,
     names.map((name) => ({ id: name, output: outputs[name] })),
     config,
-    fetchImpl
+    fetchImpl,
+    transport
   );
   return {
     router: scored.router,
@@ -324,15 +400,24 @@ async function generateCase(
     StrategyName,
     ReplayTurnResult
   >;
-  const settled = await Promise.allSettled(
-    STRATEGIES.map((strategy) =>
-      requestCompletion(
-        { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
-        config,
-        fetchImpl
-      )
-    )
-  );
+  const settled: PromiseSettledResult<LiveOutput>[] = [];
+  const gapMs = Number(process.env.AUTO_ROUTER_EVAL_GAP_MS ?? 0);
+  for (const strategy of STRATEGIES) {
+    if (gapMs > 0 && settled.length) await new Promise((resolve) => setTimeout(resolve, gapMs));
+    try {
+      settled.push({
+        status: "fulfilled",
+        value: await requestCompletion(
+          { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
+          config,
+          fetchImpl,
+          liveTransportFor(dataset, selections[strategy].modelId)
+        ),
+      });
+    } catch (reason) {
+      settled.push({ status: "rejected", reason });
+    }
+  }
   const errors = settled.flatMap((result, index) => (result.status === "rejected" ? [`${STRATEGIES[index]}: ${errorMessage(result.reason)}`] : []));
   const base = { id: key, sessionId, turnId: turn.id, weight: turn.weight ?? 1 };
   if (errors.length) return { ...base, complete: false, errors };
@@ -346,7 +431,8 @@ async function generateCase(
   if (terminalErrors.length) return { ...base, complete: false, errors: terminalErrors };
   let judged: Record<StrategyName, number>;
   try {
-    judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl);
+    if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+    judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl, liveTransportFor(dataset));
   } catch (error) {
     return { ...base, complete: false, errors: [`judge: ${errorMessage(error)}`] };
   }
@@ -378,7 +464,9 @@ export async function runLiveEvaluation(
 ): Promise<LiveEvalResult> {
   const plan = planLiveEvaluation(dataset, replay);
   const cases: LiveCaseResult[] = [];
+  const gapMs = Number(process.env.AUTO_ROUTER_EVAL_GAP_MS ?? 0);
   for (const { sessionId, turn } of liveTurns(dataset)) {
+    if (gapMs > 0 && cases.length) await new Promise((resolve) => setTimeout(resolve, gapMs));
     cases.push(await generateCase(dataset, replay, sessionId, turn, config, fetchImpl));
   }
   const qualityCases = cases.flatMap((item) =>

@@ -1314,6 +1314,53 @@ describe("proxy", () => {
     expect(res.body).toContain("event: message_stop");
   });
 
+  it("treats POST /messages like Anthropic Messages, not Chat Completions", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          apiKey: "sk-test",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "chatcmpl_ok",
+                choices: [{ finish_reason: "stop", message: { role: "assistant", content: "OK" } }],
+              }),
+            ),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/messages", {
+        model: "auto",
+        max_tokens: 32,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never,
+    );
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.body).toContain("event: message_start");
+    expect(res.body).toContain('"type":"message_start"');
+    expect(res.body).not.toContain("chat.completion.chunk");
+  });
+
   it("uses Anthropic Messages for explicit Anthropic targets", async () => {
     const outbound: Array<{ url: string; headers: Record<string, string>; body: any }> = [];
     const server = createProxyServer({
@@ -2094,5 +2141,298 @@ describe("proxy", () => {
     expect(all).toContain("Hello ");
     expect(all).toContain("World");
     expect(writes.length).toBeGreaterThan(1);
+  });
+
+  it("serves a settings page without leaking env values", async () => {
+    process.env.OPENAI_API_KEY = "sk-secret-test";
+    const dir = mkdtempSync(join(tmpdir(), "ar-settings-"));
+    writeFileSync(join(dir, ".env"), "OPENAI_API_KEY=sk-secret-test\n", { mode: 0o600 });
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath: join(dir, ".env"),
+      backends: { opencode: { baseUrl: "https://opencode.ai/zen", fetchImpl: async () => new Response("{}") } },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.body).toContain("auto-router");
+    expect(res.body).not.toContain("sk-secret-test");
+  });
+
+  it("saves non-empty settings to the env file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-settings-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: { opencode: { baseUrl: "https://opencode.ai/zen", fetchImpl: async () => new Response("{}") } },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/settings";
+    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-ant-1&GEMINI_API_KEY="));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(303);
+    expect(readFileSync(envPath, "utf8")).toContain("ANTHROPIC_API_KEY=sk-ant-1");
+    expect(readFileSync(envPath, "utf8")).not.toContain("GEMINI_API_KEY=");
+  });
+
+  it("attaches OpenCode auth token when backend apiKey is missing", async () => {
+    const previous = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const dir = mkdtempSync(join(tmpdir(), "ar-auth-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "oauth", access: "tok-from-auth" } }));
+    let authorization = "";
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (_url, init) => {
+            authorization = String(new Headers(init?.headers).get("authorization") ?? "");
+            return new Response(JSON.stringify({
+              choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+            }), { headers: { "content-type": "application/json" } });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+    expect(authorization).toBe("Bearer tok-from-auth");
+    if (previous) process.env.OPENAI_API_KEY = previous;
+  });
+
+  it("rejects unknown login providers", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/login/cursor";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("serves a connect page and saves an API key to auth.json", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-connect-"));
+    const authPath = join(dir, "auth.json");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const pageReq = new IncomingMessage(new Socket());
+    pageReq.method = "GET";
+    pageReq.url = "/connect/openai";
+    pageReq.headers = {};
+    queueMicrotask(() => pageReq.emit("end"));
+    const pageRes = collectRes();
+    await server.handle(pageReq, pageRes as never);
+    expect(pageRes.statusCode).toBe(200);
+    expect(pageRes.body).toContain("Connect OpenAI");
+    expect(pageRes.body).toContain("Subscription login");
+
+    const claudeReq = new IncomingMessage(new Socket());
+    claudeReq.method = "GET";
+    claudeReq.url = "/connect/anthropic";
+    claudeReq.headers = {};
+    queueMicrotask(() => claudeReq.emit("end"));
+    const claudeRes = collectRes();
+    await server.handle(claudeReq, claudeRes as never);
+    expect(claudeRes.statusCode).toBe(200);
+    expect(claudeRes.body).toContain("Connect Claude");
+    expect(claudeRes.body).toContain("Authorization code");
+
+    const geminiReq = new IncomingMessage(new Socket());
+    geminiReq.method = "GET";
+    geminiReq.url = "/connect/google";
+    geminiReq.headers = {};
+    queueMicrotask(() => geminiReq.emit("end"));
+    const geminiRes = collectRes();
+    await server.handle(geminiReq, geminiRes as never);
+    expect(geminiRes.statusCode).toBe(200);
+    expect(geminiRes.body).toContain("Connect Gemini");
+    expect(geminiRes.body).toContain("Subscription login");
+
+    const keyReq = new IncomingMessage(new Socket());
+    keyReq.method = "POST";
+    keyReq.url = "/connect/openai/key";
+    keyReq.headers = { "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      keyReq.emit("data", Buffer.from("key=sk-test-connect"));
+      keyReq.emit("end");
+    });
+    const keyRes = collectRes();
+    await server.handle(keyReq, keyRes as never);
+    expect(keyRes.statusCode).toBe(303);
+    expect(readFileSync(authPath, "utf8")).toContain("sk-test-connect");
+  });
+
+  it("does not crash on GET /favicon.ico", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () => {
+            throw new Error("should not fetch");
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/favicon.ico";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("fails over from OpenCode Zen billing errors", async () => {
+    let openaiCalls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ error: { message: "Add a payment method to use this model." } }), { status: 400 }),
+        },
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () => {
+            openaiCalls += 1;
+            return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: (_state, cat) => {
+        const zen = cat.models.find((model) => (model.runtimeId ?? model.id).startsWith("opencode/"));
+        return {
+          modelId: zen?.runtimeId ?? "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        } as never;
+      },
+    });
+    const req = fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(200);
+    expect(openaiCalls).toBe(1);
+    expect(res.body).toContain("ok");
   });
 });

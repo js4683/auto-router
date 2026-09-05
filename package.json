@@ -8,6 +8,7 @@
     "test": "npm run test --workspaces",
     "test:all": "npm run test --workspaces --if-present",
     "eval": "npm run build --workspace=@auto-router/router-core && npm run build --workspace=@auto-router/eval && node packages/eval/dist/src/cli.js",
+    "install-clients": "npm run build --workspace=@auto-router/install && npm run start --workspace=@auto-router/install",
     "catalog:refresh": "node packages/router-core/dist/catalog-cli.js"
   },
   "devDependencies": {

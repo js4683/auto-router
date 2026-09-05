@@ -158,6 +158,82 @@ describe("requestCompletion", () => {
     ).rejects.toThrow("provider request timed out");
     expect(calls).toBe(1);
   });
+
+  it("posts chat completions by default", async () => {
+    let url = "";
+    let body: any;
+    await requestCompletion(
+      { model: "live/cheap", messages: [{ role: "user", content: "hi" }] },
+      { baseUrl: "https://example.com/v1", apiKey: "secret", timeoutMs: 1000, maxOutputTokens: 64 },
+      async (input, init) => {
+        url = String(input);
+        body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 1 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+    );
+    expect(url).toBe("https://example.com/v1/chat/completions");
+    expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("sends x-goog-api-key for Gemini OpenAI-compatible hosts", async () => {
+    let headers: Headers | undefined;
+    await requestCompletion(
+      { model: "gemini-3.6-flash", messages: [{ role: "user", content: "hi" }] },
+      { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "google-test-key", timeoutMs: 1000, maxOutputTokens: 64 },
+      async (_input, init) => {
+        headers = new Headers(init?.headers);
+        return new Response(chatResponse("PING"));
+      }
+    );
+    expect(headers?.get("authorization")).toBe("Bearer google-test-key");
+    expect(headers?.get("x-goog-api-key")).toBe("google-test-key");
+  });
+
+  it("posts responses and maps output_text plus usage", async () => {
+    let url = "";
+    let body: any;
+    const output = await requestCompletion(
+      { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hi" }], temperature: 0, responseFormat: { type: "json_object" } },
+      { baseUrl: "https://opencode.ai/zen/v1", apiKey: "secret", timeoutMs: 1000, maxOutputTokens: 64 },
+      async (input, init) => {
+        url = String(input);
+        body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          status: "completed",
+          output_text: "{\"ok\":true}",
+          usage: { input_tokens: 8, output_tokens: 2, input_tokens_details: { cached_tokens: 1 } },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+      "responses"
+    );
+    expect(url).toBe("https://opencode.ai/zen/v1/responses");
+    expect(body.model).toBe("gpt-5.6-sol");
+    expect(body.input).toEqual([{ role: "user", content: "hi" }]);
+    expect(body.max_output_tokens).toBe(64);
+    expect(body.text).toEqual({ format: { type: "json_object" } });
+    expect(output).toMatchObject({
+      text: "{\"ok\":true}",
+      terminalState: "completed",
+      usage: { inputTokens: 8, outputTokens: 2, cacheReadInputTokens: 1, cacheWriteInputTokens: 0 },
+    });
+  });
+
+  it("does not retry a responses timeout", async () => {
+    let calls = 0;
+    await expect(requestCompletion(
+      { model: "gpt-5.6-sol", messages: [{ role: "user", content: "hi" }] },
+      { baseUrl: "https://opencode.ai/zen/v1", apiKey: "secret", timeoutMs: 5, maxOutputTokens: 16 },
+      async () => {
+        calls += 1;
+        throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+      },
+      "responses"
+    )).rejects.toThrow("provider request timed out");
+    expect(calls).toBe(1);
+  });
 });
 
 describe("judgeOutputs", () => {

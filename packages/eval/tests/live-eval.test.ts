@@ -190,4 +190,36 @@ describe("live evaluation orchestration", () => {
     delete missingMessages.sessions[0].turns[0].messages;
     expect(() => planLiveEvaluation(missingMessages, replayDataset(missingMessages))).toThrow("turn turn-1 has no live messages");
   });
+
+  it("uses responses for default transport and chat for an override", async () => {
+    const dataset = liveFixture();
+    dataset.liveTransportDefault = "responses";
+    dataset.liveTransports = { "provider/cheap": "chat" };
+    const replay = replayDataset(dataset);
+    const urls: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      urls.push(String(input));
+      const body = JSON.parse(String(init?.body));
+      if (String(input).endsWith("/responses")) {
+        if (body.model === "live/judge") {
+          const request = JSON.parse(body.input[1].content);
+          const scores = Object.fromEntries(request.responses.map((item: any) => [item.label, 80]));
+          return new Response(JSON.stringify({ status: "completed", output_text: JSON.stringify({ scores }) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          status: "completed",
+          output_text: `${body.model}-answer`,
+          usage: { input_tokens: 100, output_tokens: 20 },
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: `${body.model}-answer` }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 100, completion_tokens: 20 },
+      }), { status: 200 });
+    };
+    const result = await runLiveEvaluation(dataset, replay, config, fetchImpl);
+    expect(result.cases[0]?.complete).toBe(true);
+    expect(urls.filter((url) => url.endsWith("/chat/completions")).length).toBeGreaterThan(0);
+    expect(urls.filter((url) => url.endsWith("/responses")).length).toBeGreaterThan(0);
+  });
 });

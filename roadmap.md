@@ -9,7 +9,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 |-------|-------------|--------|
 | **0** | `router-core` (TS): `classify()` + policy config + Tier-0 heuristics + context-fit + task stickiness | ~3-4 days |
 | **0.5** | **Model catalog**: Artificial Analysis client, live provider catalog, value/cost strategies + window registry join | ~2-3 days |
-| **1** | opencode plugin adapter with task-boundary recommendations and decision logging | ~2-3 days |
+| **1** | opencode plugin adapter with task-boundary selection/application and decision logging | ~2-3 days |
 | **2** | OpenAI-compatible proxy adapter (any harness via base_url) | ~2-3 days |
 | **3** | Eval harness: replay real sessions, measure cost saved vs quality retained | ~3 days |
 | **4** | Tier-1 embedding classifier (code complete; opt-in, disabled by default) | activation later |
@@ -34,12 +34,13 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 
 - [x] Plugin scaffold (`@opencode-ai/plugin`), context hook wiring
 - [x] Map opencode session -> `SessionState`
-- [x] Lock one target per task and emit at most one recommendation per task
+- [x] Lock one target per task and emit at most one `TASK RECOMMEND`
 - [x] Config surface in `opencode.json` (tier/task policy, stickiness, guards)
 - [x] Live connected-provider discovery with bounded fallback
 - [x] Decision logging (target model and actual runtime model)
-- [ ] Apply the locked target automatically when OpenCode exposes a routing hook
-- [ ] Manual multi-task test after upstream model-routing support
+- [x] Apply each rewritten message through mutable `chat.message.output.message.model`
+      and confirm it with observational `chat.params`
+- [x] Manual multi-task test on stock OpenCode 1.18.27 with connected providers
 
 ## Phase 2 — proxy adapter
 
@@ -73,14 +74,13 @@ unchecked benchmark gate passes.
 - [ ] production artifact trained
 - [ ] production artifact activation gate passed
 - [ ] Tier-2 LLM judge (flagged)
-- [ ] Upstream `llm.request.before` hook to opencode (ref #45764) if v2 hook is
-      insufficient
 - [ ] Go rewrite of the proxy for perf / single-binary distribution
 
 ## Key references
 
 - opencode plugins: https://opencode.ai/docs/plugins/ (+ v2 build/plugins)
-- Feature request (model routing hook): `sst/opencode#45764`
+- Broader per-request hook request (not required by the native apply path):
+  `anomalyco/opencode#45764`
 - RouteLLM: https://github.com/lm-sys/RouteLLM
 - Not-Diamond RoRF: https://github.com/Not-Diamond/RoRF
 - vLLM semantic-router (classification signals): https://github.com/vllm-project/semantic-router
