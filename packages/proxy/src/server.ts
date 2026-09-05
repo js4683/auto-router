@@ -16,11 +16,14 @@ import {
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
 import { createAvengersRuntime } from "./avengers-runtime.js";
-import { providerLoginSet, resolveCredential, UI_PROVIDERS } from "./credentials.js";
+import { loginIsOAuth, providerLoginSet, resolveCredential, resolveGoogleProject, UI_PROVIDERS } from "./credentials.js";
 import { defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
-import { loginProviderId, startProviderLogin } from "./login.js";
+import { defaultAuthPath, readAuthFile, writeAuthEntry } from "./auth-store.js";
+import { completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, ensureGoogleProject, pollOAuth, startOAuth } from "./oauth.js";
+import { connectPage } from "./connect-page.js";
+import { loginProviderId } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
 
 export interface ProxyBackend {
@@ -110,8 +113,8 @@ type IngressProtocol = "chat" | "anthropic" | "responses";
 
 function ingressProtocol(url: string | undefined): IngressProtocol {
   const path = url?.split("?", 1)[0];
-  if (path === "/v1/messages") return "anthropic";
-  if (path === "/v1/responses") return "responses";
+  if (path === "/v1/messages" || path === "/messages") return "anthropic";
+  if (path === "/v1/responses" || path === "/responses") return "responses";
   return "chat";
 }
 
@@ -137,6 +140,37 @@ function inboundCredentials(
   if (!matches) return {};
   const authorization = headers.authorization ?? headers.Authorization;
   return { authorization, token: bearerToken(authorization) };
+}
+
+function chatgptAccountId(token: string): string | undefined {
+  const parts = token.split(".");
+  if (parts.length < 2) return undefined;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString()) as {
+      chatgpt_account_id?: string;
+      "https://api.openai.com/auth"?: { chatgpt_account_id?: string };
+    };
+    return claims.chatgpt_account_id || claims["https://api.openai.com/auth"]?.chatgpt_account_id;
+  } catch {
+    return undefined;
+  }
+}
+
+function isZenBillingError(status: number, payload: string): boolean {
+  if (status < 400) return false;
+  const text = payload.toLowerCase();
+  return text.includes("payment method") || text.includes("creditserror") || text.includes("add a payment");
+}
+
+function catalogExcluding(catalog: Catalog, skipped: Set<string>): Catalog {
+  if (skipped.size === 0) return catalog;
+  const models = catalog.models.filter((model) => {
+    const id = model.runtimeId ?? model.id;
+    const slash = id.indexOf("/");
+    const provider = slash >= 0 ? id.slice(0, slash) : "";
+    return !skipped.has(provider);
+  });
+  return models.length > 0 ? { ...catalog, models } : catalog;
 }
 
 function resolveProvider(modelId: string): { provider: string; bareModel: string } {
@@ -520,13 +554,38 @@ function upstreamRequest(
   provider: string,
   model: string,
   token: string | undefined,
-  inboundPath: string | undefined
+  inboundPath: string | undefined,
+  projectId?: string,
+  googleOAuth?: boolean,
+  openaiOAuth?: boolean,
+  anthropicOAuth?: boolean,
 ): UpstreamRequest {
+  if (provider === "openai" && openaiOAuth) {
+    const converted = protocol === "responses" ? { ...originalBody, model } : zenRequest(normalizedBody, model);
+    const { max_output_tokens: _max, temperature: _temp, top_p: _top, ...rest } = converted as Record<string, unknown>;
+    const body = { ...rest, store: false, stream: true };
+    return {
+      body,
+      path: "https://chatgpt.com/backend-api/codex/responses",
+      translateResponse: protocol !== "responses",
+      useGemini: false,
+    };
+  }
   if (provider === "openai" && protocol === "responses") {
     return { body: { ...originalBody, model }, path: "/v1/responses", translateResponse: false, useGemini: false };
   }
   if (provider === "google") {
     const isStream = !!normalizedBody.stream && protocol === "chat";
+    if (token && googleOAuth) {
+      const action = isStream ? "streamGenerateContent" : "generateContent";
+      const alt = isStream ? "?alt=sse" : "";
+      return {
+        body: { model, ...(projectId ? { project: projectId } : {}), request: geminiRequest(normalizedBody) },
+        path: `https://cloudcode-pa.googleapis.com/v1internal:${action}${alt}`,
+        translateResponse: true,
+        useGemini: true,
+      };
+    }
     const key = token ? `?key=${encodeURIComponent(token)}` : "";
     const alt = isStream ? (key ? "&alt=sse" : "?alt=sse") : "";
     const action = isStream ? "streamGenerateContent" : "generateContent";
@@ -534,11 +593,16 @@ function upstreamRequest(
   }
   if (provider === "anthropic") {
     const native = protocol === "anthropic";
+    const messagesPath = anthropicOAuth ? "/v1/messages?beta=true" : "/v1/messages";
     if (native) {
-      return { body: { ...originalBody, model }, path: "/v1/messages", translateResponse: !native, useGemini: false };
+      return { body: { ...originalBody, model }, path: messagesPath, translateResponse: !native, useGemini: false };
     }
     const body: any = { ...anthropicRequest(normalizedBody, model), stream: false };
-    return { body, path: "/v1/messages", translateResponse: !native, useGemini: false };
+    if (anthropicOAuth) {
+      const prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
+      body.system = body.system ? `${prefix}\n\n${body.system}` : prefix;
+    }
+    return { body, path: messagesPath, translateResponse: !native, useGemini: false };
   }
   if (provider === "opencode") {
     const body: any = { ...zenRequest(normalizedBody, model), stream: false };
@@ -639,6 +703,30 @@ function html(res: ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
+function parseSsePayload(raw: string): unknown {
+  let last: Record<string, unknown> | undefined;
+  let message: unknown;
+  let text = "";
+  for (const block of raw.split("\n\n")) {
+    const line = block.split("\n").find((part) => part.startsWith("data:"));
+    if (!line) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data) as { type?: string; text?: string; item?: unknown; response?: Record<string, unknown> };
+      if (parsed.type === "response.output_text.done" && parsed.text) text += parsed.text;
+      if (parsed.type === "response.output_item.done" && parsed.item) message = parsed.item;
+      last = parsed.response ?? parsed;
+    } catch {}
+  }
+  if (!last) return undefined;
+  const output = Array.isArray(last.output) ? last.output : [];
+  if (output.length) return last;
+  if (message) return { ...last, output: [message] };
+  if (text) return { ...last, output: [{ type: "message", content: [{ type: "output_text", text }] }] };
+  return last;
+}
+
 function json(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   if (typeof res.writeHead === "function") res.writeHead(status, { "content-type": "application/json" });
@@ -650,6 +738,21 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 function nativeResponse(payload: any, provider: string): { content: string; refusal?: string } {
+  if (provider === "openai" && Array.isArray(payload?.output)) {
+    const output = payload.output;
+    const parts = output
+      .filter((item: any) => item?.type === "message" && Array.isArray(item.content))
+      .flatMap((item: any) => item.content);
+    const content = parts
+      .filter((part: any) => part?.type === "output_text")
+      .map((part: any) => part.text ?? "")
+      .join("");
+    const refusal = parts
+      .filter((part: any) => part?.type === "refusal")
+      .map((part: any) => part.refusal ?? "")
+      .join("");
+    return { content, ...(refusal ? { refusal } : {}) };
+  }
   if (provider === "openai") {
     const message = payload?.choices?.[0]?.message;
     return { content: messageText(message?.content) ?? "", ...(message?.refusal ? { refusal: message.refusal } : {}) };
@@ -690,6 +793,12 @@ type ChatFinishReason = "stop" | "length" | "content_filter" | "tool_calls";
 
 function nativeFinishReason(payload: any, provider: string, refusal?: string, toolCalls: unknown[] = []): ChatFinishReason {
   if (toolCalls.length) return "tool_calls";
+  if (provider === "openai" && Array.isArray(payload?.output)) {
+    if (refusal) return "content_filter";
+    if (!payload?.status || payload.status === "completed") return "stop";
+    if (payload.status === "incomplete" && payload?.incomplete_details?.reason === "max_output_tokens") return "length";
+    return "content_filter";
+  }
   if (provider === "openai") {
     const reason = payload?.choices?.[0]?.finish_reason;
     if (reason === "length") return "length";
@@ -777,6 +886,7 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
 }
 
 function nativeToolCalls(payload: any, provider: string): Array<{ id: string; name: string; arguments: string }> {
+  if (provider === "openai" && Array.isArray(payload?.output)) return zenFunctionCalls(payload);
   if (provider === "openai") {
     const calls = payload?.choices?.[0]?.message?.tool_calls;
     return (Array.isArray(calls) ? calls : [])
@@ -916,13 +1026,16 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   close(): void;
 } {
+  const skippedProviders = new Set<string>();
+
   async function decide(req: IncomingMessage, body: any, text: string): Promise<SelectionResult> {
     const id = sessionId(req, text);
     const stored = opts.sessions.get(id);
     const isNewSession = !stored.taskTarget;
     const state = sessionState(body, text, isNewSession);
     const boundary = detectBoundary(state, undefined, stored.prevMessage);
-    if (stored.taskTarget && !boundary.isBoundary) {
+    const lockedProvider = stored.taskTarget ? resolveProvider(stored.taskTarget).provider : "";
+    if (stored.taskTarget && !boundary.isBoundary && !skippedProviders.has(lockedProvider)) {
       return {
         modelId: stored.taskTarget,
         tier: "simple",
@@ -960,7 +1073,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       prediction = undefined;
     }
 
-    const result = opts.select(state, opts.catalog, opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
+    const result = opts.select(state, catalogExcluding(opts.catalog, skippedProviders), opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
     opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
     return result;
   }
@@ -987,16 +1100,90 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         html(res, 200, settingsPage(providers, true));
         return;
       }
-      if (req.method === "GET" && path?.startsWith("/login/")) {
-        const id = path.slice("/login/".length);
-        if (!loginProviderId(id) || !startProviderLogin(id)) {
+      if (path?.startsWith("/connect/")) {
+        const parts = path.slice("/connect/".length).split("/");
+        const id = parts[0] ?? "";
+        const rest = parts.slice(1).join("/");
+        const provider = CONNECT_PROVIDERS[id];
+        const authFile = opts.authPath ?? defaultAuthPath();
+        if (!provider) {
           json(res, 404, { error: "unknown provider" });
           return;
         }
-        if (typeof res.writeHead === "function") res.writeHead(303, { location: "/?login=1" });
+        if (req.method === "GET" && rest === "") {
+          html(res, 200, connectPage({ id, label: provider.label, consoleUrl: provider.consoleUrl, oauth: provider.oauth }));
+          return;
+        }
+        if (req.method === "POST" && rest === "key") {
+          const raw = await readBody(req);
+          const key = new URLSearchParams(raw).get("key") ?? "";
+          if (!key) {
+            json(res, 400, { error: "key required" });
+            return;
+          }
+          writeAuthEntry(authFile, provider.authId, { type: "api", key });
+          if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
+          else {
+            res.statusCode = 303;
+            res.setHeader?.("location", "/");
+          }
+          res.end();
+          return;
+        }
+        if (req.method === "POST" && rest === "oauth/start") {
+          const started = await startOAuth(id);
+          json(res, "error" in started ? 400 : 200, started);
+          return;
+        }
+        if (req.method === "POST" && rest === "oauth/code") {
+          const raw = await readBody(req);
+          const params = new URLSearchParams(raw);
+          const result = await completeOAuthCode(params.get("id") ?? "", params.get("code") ?? "", authFile);
+          if (result.done) {
+            if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
+            else {
+              res.statusCode = 303;
+              res.setHeader?.("location", "/");
+            }
+            res.end();
+            return;
+          }
+          json(res, 400, result);
+          return;
+        }
+        if (req.method === "GET" && rest === "oauth/callback") {
+          const params = new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
+          const result = await completeGoogleCallback(params.get("state") ?? "", params.get("code") ?? "", authFile);
+          if (result.done) {
+            if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
+            else {
+              res.statusCode = 303;
+              res.setHeader?.("location", "/");
+            }
+            res.end();
+            return;
+          }
+          json(res, 400, result);
+          return;
+        }
+        if (req.method === "GET" && rest === "oauth/poll") {
+          const sessionId = new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("id") ?? "";
+          json(res, 200, await pollOAuth(sessionId, authFile));
+          return;
+        }
+        json(res, 404, { error: "not found" });
+        return;
+      }
+      if (req.method === "GET" && path?.startsWith("/login/")) {
+        const id = path.slice("/login/".length);
+        if (!loginProviderId(id) || !CONNECT_PROVIDERS[id]) {
+          json(res, 404, { error: "unknown provider" });
+          return;
+        }
+        if (typeof res.writeHead === "function") res.writeHead(303, { location: `/connect/${id}` });
         else {
           res.statusCode = 303;
-          res.setHeader?.("location", "/?login=1");
+          res.setHeader?.("location", `/connect/${id}`);
         }
         res.end();
         return;
@@ -1043,7 +1230,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const text = lastUserText(messages);
       const id = sessionId(req, text);
       const state = sessionState(normalizedBody, text, !opts.sessions.get(id).taskTarget);
-      const result = await decide(req, normalizedBody, text);
+      let result = await decide(req, normalizedBody, text);
 
       if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
@@ -1065,6 +1252,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         });
       }
 
+      for (let attempt = 0; attempt < 2; attempt++) {
       const { provider, bareModel } = resolveProvider(result.modelId);
       const backend = opts.backends[provider];
       if (!backend) {
@@ -1073,25 +1261,61 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       }
 
       const inbound = inboundCredentials(req.headers, protocol, provider);
-      const resolved = backend.apiKey ?? resolveCredential(result.modelId, {
-        env: process.env,
-        authPath: opts.authPath,
-        claudePath: opts.claudePath,
-      });
+      const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
+      const loginToken = resolveCredential(result.modelId, credOpts);
+      const oauth = Boolean(loginToken && loginIsOAuth(provider, credOpts) && provider !== "google");
+      const resolved = loginToken ?? backend.apiKey;
       const authorization = resolved ? `Bearer ${resolved}` : inbound.authorization;
       const token = resolved ?? inbound.token;
-      const upstreamRequestPlan = upstreamRequest(protocol, body, normalizedBody, provider, bareModel, token, req.url);
+      let googleProject = resolveGoogleProject(credOpts);
+      if (oauth && provider === "google" && token && !googleProject) {
+        googleProject = await ensureGoogleProject(token).catch(() => undefined);
+        if (googleProject) {
+          const authFile = opts.authPath ?? defaultAuthPath();
+          const current = readAuthFile(authFile).google;
+          writeAuthEntry(authFile, "google", {
+            ...(current && typeof current === "object" ? current : {}),
+            projectId: googleProject,
+          });
+        }
+      }
+      const upstreamRequestPlan = upstreamRequest(
+        protocol,
+        body,
+        normalizedBody,
+        provider,
+        bareModel,
+        token,
+        req.url,
+        googleProject,
+        oauth && provider === "google",
+        oauth && provider === "openai",
+        oauth && provider === "anthropic",
+      );
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (provider === "anthropic") {
-        if (token) headers["x-api-key"] = token;
         headers["anthropic-version"] = "2023-06-01";
         const beta = req.headers["anthropic-beta"];
-        if (protocol === "anthropic" && typeof beta === "string") headers["anthropic-beta"] = beta;
+        if (oauth) {
+          headers.authorization = `Bearer ${token}`;
+          headers["anthropic-beta"] = ["oauth-2025-04-20", typeof beta === "string" ? beta : ""].filter(Boolean).join(",");
+          headers["user-agent"] = "claude-cli/2.1.2 (external, cli)";
+        } else {
+          if (token) headers["x-api-key"] = token;
+          if (protocol === "anthropic" && typeof beta === "string") headers["anthropic-beta"] = beta;
+        }
+      } else if (provider === "google" && oauth) {
+        headers.authorization = `Bearer ${token}`;
       } else if (!upstreamRequestPlan.useGemini && typeof authorization === "string" && authorization) {
         headers.authorization = authorization;
+        if (oauth && provider === "openai" && token) {
+          const account = chatgptAccountId(token);
+          if (account) headers["chatgpt-account-id"] = account;
+        }
       }
       const fetchImpl = backend.fetchImpl ?? fetch;
-      const upstream = await fetchImpl(`${backend.baseUrl}${upstreamRequestPlan.path}`, {
+      const upstreamUrl = upstreamRequestPlan.path.startsWith("http") ? upstreamRequestPlan.path : `${backend.baseUrl}${upstreamRequestPlan.path}`;
+      const upstream = await fetchImpl(upstreamUrl, {
         method: req.method,
         headers,
         body: JSON.stringify(upstreamRequestPlan.body),
@@ -1194,15 +1418,30 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
       const payload = await upstream.text();
       if (upstream.ok && upstreamRequestPlan.translateResponse) {
-        const parsed = JSON.parse(payload);
+        const parsed =
+          isUpstreamEventStream || payload.trimStart().startsWith("event:") || payload.trimStart().startsWith("data:")
+            ? parseSsePayload(payload)
+            : JSON.parse(payload);
+        if (parsed == null) {
+          json(res, 502, { error: "empty upstream stream" });
+          return;
+        }
         if (protocol === "chat") writeChatCompletion(res, normalizedBody, provider, bareModel, parsed);
         if (protocol === "anthropic") writeAnthropicMessage(res, normalizedBody, provider, bareModel, parsed);
         if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, parsed);
         return;
       }
+      if (attempt === 0 && provider === "opencode" && isZenBillingError(upstream.status, payload)) {
+        skippedProviders.add("opencode");
+        opts.sessions.set(id, { taskTarget: null, prevMessage: text });
+        result = await decide(req, normalizedBody, text);
+        continue;
+      }
       if (typeof res.writeHead === "function") res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
       else res.statusCode = upstream.status;
       res.end(payload);
+      return;
+      }
     },
     close() {
       void opts.recorder?.flush().catch(() => {
@@ -1219,6 +1458,15 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
   }
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
+  const authPath = join(homedir(), ".local/share/opencode/auth.json");
+  const allowed = new Set(["openai", "anthropic", "xai"]);
+  if (resolveCredential("google/gemini", { env: process.env, authPath })) allowed.add("google");
+  if (resolveCredential("opencode/muse-spark-1.3-contributor-free", { env: process.env, authPath })) allowed.add("opencode");
+  catalog.models = catalog.models.filter((model) => {
+    const id = model.runtimeId ?? model.id;
+    const provider = id.slice(0, Math.max(0, id.indexOf("/")));
+    return allowed.has(provider);
+  });
   const runtime = createAvengersRuntime({
     config,
     env: process.env,
@@ -1237,10 +1485,11 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
         baseUrl: process.env.GEMINI_BASE_URL ?? "https://generativelanguage.googleapis.com/v1beta",
         apiKey: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY,
       },
+      xai: { baseUrl: process.env.XAI_BASE_URL ?? "https://api.x.ai", apiKey: process.env.XAI_API_KEY },
     },
     rankAvengers: runtime ? (text) => runtime.rank(text) : undefined,
     recorder: createProxyRecorderFromEnv(),
-    authPath: join(homedir(), ".local/share/opencode/auth.json"),
+    authPath,
     claudePath: join(homedir(), ".claude/.credentials.json"),
   };
 }

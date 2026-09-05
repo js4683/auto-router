@@ -19,8 +19,8 @@ export function settingsPage(providers: ProviderRow[], healthy: boolean): string
     <h2>${p.label}</h2>
     <div class="pills">${pill(p.login, "login", "no login")} ${pill(p.envSet, "api key", "no key")}</div>
   </div>
-  <p class="hint">Login first (opens Terminal). API key is fallback.</p>
-  <p><a class="login" href="/login/${p.id}">Log in with ${p.label}</a></p>
+  <p class="hint">Login first. API key is fallback.</p>
+  <p><a class="login" href="/connect/${p.id}">Log in with ${p.label}</a></p>
   <label for="${p.envKey}">${p.envKey}</label>
   <input id="${p.envKey}" name="${p.envKey}" type="password" autocomplete="off" spellcheck="false">
 </article>`

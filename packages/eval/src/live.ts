@@ -218,11 +218,18 @@ export async function requestCompletion(
         ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
         ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
       };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${config.apiKey}`,
+  };
+  if (new URL(url).hostname === "generativelanguage.googleapis.com") {
+    headers["x-goog-api-key"] = config.apiKey;
+  }
   let response: Response;
   try {
     response = await fetchImpl(url, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.apiKey}` },
+      headers,
       body: JSON.stringify(body),
       redirect: "error",
       signal: AbortSignal.timeout(config.timeoutMs),
@@ -393,16 +400,24 @@ async function generateCase(
     StrategyName,
     ReplayTurnResult
   >;
-  const settled = await Promise.allSettled(
-    STRATEGIES.map((strategy) =>
-      requestCompletion(
-        { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
-        config,
-        fetchImpl,
-        liveTransportFor(dataset, selections[strategy].modelId)
-      )
-    )
-  );
+  const settled: PromiseSettledResult<LiveOutput>[] = [];
+  const gapMs = Number(process.env.AUTO_ROUTER_EVAL_GAP_MS ?? 0);
+  for (const strategy of STRATEGIES) {
+    if (gapMs > 0 && settled.length) await new Promise((resolve) => setTimeout(resolve, gapMs));
+    try {
+      settled.push({
+        status: "fulfilled",
+        value: await requestCompletion(
+          { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
+          config,
+          fetchImpl,
+          liveTransportFor(dataset, selections[strategy].modelId)
+        ),
+      });
+    } catch (reason) {
+      settled.push({ status: "rejected", reason });
+    }
+  }
   const errors = settled.flatMap((result, index) => (result.status === "rejected" ? [`${STRATEGIES[index]}: ${errorMessage(result.reason)}`] : []));
   const base = { id: key, sessionId, turnId: turn.id, weight: turn.weight ?? 1 };
   if (errors.length) return { ...base, complete: false, errors };
@@ -416,6 +431,7 @@ async function generateCase(
   if (terminalErrors.length) return { ...base, complete: false, errors: terminalErrors };
   let judged: Record<StrategyName, number>;
   try {
+    if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
     judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl, liveTransportFor(dataset));
   } catch (error) {
     return { ...base, complete: false, errors: [`judge: ${errorMessage(error)}`] };
@@ -448,7 +464,9 @@ export async function runLiveEvaluation(
 ): Promise<LiveEvalResult> {
   const plan = planLiveEvaluation(dataset, replay);
   const cases: LiveCaseResult[] = [];
+  const gapMs = Number(process.env.AUTO_ROUTER_EVAL_GAP_MS ?? 0);
   for (const { sessionId, turn } of liveTurns(dataset)) {
+    if (gapMs > 0 && cases.length) await new Promise((resolve) => setTimeout(resolve, gapMs));
     cases.push(await generateCase(dataset, replay, sessionId, turn, config, fetchImpl));
   }
   const qualityCases = cases.flatMap((item) =>

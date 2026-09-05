@@ -16,4 +16,12 @@ describe("resolveCredential", () => {
   it("does not put tokens in thrown errors", () => {
     expect(resolveCredential("unknown/x", { env: {} })).toBeUndefined();
   });
+
+  it("does not use Google OAuth access tokens for Gemini API calls", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-cred-g-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ google: { type: "oauth", access: "ya29.token" } }));
+    expect(resolveCredential("google/gemini-2.5-flash", { env: {}, authPath })).toBeUndefined();
+    expect(resolveCredential("google/gemini-2.5-flash", { env: { GEMINI_API_KEY: "AIza-test" }, authPath })).toBe("AIza-test");
+  });
 });

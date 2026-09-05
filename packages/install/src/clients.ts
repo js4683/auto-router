@@ -50,7 +50,7 @@ export function runInstall(input: RunInstallInput): { written: string[]; notes: 
 
   if (input.clients.includes("codex")) {
     const path = join(input.home, ".codex/config.toml");
-    const block = `[model_providers.auto-router]\nname = "auto-router"\nbase_url = "${base}/v1"\nwire_api = "chat"`;
+    const block = `[model_providers.auto-router]\nname = "auto-router"\nbase_url = "${base}/v1"\nwire_api = "responses"`;
     const next = input.uninstall ? removeManagedBlock(readText(path)) : applyManagedBlock(readText(path), block);
     writeText(path, next);
     written.push(path);
@@ -58,6 +58,7 @@ export function runInstall(input: RunInstallInput): { written: string[]; notes: 
 
   if (input.clients.includes("opencode")) {
     const path = join(input.home, ".config/opencode/opencode.json");
+    const jsoncPath = join(input.home, ".config/opencode/opencode.jsonc");
     const json = readJson(path);
     const provider = { ...((json.provider as Record<string, unknown> | undefined) ?? {}) };
     if (input.uninstall) delete provider["auto-router"];
@@ -65,12 +66,17 @@ export function runInstall(input: RunInstallInput): { written: string[]; notes: 
       provider["auto-router"] = {
         npm: "@ai-sdk/anthropic",
         name: "auto-router",
-        options: { baseURL: base },
+        options: { baseURL: `${base}/v1`, apiKey: "auto-router" },
+        models: { auto: { name: "Auto Router" } },
       };
     }
     json.provider = provider;
     writeText(path, `${JSON.stringify(json, null, 2)}\n`);
     written.push(path);
+    const jsonc = readText(jsoncPath);
+    if (jsonc.includes('"provider"') && !jsonc.includes('"auto-router"')) {
+      notes.push(`Also add auto-router to ${jsoncPath} (OpenCode loads jsonc after json).`);
+    }
   }
 
   if (input.clients.includes("cursor")) {

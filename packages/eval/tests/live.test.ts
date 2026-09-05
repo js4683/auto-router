@@ -178,6 +178,20 @@ describe("requestCompletion", () => {
     expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
   });
 
+  it("sends x-goog-api-key for Gemini OpenAI-compatible hosts", async () => {
+    let headers: Headers | undefined;
+    await requestCompletion(
+      { model: "gemini-3.6-flash", messages: [{ role: "user", content: "hi" }] },
+      { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiKey: "google-test-key", timeoutMs: 1000, maxOutputTokens: 64 },
+      async (_input, init) => {
+        headers = new Headers(init?.headers);
+        return new Response(chatResponse("PING"));
+      }
+    );
+    expect(headers?.get("authorization")).toBe("Bearer google-test-key");
+    expect(headers?.get("x-goog-api-key")).toBe("google-test-key");
+  });
+
   it("posts responses and maps output_text plus usage", async () => {
     let url = "";
     let body: any;

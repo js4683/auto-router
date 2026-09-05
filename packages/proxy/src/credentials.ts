@@ -18,7 +18,7 @@ export const UI_PROVIDERS = [
   { id: "openai", label: "OpenAI", runtimeId: "openai/gpt-4o", envKey: "OPENAI_API_KEY" },
   { id: "anthropic", label: "Claude", runtimeId: "anthropic/claude-sonnet", envKey: "ANTHROPIC_API_KEY" },
   { id: "xai", label: "Grok", runtimeId: "xai/grok-4.6", envKey: "XAI_API_KEY" },
-  { id: "google", label: "Gemini", runtimeId: "google/gemini-3.6-flash", envKey: "GEMINI_API_KEY" },
+  { id: "google", label: "Gemini / Antigravity", runtimeId: "google/gemini-3.6-flash", envKey: "GEMINI_API_KEY" },
   { id: "opencode", label: "OpenCode Zen", runtimeId: "opencode/muse-spark-1.3-contributor-free", envKey: "OPENCODE_API_KEY" },
 ] as const;
 
@@ -41,9 +41,10 @@ function readJson(path: string): unknown {
   }
 }
 
-function fromAuthEntry(entry: unknown): string | undefined {
+function fromAuthEntry(entry: unknown, provider?: string): string | undefined {
   if (!entry || typeof entry !== "object") return undefined;
   const record = entry as Record<string, unknown>;
+  if (provider === "google" && record.type === "oauth") return stringField(record.key);
   return stringField(record.key) ?? stringField(record.token) ?? stringField(record.access);
 }
 
@@ -58,7 +59,7 @@ function tokenFromClaudeFile(path: string): string | undefined {
 function loginToken(provider: string, opts: ResolveCredentialOptions): string | undefined {
   const auth = opts.authPath ? readJson(opts.authPath) : undefined;
   if (auth && typeof auth === "object") {
-    const fromAuth = fromAuthEntry((auth as Record<string, unknown>)[provider]);
+    const fromAuth = fromAuthEntry((auth as Record<string, unknown>)[provider], provider);
     if (fromAuth) return fromAuth;
   }
   if (provider === "anthropic" && opts.claudePath) return tokenFromClaudeFile(opts.claudePath);
@@ -76,7 +77,28 @@ function envToken(provider: string, env: NodeJS.ProcessEnv): string | undefined 
 export function resolveCredential(runtimeId: string, opts: ResolveCredentialOptions): string | undefined {
   const provider = providerOf(runtimeId);
   if (!provider) return undefined;
+  if (provider === "google") return envToken(provider, opts.env) ?? loginToken(provider, opts);
   return loginToken(provider, opts) ?? envToken(provider, opts.env);
+}
+
+export function resolveGoogleProject(opts: ResolveCredentialOptions): string | undefined {
+  const auth = opts.authPath ? readJson(opts.authPath) : undefined;
+  if (auth && typeof auth === "object") {
+    const entry = (auth as Record<string, unknown>).google;
+    if (entry && typeof entry === "object") {
+      const projectId = stringField((entry as Record<string, unknown>).projectId);
+      if (projectId) return projectId;
+    }
+  }
+  return opts.env.GOOGLE_CLOUD_PROJECT || opts.env.GOOGLE_CLOUD_PROJECT_ID;
+}
+
+export function loginIsOAuth(provider: string, opts: ResolveCredentialOptions): boolean {
+  const auth = opts.authPath ? readJson(opts.authPath) : undefined;
+  if (!auth || typeof auth !== "object") return false;
+  const entry = (auth as Record<string, unknown>)[provider];
+  if (!entry || typeof entry !== "object") return false;
+  return (entry as Record<string, unknown>).type === "oauth";
 }
 
 export function providerLoginSet(provider: string, opts: ResolveCredentialOptions): boolean {
