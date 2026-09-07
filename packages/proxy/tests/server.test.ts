@@ -1035,7 +1035,7 @@ describe("proxy", () => {
       fakeReq(
         "/v1/messages?beta=true",
         {
-          model: "claude-sonnet-4-5",
+          model: "auto",
           max_tokens: 32,
           system: "Be brief.",
           messages: [{ role: "user", content: "implement the feature" }],
@@ -1131,7 +1131,7 @@ describe("proxy", () => {
     const res = collectRes();
     await server.handle(
       fakeReq("/v1/messages", {
-        model: "claude-sonnet-4-5",
+        model: "auto",
         max_tokens: 32,
         stream: true,
         messages: [{ role: "user", content: "implement the feature" }],
@@ -1418,6 +1418,61 @@ describe("proxy", () => {
     expect(JSON.parse(res.body)).toMatchObject({ choices: [{ message: { content: "OK" }, finish_reason: "stop" }] });
   });
 
+  it("pins Claude Code subscription models to Anthropic", async () => {
+    const outbound: string[] = [];
+    let selectCalls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "anthropic-backend-key",
+          fetchImpl: async (url) => {
+            outbound.push(String(url));
+            return new Response(
+              JSON.stringify({
+                id: "msg_ok",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "hi" }],
+                stop_reason: "end_turn",
+              }),
+            );
+          },
+        },
+        opencode: { baseUrl: "https://opencode.ai/zen", fetchImpl: async () => new Response("{}") },
+      },
+      select: () => {
+        selectCalls += 1;
+        return {
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        } as never;
+      },
+    });
+    const res = collectRes();
+    await server.handle(
+      fakeReq("/v1/messages", {
+        model: "claude-sonnet-4-5",
+        max_tokens: 8,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      res as never,
+    );
+    expect(selectCalls).toBe(0);
+    expect(outbound[0]).toBe("https://api.anthropic.com/v1/messages");
+    expect(res.statusCode).toBe(200);
+  });
+
   it("preserves native OpenAI Responses requests for OpenAI targets", async () => {
     const outbound: Array<{ url: string; body: any }> = [];
     const server = createProxyServer({
@@ -1548,7 +1603,7 @@ describe("proxy", () => {
 
     const responsesRes = collectRes();
     await server.handle(
-      fakeReq("/v1/responses?stream=false", { model: "openai/gpt-5.6-luna", input: "implement the feature" }),
+      fakeReq("/v1/responses?stream=false", { model: "auto", input: "implement the feature" }),
       responsesRes as never
     );
     expect(responsesRes.statusCode).toBe(200);
@@ -1596,7 +1651,7 @@ describe("proxy", () => {
     await server.handle(
       fakeReq(
         "/v1/messages?beta=true",
-        { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hello" }] },
+        { model: "auto", messages: [{ role: "user", content: "hello" }] },
         { "x-api-key": "anthropic-secret-key", authorization: "Bearer anthropic-oauth-token" }
       ),
       res as never
@@ -2174,6 +2229,9 @@ describe("proxy", () => {
     const res = collectRes();
     await server.handle(req, res as never);
     expect(res.body).toContain("auto-router");
+    expect(res.body).toContain("Quota Management");
+    expect(res.body).toContain("Recent routes");
+    expect(res.body).toContain("No routes yet.");
     expect(res.body).not.toContain("sk-secret-test");
   });
 
@@ -2212,6 +2270,120 @@ describe("proxy", () => {
     expect(res.statusCode).toBe(303);
     expect(readFileSync(envPath, "utf8")).toContain("ANTHROPIC_API_KEY=sk-ant-1");
     expect(readFileSync(envPath, "utf8")).not.toContain("GEMINI_API_KEY=");
+  });
+
+  it("rejects oversized settings bodies", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-body-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/settings";
+    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.alloc(70_000, 97));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(413);
+  });
+
+  it("rejects settings posts from a foreign origin", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-csrf-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/settings";
+    req.headers = { "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-stolen"));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(403);
+    expect(() => readFileSync(envPath, "utf8")).toThrow();
+  });
+
+  it("does not assign unexpected env keys from settings", async () => {
+    const previous = process.env.PATH;
+    const dir = mkdtempSync(join(tmpdir(), "ar-env-allow-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/settings";
+    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.from("PATH=/tmp/evil&ANTHROPIC_API_KEY=sk-ant-2"));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    try {
+    expect(res.statusCode).toBe(303);
+    expect(process.env.PATH).toBe(previous);
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ant-2");
+    } finally {
+      if (previous !== undefined) process.env.PATH = previous;
+      delete process.env.ANTHROPIC_API_KEY;
+    }
   });
 
   it("attaches OpenCode auth token when backend apiKey is missing", async () => {
@@ -2434,5 +2606,578 @@ describe("proxy", () => {
     expect(res.statusCode).toBe(200);
     expect(openaiCalls).toBe(1);
     expect(res.body).toContain("ok");
+  });
+
+  it("shows the last routed model on the dashboard", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), collectRes() as never);
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.body).toContain("openai/gpt-5.6-sol");
+    expect(res.body).toContain("force");
+  });
+
+  it("shows quota percent from upstream rate-limit headers", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "k",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ id: "msg", type: "message", role: "assistant", content: [{ type: "text", text: "hi" }], stop_reason: "end_turn" }), {
+              status: 200,
+              headers: {
+                "content-type": "application/json",
+                "anthropic-ratelimit-requests-limit": "100",
+                "anthropic-ratelimit-requests-remaining": "65",
+              },
+            }),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    await server.handle(
+      fakeReq("/v1/messages", { model: "claude-sonnet-4-5", max_tokens: 8, messages: [{ role: "user", content: "hi" }] }),
+      collectRes() as never,
+    );
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.body).toContain("35%");
+    expect(res.body).toContain("65 / 100 remaining");
+  });
+
+  it("saves a second API key as an extra account without overwriting primary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-extra-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-primary" } }));
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const keyReq = new IncomingMessage(new Socket());
+    keyReq.method = "POST";
+    keyReq.url = "/connect/openai/key";
+    keyReq.headers = { "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      keyReq.emit("data", Buffer.from("key=sk-extra"));
+      keyReq.emit("end");
+    });
+    const keyRes = collectRes();
+    await server.handle(keyReq, keyRes as never);
+    expect(keyRes.statusCode).toBe(303);
+    expect(JSON.parse(readFileSync(authPath, "utf8")).openai.key).toBe("sk-primary");
+    expect(JSON.parse(readFileSync(accountsPath, "utf8")).accounts[0].key).toBe("sk-extra");
+  });
+
+  it("rotates to the next same-provider account after HTTP 429", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-rotate-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-limited" } }));
+    writeFileSync(accountsPath, JSON.stringify({ accounts: [{ id: "extra-1", provider: "openai", type: "api", key: "sk-open" }] }));
+    const used: string[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (_url, init) => {
+            const token = String(new Headers(init?.headers).get("authorization") ?? "");
+            used.push(token);
+            if (token === "Bearer sk-limited") {
+              return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json" } });
+            }
+            return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+    expect(used).toEqual(["Bearer sk-limited", "Bearer sk-open"]);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("ok");
+  });
+
+  it("refreshes an extra oauth account before retrying after 429", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-rotate-refresh-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-limited" } }));
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({
+        accounts: [
+          {
+            id: "extra-1",
+            provider: "openai",
+            type: "oauth",
+            access: "old-extra",
+            refresh: "extra-refresh",
+            expires: Date.now() - 1000,
+          },
+        ],
+      }),
+    );
+    const used: string[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (url, init) => {
+            const target = String(url);
+            if (target.includes("/oauth/token")) {
+              expect(String(init?.body)).toContain("extra-refresh");
+              return new Response(JSON.stringify({ access_token: "new-extra", refresh_token: "new-extra-refresh", expires_in: 3600 }));
+            }
+            const token = String(new Headers(init?.headers).get("authorization") ?? "");
+            used.push(token);
+            if (token === "Bearer sk-limited") {
+              return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json" } });
+            }
+            return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+    expect(used).toEqual(["Bearer sk-limited", "Bearer new-extra"]);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(readFileSync(accountsPath, "utf8")).accounts[0].access).toBe("new-extra");
+  });
+
+  it("lists each extra account on the dashboard", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-dash-acct-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "oauth", access: "tok-one", email: "one@example.com" } }));
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({ accounts: [{ id: "extra-1", provider: "openai", type: "api", key: "sk-two", email: "two@example.com" }] }),
+    );
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "GET";
+    req.url = "/";
+    req.headers = {};
+    queueMicrotask(() => req.emit("end"));
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.body).toContain("codex-one@example.com");
+    expect(res.body).toContain("codex-two@example.com");
+    expect(res.body).not.toContain("tok-one");
+    expect(res.body).not.toContain("sk-two");
+    expect(res.body).toContain('data-remove="extra-1"');
+  });
+
+  it("removes an extra account without touching primary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-rm-acct-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-primary" } }));
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({ accounts: [{ id: "extra-1", provider: "openai", type: "api", key: "sk-extra" }] }),
+    );
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/accounts/remove";
+    req.headers = { "content-type": "application/json" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.from(JSON.stringify({ id: "extra-1" })));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(readFileSync(authPath, "utf8")).openai.key).toBe("sk-primary");
+    expect(JSON.parse(readFileSync(accountsPath, "utf8")).accounts).toEqual([]);
+  });
+
+  it("returns 429 after every same-provider account is limited", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-429-all-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-0" } }));
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({
+        accounts: Array.from({ length: 6 }, (_, i) => ({ id: `extra-${i + 1}`, provider: "openai", type: "api", key: `sk-${i + 1}` })),
+      }),
+    );
+    let calls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () => {
+            calls += 1;
+            return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json" } });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+    expect(res.statusCode).toBe(429);
+    expect(calls).toBe(7);
+  });
+
+  it("uses the Gemini API key instead of an extra Google OAuth token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-gemini-extra-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(accountsPath, JSON.stringify({ accounts: [{ id: "g-extra", provider: "google", type: "oauth", access: "ya29.extra" }] }));
+    const previous = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "AIza-test";
+    let url = "";
+    try {
+      const server = createProxyServer({
+        catalog,
+        config,
+        sessions: memorySessions(),
+        authPath,
+        accountsPath,
+        backends: {
+          google: {
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            apiKey: "AIza-test",
+            fetchImpl: async (target) => {
+              url = String(target);
+              return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), {
+                headers: { "content-type": "application/json" },
+              });
+            },
+          },
+        },
+        select: () =>
+          ({
+            modelId: "google/gemini-3.6-flash",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+          }) as never,
+      });
+      const res = collectRes();
+      await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+      expect(url).toContain("AIza-test");
+      expect(url).not.toContain("ya29.extra");
+    } finally {
+      if (previous === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previous;
+    }
+  });
+
+  it("keeps task stickiness across headerless follow-ups in the same thread", async () => {
+    const vias: string[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+              headers: { "content-type": "application/json" },
+            }),
+        },
+      },
+      select: (_state, _cat, _cfg, _sticky, _cap, _prev, _pred) =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const first = fakeReq(
+      "/v1/chat/completions",
+      { model: "auto", messages: [{ role: "user", content: "plan the architecture" }] },
+      { "x-session-id": undefined },
+    );
+    await server.handle(first, collectRes() as never);
+    const second = fakeReq(
+      "/v1/chat/completions",
+      {
+        model: "auto",
+        messages: [
+          { role: "user", content: "plan the architecture" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "now write the tests" },
+        ],
+      },
+      { "x-session-id": undefined },
+    );
+    const originalLog = console.log;
+    console.log = (msg?: unknown) => {
+      const line = String(msg ?? "");
+      const via = line.match(/\[auto-router-proxy\] (\S+)/);
+      if (via?.[1]) vias.push(via[1]);
+    };
+    try {
+      await server.handle(second, collectRes() as never);
+    } finally {
+      console.log = originalLog;
+    }
+    expect(vias.at(-1)).toBe("stay-sticky");
+  });
+
+  it("skips a rate-limited account on the next request", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-cool-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-limited" } }));
+    writeFileSync(accountsPath, JSON.stringify({ accounts: [{ id: "extra-1", provider: "openai", type: "api", key: "sk-open" }] }));
+    const used: string[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (_url, init) => {
+            const token = String(new Headers(init?.headers).get("authorization") ?? "");
+            used.push(token);
+            if (token === "Bearer sk-limited") {
+              return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json" } });
+            }
+            return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "one" }] }), collectRes() as never);
+    used.length = 0;
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "two" }] }), res as never);
+    expect(used).toEqual(["Bearer sk-open"]);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("translates Responses clients when the target is xAI chat", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        xai: {
+          baseUrl: "https://api.x.ai",
+          apiKey: "xai-k",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ choices: [{ message: { content: "grok-ok" }, finish_reason: "stop" }] }), {
+              headers: { "content-type": "application/json" },
+            }),
+        },
+      },
+      select: () =>
+        ({
+          modelId: "xai/grok-4.6",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/responses", { model: "auto", input: "hi" }), res as never);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("grok-ok");
+    expect(res.body).toContain("output_text");
   });
 });

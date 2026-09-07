@@ -45,19 +45,21 @@ of the above do.
 
 ## Apply path
 
-Public v1 is a local proxy plus an installer. The OpenCode plugin is private and is
-not part of this distribution.
+Public v1 is a local proxy plus an installer. The in-repo OpenCode plugin is an
+optional native apply path.
 
 ```bash
 npm start --workspace=@auto-router/proxy
 npm run install-clients -- --claude --codex --opencode --cursor
 ```
 
-Open http://127.0.0.1:8787 and paste provider keys if you want them
-(`OPENAI_API_KEY`, `OPENCODE_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`).
-Keys are written to `~/.config/auto-router/.env` mode `0600`. If a key is
-missing, the proxy uses OpenCode `auth.json` or Claude Code’s local login for
-that provider. Cursor Pro quota is not used.
+Open http://127.0.0.1:8787 and log in (`/connect/...` or `npm run login -- claude`).
+Extra logins are stored in `~/.config/auto-router/accounts.json` and do not overwrite
+the primary OpenCode/Claude Code login. API keys are fallback
+and are written to `~/.config/auto-router/.env` mode `0600`. Gemini inference needs an
+AI Studio key; Google OAuth tokens are not used for the Gemini API. OpenCode Zen is
+used only when a Zen key exists and is skipped after a billing error. Cursor Pro
+quota is not used. Codex is wired with `wire_api = "responses"`.
 
 Live eval can target the same proxy:
 
@@ -67,7 +69,8 @@ AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 AUTO_ROUTER_EVAL_API_KEY=loca
 ```
 
 - Claude Code and OpenCode use Anthropic Messages at `http://127.0.0.1:8787`.
-- Codex and Cursor use OpenAI Chat Completions at `http://127.0.0.1:8787/v1`.
+- Codex uses OpenAI Responses (`wire_api = "responses"`) at `http://127.0.0.1:8787/v1`.
+- Cursor uses OpenAI Chat Completions at `http://127.0.0.1:8787/v1`.
 
 Default listen address is `http://127.0.0.1:8787`.
 

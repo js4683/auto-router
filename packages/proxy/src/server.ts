@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
@@ -16,13 +17,24 @@ import {
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
 import { createAvengersRuntime } from "./avengers-runtime.js";
-import { loginIsOAuth, providerLoginSet, resolveCredential, resolveGoogleProject, UI_PROVIDERS } from "./credentials.js";
-import { defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.js";
+import {
+  accountIdentity,
+  defaultAccountsPath,
+  listProviderAccounts,
+  nextOpenAccount,
+  removeExtraAccount,
+  saveProviderCredential,
+  type ResolvedAccount,
+} from "./accounts.js";
+import { loginExpires, loginIsOAuth, providerLoginSet, resolveCredential, resolveGoogleProject, UI_PROVIDERS } from "./credentials.js";
+import { parseQuota, reconcileUsageQuota, type ProviderQuota } from "./quota.js";
+import { ENV_KEYS, defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 import { defaultAuthPath, readAuthFile, writeAuthEntry } from "./auth-store.js";
-import { completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, ensureGoogleProject, pollOAuth, startOAuth } from "./oauth.js";
+import { completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, ensureGoogleProject, pollOAuth, refreshAccountToken, refreshOAuthToken, startOAuth } from "./oauth.js";
 import { connectPage } from "./connect-page.js";
+import { mainLogin } from "./login-cli.js";
 import { loginProviderId } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
 
@@ -42,16 +54,97 @@ export interface CreateProxyServerOptions {
   recorder?: EvalRecorder;
   envPath?: string;
   authPath?: string;
+  accountsPath?: string;
   claudePath?: string;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function isLoopbackManagement(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && origin) {
+    try {
+      const host = new URL(origin).hostname;
+      return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+    } catch {
+      return false;
+    }
+  }
+  const header = req.headers.host;
+  if (typeof header === "string" && header) {
+    const host = header.split(":")[0] ?? "";
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+  }
+  return true;
+}
+
+const MANAGEMENT_BODY_LIMIT = 64_000;
+const REQUEST_BODY_LIMIT = 2_000_000;
+
+function readBody(req: IncomingMessage, limit = REQUEST_BODY_LIMIT): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    let size = 0;
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    req.on("data", (chunk) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buf.length;
+      if (size > limit) {
+        req.destroy();
+        fail(new Error("payload too large"));
+        return;
+      }
+      chunks.push(buf);
+    });
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (error) => fail(error instanceof Error ? error : new Error("read failed")));
   });
+}
+
+async function readBodyOrLimit(req: IncomingMessage, res: ServerResponse, limit: number): Promise<string | undefined> {
+  try {
+    return await readBody(req, limit);
+  } catch (error) {
+    if (error instanceof Error && error.message === "payload too large") {
+      json(res, 413, { error: "payload too large" });
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function pickAccount(
+  provider: string,
+  modelId: string,
+  opts: CreateProxyServerOptions,
+  skipped: Set<string>,
+  limitedUntil: Map<string, number>,
+): { account?: ResolvedAccount; token?: string; oauth: boolean } {
+  const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
+  const accounts = listProviderAccounts(provider, {
+    env: process.env,
+    authPath: opts.authPath,
+    accountsPath: opts.accountsPath,
+  });
+  const now = Date.now();
+  const blocked = new Set(skipped);
+  for (const [id, until] of limitedUntil) {
+    if (until <= now) limitedUntil.delete(id);
+    else blocked.add(id);
+  }
+  const account = nextOpenAccount(accounts, blocked);
+  const token = account?.token ?? resolveCredential(modelId, credOpts);
+  const oauth = Boolean(
+    account ? account.type === "oauth" && provider !== "google" : token && loginIsOAuth(provider, credOpts) && provider !== "google",
+  );
+  return { account, token, oauth };
 }
 
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
@@ -180,10 +273,27 @@ function resolveProvider(modelId: string): { provider: string; bareModel: string
   if (providerFromId === "google" || providerFromId === "gemini" || /^gemini/i.test(bareModel)) {
     return { provider: "google", bareModel };
   }
+  if (providerFromId === "anthropic" || (!providerFromId && /^claude/i.test(bareModel))) {
+    return { provider: "anthropic", bareModel };
+  }
   if (providerFromId === "opencode" || (!providerFromId && ZEN_MODEL_HINT.test(bareModel))) {
     return { provider: "opencode", bareModel };
   }
   return { provider: providerFromId || "openai", bareModel };
+}
+
+function qualifyModel(model: string): string {
+  if (model.includes("/")) return model;
+  const { provider, bareModel } = resolveProvider(model);
+  return `${provider}/${bareModel}`;
+}
+
+function requestedModel(body: any): string | undefined {
+  const model = typeof body?.model === "string" ? body.model.trim() : "";
+  if (!model || model === "auto" || model === "free-auto" || model === "go-auto") return undefined;
+  const qualified = qualifyModel(model);
+  if (resolveProvider(qualified).provider !== "anthropic") return undefined;
+  return qualified;
 }
 
 function messageText(content: any): string | undefined {
@@ -613,13 +723,16 @@ function upstreamRequest(
   return {
     body,
     path: protocol === "chat" ? inboundPath ?? "/v1/chat/completions" : "/v1/chat/completions",
-    translateResponse: protocol === "anthropic",
+    translateResponse: protocol !== "chat",
     useGemini: false,
   };
 }
 
-function sessionId(req: IncomingMessage, text: string): string {
-  return String(req.headers["x-session-id"] ?? req.headers["x-opencode-session"] ?? text.slice(0, 64) ?? "global");
+function sessionId(req: IncomingMessage, body: unknown, text: string): string {
+  const header = req.headers["x-session-id"] ?? req.headers["x-opencode-session"];
+  if (typeof header === "string" && header) return header;
+  const first = textMessages(body).find((message) => message.role === "user")?.content ?? text;
+  return (first || "global").slice(0, 64);
 }
 
 function requiredCapabilities(body: any): string[] {
@@ -753,9 +866,9 @@ function nativeResponse(payload: any, provider: string): { content: string; refu
       .join("");
     return { content, ...(refusal ? { refusal } : {}) };
   }
-  if (provider === "openai") {
-    const message = payload?.choices?.[0]?.message;
-    return { content: messageText(message?.content) ?? "", ...(message?.refusal ? { refusal: message.refusal } : {}) };
+  const chatMessage = payload?.choices?.[0]?.message;
+  if (provider === "openai" || provider === "xai" || chatMessage) {
+    return { content: messageText(chatMessage?.content) ?? "", ...(chatMessage?.refusal ? { refusal: chatMessage.refusal } : {}) };
   }
   if (provider === "google") {
     const parts = payload?.candidates?.[0]?.content?.parts;
@@ -1027,9 +1140,13 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   close(): void;
 } {
   const skippedProviders = new Set<string>();
+  const routeLog: Array<{ at: number; via: string; modelId: string; status?: number }> = [];
+  const quotas = new Map<string, ProviderQuota>();
+  const limitedUntil = new Map<string, number>();
+  const accountsFile = () => opts.accountsPath;
 
   async function decide(req: IncomingMessage, body: any, text: string): Promise<SelectionResult> {
-    const id = sessionId(req, text);
+    const id = sessionId(req, body, text);
     const stored = opts.sessions.get(id);
     const isNewSession = !stored.taskTarget;
     const state = sessionState(body, text, isNewSession);
@@ -1049,8 +1166,9 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       };
     }
 
-    const forced = req.headers["x-force-model"];
-    if (typeof forced === "string" && forced) {
+    const forcedHeader = req.headers["x-force-model"];
+    const forced = typeof forcedHeader === "string" && forcedHeader ? forcedHeader : requestedModel(body);
+    if (forced) {
       const result: SelectionResult = {
         modelId: forced,
         tier: "simple",
@@ -1086,18 +1204,95 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         json(res, 200, { ok: true });
         return;
       }
+      if (req.method === "POST" && path === "/quota/refresh") {
+        if (!isLoopbackManagement(req)) {
+          json(res, 403, { error: "forbidden" });
+          return;
+        }
+        const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
+        const authFile = opts.authPath ?? defaultAuthPath();
+        for (const provider of ["anthropic", "openai", "xai"]) {
+          const runtime = provider === "anthropic" ? "anthropic/claude" : provider === "openai" ? "openai/gpt" : "xai/grok";
+          const accounts = listProviderAccounts(provider, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() });
+          const tokens = accounts.length
+            ? await Promise.all(
+                accounts.map(async (account) => ({
+                  id: account.id,
+                  token:
+                    (await refreshAccountToken(account, { authPath: authFile, accountsPath: accountsFile() })) ?? account.token,
+                })),
+              )
+            : [{ id: provider, token: (await refreshOAuthToken(provider, authFile)) ?? resolveCredential(runtime, credOpts) }];
+          for (const item of tokens) {
+            if (!item.token) continue;
+            const quota = await reconcileUsageQuota(provider, item.token).catch(() => undefined);
+            if (quota) quotas.set(item.id, quota);
+          }
+        }
+        json(res, 200, { ok: true });
+        return;
+      }
+      if (req.method === "POST" && path === "/accounts/remove") {
+        if (!isLoopbackManagement(req)) {
+          json(res, 403, { error: "forbidden" });
+          return;
+        }
+        const file = accountsFile();
+        if (!file) {
+          json(res, 400, { error: "no accounts file" });
+          return;
+        }
+        let id = "";
+        try {
+          const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
+          if (raw === undefined) return;
+          const parsed = JSON.parse(raw) as { id?: unknown };
+          id = typeof parsed.id === "string" ? parsed.id : "";
+        } catch {
+          json(res, 400, { error: "invalid json" });
+          return;
+        }
+        if (!id || id.includes(":")) {
+          json(res, 400, { error: "id required" });
+          return;
+        }
+        json(res, removeExtraAccount(file, id) ? 200 : 404, { ok: true });
+        return;
+      }
       if (req.method === "GET" && (path === "/" || path === "/ui")) {
         const envPath = opts.envPath ?? defaultEnvPath();
         const env = readEnvFile(envPath);
         const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
-        const providers = UI_PROVIDERS.map((provider) => ({
-          id: provider.id,
-          label: provider.label,
-          envKey: provider.envKey,
-          login: providerLoginSet(provider.id, credOpts),
-          envSet: Boolean(env[provider.envKey] || process.env[provider.envKey]),
-        }));
-        html(res, 200, settingsPage(providers, true));
+        const providers = UI_PROVIDERS.flatMap((provider) => {
+          const identity = accountIdentity(provider.id, opts.authPath);
+          const accounts = listProviderAccounts(provider.id, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() });
+          const base = {
+            id: provider.id,
+            label: provider.label,
+            envKey: provider.envKey,
+            envSet: Boolean(env[provider.envKey] || process.env[provider.envKey]),
+          };
+          if (!accounts.length) {
+            return [{
+              ...base,
+              login: providerLoginSet(provider.id, credOpts),
+              expires: loginExpires(provider.id, credOpts),
+              email: identity.email,
+              plan: identity.plan,
+              quota: quotas.get(provider.id),
+            }];
+          }
+          return accounts.map((account) => ({
+            ...base,
+            accountId: account.primary ? undefined : account.id,
+            login: true,
+            expires: account.expires,
+            email: account.email || (account.primary ? identity.email : undefined),
+            plan: account.plan || (account.primary ? identity.plan : undefined),
+            quota: quotas.get(account.id) ?? (account.primary ? quotas.get(provider.id) : undefined),
+          }));
+        });
+        html(res, 200, settingsPage(providers, true, routeLog));
         return;
       }
       if (path?.startsWith("/connect/")) {
@@ -1115,13 +1310,23 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           return;
         }
         if (req.method === "POST" && rest === "key") {
-          const raw = await readBody(req);
+          if (!isLoopbackManagement(req)) {
+            json(res, 403, { error: "forbidden" });
+            return;
+          }
+          const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
+          if (raw === undefined) return;
           const key = new URLSearchParams(raw).get("key") ?? "";
           if (!key) {
             json(res, 400, { error: "key required" });
             return;
           }
-          writeAuthEntry(authFile, provider.authId, { type: "api", key });
+          saveProviderCredential({
+            provider: provider.authId,
+            entry: { type: "api", key },
+            authPath: authFile,
+            accountsPath: accountsFile(),
+          });
           if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
           else {
             res.statusCode = 303;
@@ -1136,9 +1341,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           return;
         }
         if (req.method === "POST" && rest === "oauth/code") {
-          const raw = await readBody(req);
+          const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
+          if (raw === undefined) return;
           const params = new URLSearchParams(raw);
-          const result = await completeOAuthCode(params.get("id") ?? "", params.get("code") ?? "", authFile);
+          const result = await completeOAuthCode(params.get("id") ?? "", params.get("code") ?? "", authFile, accountsFile());
           if (result.done) {
             if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
             else {
@@ -1153,7 +1359,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         }
         if (req.method === "GET" && rest === "oauth/callback") {
           const params = new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
-          const result = await completeGoogleCallback(params.get("state") ?? "", params.get("code") ?? "", authFile);
+          const result = await completeGoogleCallback(params.get("state") ?? "", params.get("code") ?? "", authFile, accountsFile());
           if (result.done) {
             if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
             else {
@@ -1168,7 +1374,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         }
         if (req.method === "GET" && rest === "oauth/poll") {
           const sessionId = new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("id") ?? "";
-          json(res, 200, await pollOAuth(sessionId, authFile));
+          json(res, 200, await pollOAuth(sessionId, authFile, accountsFile()));
           return;
         }
         json(res, 404, { error: "not found" });
@@ -1189,10 +1395,16 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         return;
       }
       if (req.method === "POST" && path === "/settings") {
-        const raw = await readBody(req);
+        if (!isLoopbackManagement(req)) {
+          json(res, 403, { error: "forbidden" });
+          return;
+        }
+        const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
+        if (raw === undefined) return;
         const updates = Object.fromEntries(new URLSearchParams(raw));
         writeEnvFile(opts.envPath ?? defaultEnvPath(), updates);
-        for (const [key, value] of Object.entries(updates)) {
+        for (const key of ENV_KEYS) {
+          const value = updates[key];
           if (value) process.env[key] = value;
         }
         if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
@@ -1222,15 +1434,24 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         return;
       }
 
-      const raw = await readBody(req);
+      const raw = await readBodyOrLimit(req, res, REQUEST_BODY_LIMIT);
+      if (raw === undefined) return;
       const body = raw ? JSON.parse(raw) : {};
       const protocol = ingressProtocol(req.url);
       const normalizedBody = normalizeIngress(body, protocol);
       const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
-      const id = sessionId(req, text);
+      const id = sessionId(req, normalizedBody, text);
       const state = sessionState(normalizedBody, text, !opts.sessions.get(id).taskTarget);
       let result = await decide(req, normalizedBody, text);
+      const routeRow: { at: number; via: string; modelId: string; status?: number } = {
+        at: Date.now(),
+        via: result.via,
+        modelId: result.modelId,
+      };
+      routeLog.unshift(routeRow);
+      if (routeLog.length > 20) routeLog.length = 20;
+      console.log(`[auto-router-proxy] ${result.via} ${result.modelId}`);
 
       if (path === "/v1/route") {
         json(res, 200, { modelId: result.modelId, via: result.via });
@@ -1252,7 +1473,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         });
       }
 
-      for (let attempt = 0; attempt < 2; attempt++) {
+      const skippedAccounts = new Set<string>();
+      let zenFailovers = 0;
+      let lastLimited: { status: number; payload: string; type: string } | undefined;
+      for (let attempt = 0; attempt < 8; attempt++) {
       const { provider, bareModel } = resolveProvider(result.modelId);
       const backend = opts.backends[provider];
       if (!backend) {
@@ -1262,11 +1486,23 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
       const inbound = inboundCredentials(req.headers, protocol, provider);
       const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
-      const loginToken = resolveCredential(result.modelId, credOpts);
-      const oauth = Boolean(loginToken && loginIsOAuth(provider, credOpts) && provider !== "google");
-      const resolved = loginToken ?? backend.apiKey;
+      const picked = pickAccount(provider, result.modelId, opts, skippedAccounts, limitedUntil);
+      const oauth = picked.oauth;
+      const authFile = opts.authPath ?? defaultAuthPath();
+      let resolved = picked.token ?? backend.apiKey;
+      if (picked.account && (provider === "anthropic" || provider === "openai" || provider === "xai")) {
+        const refreshed = await refreshAccountToken(picked.account, {
+          authPath: authFile,
+          accountsPath: accountsFile(),
+          fetchImpl: backend.fetchImpl ?? fetch,
+        });
+        if (refreshed) resolved = refreshed;
+      } else if (oauth && (provider === "anthropic" || provider === "openai" || provider === "xai")) {
+        const refreshed = await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch);
+        if (refreshed) resolved = refreshed;
+      }
       const authorization = resolved ? `Bearer ${resolved}` : inbound.authorization;
-      const token = resolved ?? inbound.token;
+      let token = resolved ?? inbound.token;
       let googleProject = resolveGoogleProject(credOpts);
       if (oauth && provider === "google" && token && !googleProject) {
         googleProject = await ensureGoogleProject(token).catch(() => undefined);
@@ -1317,9 +1553,28 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const upstreamUrl = upstreamRequestPlan.path.startsWith("http") ? upstreamRequestPlan.path : `${backend.baseUrl}${upstreamRequestPlan.path}`;
       const upstream = await fetchImpl(upstreamUrl, {
         method: req.method,
+        signal: AbortSignal.timeout(120_000),
         headers,
         body: JSON.stringify(upstreamRequestPlan.body),
       });
+      const quota = parseQuota(upstream.headers, upstream.status);
+      quotas.set(picked.account?.id ?? provider, quota);
+      routeRow.status = upstream.status;
+      routeRow.via = result.via;
+      routeRow.modelId = result.modelId;
+      if (upstream.status === 429 && picked.account) {
+        skippedAccounts.add(picked.account.id);
+        limitedUntil.set(picked.account.id, Date.now() + 300_000);
+        const limitedPayload = await upstream.text();
+        lastLimited = { status: 429, payload: limitedPayload, type: upstream.headers.get("content-type") ?? "application/json" };
+        if (nextOpenAccount(listProviderAccounts(provider, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() }), skippedAccounts)) {
+          continue;
+        }
+        if (typeof res.writeHead === "function") res.writeHead(429, { "content-type": lastLimited.type });
+        else res.statusCode = 429;
+        res.end(limitedPayload);
+        return;
+      }
 
       const isUpstreamEventStream = (upstream.headers.get("content-type") ?? "").includes("text/event-stream");
       const wantsStream = !!normalizedBody.stream;
@@ -1431,7 +1686,8 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, parsed);
         return;
       }
-      if (attempt === 0 && provider === "opencode" && isZenBillingError(upstream.status, payload)) {
+      if (zenFailovers < 1 && provider === "opencode" && isZenBillingError(upstream.status, payload)) {
+        zenFailovers += 1;
         skippedProviders.add("opencode");
         opts.sessions.set(id, { taskTarget: null, prevMessage: text });
         result = await decide(req, normalizedBody, text);
@@ -1442,6 +1698,13 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       res.end(payload);
       return;
       }
+      if (lastLimited) {
+        if (typeof res.writeHead === "function") res.writeHead(lastLimited.status, { "content-type": lastLimited.type });
+        else res.statusCode = lastLimited.status;
+        res.end(lastLimited.payload);
+        return;
+      }
+      json(res, 429, { error: "rate limited" });
     },
     close() {
       void opts.recorder?.flush().catch(() => {
@@ -1460,8 +1723,12 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
   const catalog = loadCatalogSync(config);
   const authPath = join(homedir(), ".local/share/opencode/auth.json");
   const allowed = new Set(["openai", "anthropic", "xai"]);
-  if (resolveCredential("google/gemini", { env: process.env, authPath })) allowed.add("google");
-  if (resolveCredential("opencode/muse-spark-1.3-contributor-free", { env: process.env, authPath })) allowed.add("opencode");
+  const accountsPath = defaultAccountsPath();
+  const credOpts = { env: process.env, authPath, accountsPath };
+  if (resolveCredential("google/gemini", credOpts) || listProviderAccounts("google", credOpts).length) allowed.add("google");
+  if (resolveCredential("opencode/muse-spark-1.3-contributor-free", credOpts) || listProviderAccounts("opencode", credOpts).length) {
+    allowed.add("opencode");
+  }
   catalog.models = catalog.models.filter((model) => {
     const id = model.runtimeId ?? model.id;
     const provider = id.slice(0, Math.max(0, id.indexOf("/")));
@@ -1490,11 +1757,15 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
     rankAvengers: runtime ? (text) => runtime.rank(text) : undefined,
     recorder: createProxyRecorderFromEnv(),
     authPath,
+    accountsPath: defaultAccountsPath(),
     claudePath: join(homedir(), ".claude/.credentials.json"),
   };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  if (process.argv[2] === "login") {
+    process.exit(await mainLogin(process.argv.slice(3)));
+  }
   const server = createProxyServer(bootstrapProxyOptions());
   const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";
   const port = Number(process.env.AUTO_ROUTER_PORT ?? 8787);
@@ -1503,7 +1774,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       if (!res.headersSent) {
         res.statusCode = 500;
         res.end(JSON.stringify({ error: "internal error" }));
+        return;
       }
+      res.end();
     });
   }).listen(port, host, () => {
     console.log(`[auto-router-proxy] listening on http://${host}:${port}`);

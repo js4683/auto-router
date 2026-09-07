@@ -222,6 +222,7 @@ export async function requestCompletion(
     "content-type": "application/json",
     authorization: `Bearer ${config.apiKey}`,
   };
+  if (request.model.includes("/")) headers["x-force-model"] = request.model;
   if (new URL(url).hostname === "generativelanguage.googleapis.com") {
     headers["x-goog-api-key"] = config.apiKey;
   }
@@ -326,10 +327,21 @@ function shuffleLabeled<T>(values: T[], seed: string): T[] {
   return shuffled;
 }
 
+function parseJsonObject(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) return JSON.parse(text.slice(start, end + 1));
+    throw new Error("judge returned invalid JSON");
+  }
+}
+
 function parseJudgeScores(text: string, labels: readonly string[]): Record<string, number> {
   let payload: any;
   try {
-    payload = JSON.parse(text);
+    payload = parseJsonObject(text);
   } catch {
     throw new Error("judge returned invalid JSON");
   }

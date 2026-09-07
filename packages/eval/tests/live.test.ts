@@ -178,6 +178,19 @@ describe("requestCompletion", () => {
     expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
   });
 
+  it("sends x-force-model for provider-qualified ids", async () => {
+    let headers: Headers | undefined;
+    await requestCompletion(
+      { model: "google/gemini-3.6-flash", messages: [{ role: "user", content: "hi" }] },
+      { baseUrl: "http://127.0.0.1:8787/v1", apiKey: "local", timeoutMs: 1000, maxOutputTokens: 64 },
+      async (_input, init) => {
+        headers = new Headers(init?.headers);
+        return new Response(chatResponse("PING"));
+      }
+    );
+    expect(headers?.get("x-force-model")).toBe("google/gemini-3.6-flash");
+  });
+
   it("sends x-goog-api-key for Gemini OpenAI-compatible hosts", async () => {
     let headers: Headers | undefined;
     await requestCompletion(
@@ -269,6 +282,22 @@ describe("judgeOutputs", () => {
     } finally {
       await mock.close();
     }
+  });
+
+  it("parses judge scores from fenced JSON", async () => {
+    const mock: typeof fetch = async () =>
+      new Response(chatResponse("```json\n{\"scores\":{\"A\":80,\"B\":80,\"C\":80}}\n```"));
+    const scores = await judgeOutputs(
+      { id: "case-fence", rubric: "quality" },
+      {
+        router: { text: "a", toolCalls: [], terminalState: "completed" },
+        "always-frontier": { text: "b", toolCalls: [], terminalState: "completed" },
+        "always-cheap": { text: "c", toolCalls: [], terminalState: "completed" },
+      },
+      { baseUrl: "https://example.com/v1", apiKey: "secret", timeoutMs: 1000, maxOutputTokens: 64, judgeModel: "live/judge" },
+      mock
+    );
+    expect(scores).toEqual({ router: 0.8, "always-frontier": 0.8, "always-cheap": 0.8 });
   });
 
   it("rejects malformed and out-of-range judge scores", async () => {

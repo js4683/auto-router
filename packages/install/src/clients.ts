@@ -41,8 +41,13 @@ export function runInstall(input: RunInstallInput): { written: string[]; notes: 
     const path = join(input.home, ".claude/settings.json");
     const json = readJson(path);
     const env = { ...((json.env as Record<string, unknown> | undefined) ?? {}) };
-    if (input.uninstall) delete env.ANTHROPIC_BASE_URL;
-    else env.ANTHROPIC_BASE_URL = base;
+    if (input.uninstall) {
+      if (env.ANTHROPIC_BASE_URL === base) delete env.ANTHROPIC_BASE_URL;
+      if (env.ANTHROPIC_API_KEY === "auto-router") delete env.ANTHROPIC_API_KEY;
+    } else {
+      env.ANTHROPIC_BASE_URL = base;
+      if (!env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = "auto-router";
+    }
     json.env = env;
     writeText(path, `${JSON.stringify(json, null, 2)}\n`);
     written.push(path);
@@ -50,7 +55,7 @@ export function runInstall(input: RunInstallInput): { written: string[]; notes: 
 
   if (input.clients.includes("codex")) {
     const path = join(input.home, ".codex/config.toml");
-    const block = `[model_providers.auto-router]\nname = "auto-router"\nbase_url = "${base}/v1"\nwire_api = "responses"`;
+    const block = `model_provider = "auto-router"\n[model_providers.auto-router]\nname = "auto-router"\nbase_url = "${base}/v1"\nwire_api = "responses"`;
     const next = input.uninstall ? removeManagedBlock(readText(path)) : applyManagedBlock(readText(path), block);
     writeText(path, next);
     written.push(path);

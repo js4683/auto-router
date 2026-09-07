@@ -1,7 +1,9 @@
 # Universal Proxy + Installer Design
 
 **Status:** Approved in design review on 2026-09-04
-**Implementation status:** Env helper, settings UI, and installer are implemented. Docs updated.
+**Implementation status (2026-09-06):** Env helper, settings UI, installer, UI/CLI login,
+extra-account storage, retry, and on-use refresh have implemented happy paths. Reliability
+and security acceptance remain open; see [the audit](2026-09-06-proxy-account-audit.md).
 **Scope:** Public v1 is a local TypeScript proxy plus an installer and a local settings UI. The OpenCode plugin remains private and is not shipped.
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
@@ -12,8 +14,12 @@ Match Workweave’s “one local endpoint, wire the clients” shape while keepi
 ## Assumptions
 
 1. Users run the proxy on `127.0.0.1:8787`.
-2. Provider keys live in a local `.env` (mode `0600`), edited by a small UI the proxy serves.
-3. Claude Code and OpenCode speak Anthropic Messages to the proxy. Codex and Cursor speak OpenAI Chat Completions.
+2. Existing logins come from OpenCode `auth.json` and Claude Code credentials. Additional
+   logins use `~/.config/auto-router/accounts.json`. Settings keys use a local `.env`;
+   connect-page keys use the account store. Credential files should remain mode `0600`.
+3. Claude Code and OpenCode speak Anthropic Messages. Codex uses OpenAI Responses;
+   Cursor uses OpenAI Chat Completions. Gemini inference requires an AI Studio API key,
+   not Google OAuth; the extra-account eligibility bug is an open audit finding.
 4. The existing OpenCode `/connect` plugin is local-only and not part of the installer.
 5. No Postgres, no `rk_` router keys, no hosted cloud, no analytics warehouse.
 
@@ -32,16 +38,21 @@ npm run install-clients -- --claude --codex --cursor --opencode
 npm test --workspace=@auto-router/proxy
 ```
 
-Exact installer package name is `packages/install` or a bin on the proxy package; pick one at implementation and keep a single command.
+The installer workspace is `@auto-router/install`. Terminal login currently lives in
+`@auto-router/proxy`; after building it, the explicit workspace form is
+`npm run login --workspace=@auto-router/proxy -- claude` (also codex/grok/zen/gemini).
+There is no published `auto-router` binary or package `bin` entry. Root npm forwarding
+and non-interactive PKCE completion are open acceptance items, not verified interfaces.
 
 ## Architecture
 
 ```
 Claude Code / OpenCode  --Anthropic Messages-->  proxy :8787
-Codex / Cursor          --Chat Completions---->  proxy :8787
+Codex                   --Responses---------->  proxy :8787
+Cursor                  --Chat Completions----> proxy :8787
                                               |
                                               +--> router-core.selectModel (task lock)
-                                              +--> env BYOK backends (OpenAI, Zen, Anthropic, Gemini)
+                                              +--> provider logins / extra accounts / API keys
                                               +--> GET /  settings UI  --> local .env
 ```
 
@@ -55,10 +66,14 @@ Default scope is user-level config (not project). Re-install rewrites only a man
 |--------|--------|----------|
 | Claude Code | Anthropic `baseURL` → `http://127.0.0.1:8787` | Messages |
 | OpenCode | Anthropic-compatible provider → proxy `/v1` | Messages |
-| Codex | `model_providers` OpenAI-compatible → proxy `/v1` | Chat Completions |
+| Codex | `model_providers` OpenAI-compatible → proxy `/v1` | Responses |
 | Cursor | OpenAI base URL override → `http://127.0.0.1:8787/v1` | Chat Completions |
 
-Uninstall restores the managed block only. OpenCode plugin files are not installed or removed.
+Intended uninstall preserves user-owned values and restores only installer-owned
+changes. Current JSON updates do not fully meet that contract (audit A11). Codex's
+provider block is written, but provider activation is not selected automatically.
+Cursor configuration remains manual instructions. OpenCode plugin files are not
+installed or removed.
 
 ## Settings UI
 
@@ -69,6 +84,10 @@ Served at `GET /` on the proxy (loopback only).
 - Shows `/health` and the last `TASK SELECT` line (model id, task type, via). No prompts or responses.
 
 ## Failure Modes
+
+This table is the intended contract, not a claim of verified implementation. In
+particular, installer `status`, missing-key fallback, bounded upstream waits, and
+management-route origin protection are not established by current tests.
 
 | Condition | Behavior |
 |-----------|----------|
@@ -101,4 +120,8 @@ No live provider calls in CI.
 
 ## Open Questions
 
-None for v1. Dashboard analytics and encrypted key stores are later slices.
+The original v1 direction remains approved. The audit now identifies open implementation
+gates for account identity, concurrency, session stickiness, CLI lifecycle, quota units,
+and local management security. Resolve those before expanding features. Dashboard
+analytics, encrypted key stores, hosted deployment, and classifier activation remain
+later slices.

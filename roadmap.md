@@ -44,6 +44,24 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 
 ## Phase 2 — proxy adapter
 
+### Current priority: public-v1 hardening
+
+The public delivery is proxy + installer + dashboard + CLI login. The optional native
+plugin is not distributed by the installer. UI/CLI login, extra-account storage,
+two-account 429 retry, and on-use token refresh have happy-path tests; release readiness
+is still blocked by [the 2026-09-06 audit](docs/plans/2026-09-06-proxy-account-audit.md).
+
+- [ ] Fix management-route trust boundaries, retry exhaustion, refresh-store identity,
+  and Gemini credential eligibility.
+- [ ] Verify client session identity, safe concurrent persistence, CLI session lifecycle,
+  and cooldown-aware account selection.
+- [ ] Correct quota reporting, dynamic eligibility, installer ownership, bounded IO,
+  Responses translation, and final-route attribution.
+- [ ] Verify desktop/mobile UI and live account failover separately from login success.
+
+The historical completed items below describe implemented paths, not proof that every
+client/protocol/account combination meets the new hardening gate.
+
 - [x] OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages server wrapping
       `router-core`
 - [x] Reconstruct conservative `SessionState` signals from request messages, tools, and

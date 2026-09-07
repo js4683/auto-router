@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveCredential } from "../src/credentials.js";
+import { loginExpires, resolveCredential } from "../src/credentials.js";
 
 describe("resolveCredential", () => {
   it("prefers provider login over env API keys", () => {
@@ -23,5 +23,13 @@ describe("resolveCredential", () => {
     writeFileSync(authPath, JSON.stringify({ google: { type: "oauth", access: "ya29.token" } }));
     expect(resolveCredential("google/gemini-2.5-flash", { env: {}, authPath })).toBeUndefined();
     expect(resolveCredential("google/gemini-2.5-flash", { env: { GEMINI_API_KEY: "AIza-test" }, authPath })).toBe("AIza-test");
+  });
+
+  it("reads login expiry without returning the token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-exp-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ anthropic: { type: "oauth", access: "tok", expires: 123 } }));
+    expect(loginExpires("anthropic", { env: {}, authPath })).toBe(123);
+    expect(loginExpires("openai", { env: {}, authPath })).toBeUndefined();
   });
 });

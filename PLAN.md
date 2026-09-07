@@ -12,6 +12,23 @@ policy, integration behavior, scope, or verification evidence changes.
 
 ## Current Scope
 
+### Current delivery status (2026-09-06)
+
+Public v1 is the local proxy, client installer, settings dashboard, and shared UI/CLI
+provider login. The native OpenCode plugin is optional and is not part of the public
+installer. Recent work added extra credentials, per-account cards, same-provider 429
+retry, and on-use OAuth refresh. These are implemented happy paths, not a completed
+multi-account reliability gate.
+
+The next work is correctness and security hardening, not more providers or training.
+See [the code audit](docs/plans/2026-09-06-proxy-account-audit.md) for evidence,
+priorities, and regression criteria. This audit updated documentation only; source,
+tests, credentials, and the running proxy were not intentionally changed.
+
+Live benchmark acceptance remains unproven and deferred at the user's request.
+Phase 4 code exists, but corpus collection, training, and production activation remain
+deferred. A successful login does not prove inference, quota accuracy, or failover.
+
 ### In scope
 
 - Classify task complexity as `simple`, `medium`, or `complex`.
@@ -266,6 +283,43 @@ Supported strategies:
 - [ ] Pass the external benchmark gate with at least 30 complete live cases, quality
   retention `>= 0.95`, estimated cost savings `>= 0.50`, and a seeded interval.
 
+### 8. Universal proxy and account hardening
+
+- [x] Implement shared UI/CLI OAuth entry points and provider aliases.
+- [x] Implement separate extra-account storage and preserve primary credentials on the
+  tested add-account path.
+- [x] Implement dashboard account cards and same-provider 429 retry for two accounts.
+- [x] Implement extra OAuth refresh on requests and quota refresh (not a background job).
+- [x] Protect local management routes against foreign origins and reject unexpected
+  environment fields (A1).
+- [x] Make every retry path terminate, drain 429 bodies, and return after all accounts
+  are limited (A2).
+- [x] Track credential source explicitly and refresh that store (A3).
+- [x] Apply Gemini API-key-only eligibility to extras (A4).
+- [x] Keep headerless follow-ups sticky using the first user message (A5).
+- [x] Atomically persist extra-account files (A6). Malformed-store preservation and
+  chmod of existing files remain open.
+- [x] Require `--id` with `--code` and bound device-login polls (A7). Published bin /
+  npm forwarding remain open.
+- [x] Cool down rate-limited accounts for 5 minutes without changing the model (A8).
+- [x] Treat Codex `used_percent` as already-percent and do not invent xAI /me usage (A9).
+  Opaque-token labels remain open.
+- [x] Include extra Google/Zen credentials in bootstrap catalog eligibility (A10).
+  Eligibility is still not recomputed live after connect.
+- [x] Set Codex `model_provider` and only uninstall a Claude base URL the installer
+  owns (A11).
+- [x] Cap management bodies, expire pending OAuth after 15 minutes, bound device polls,
+  abort upstream fetches after 120s, and end the response after header-sent errors (A12).
+- [x] Translate Responses clients for xAI chat backends (A13).
+- [x] Attribute route log status/model to the request row, including Zen failover (A14).
+- [ ] Run desktop/mobile dashboard verification and controlled live multi-account
+  inference after the above regression gates pass. Do not equate stored tokens with
+  distinct provider accounts or independent quota pools.
+
+A1-A14 behavior tests and fixes landed in the proxy/install workspaces. Remaining:
+malformed extra-account files, published `auto-router` bin, opaque-token dashboard
+labels, live catalog recompute after connect, and the live/browser acceptance gate.
+
 ## Acceptance Criteria
 
 - A prompt such as `Run no-mistakes and report failures` resolves to `run_tests` and
@@ -295,6 +349,13 @@ Supported strategies:
 - Repository and installed global plugin behavior match.
 
 ## Verification Record
+
+- **2026-09-06, documentation-only code audit:** proxy `npx vitest run` passed 86
+  tests in 10 files; proxy `npx tsc -p tsconfig.json --noEmit` passed; installer
+  `npx vitest run` passed 2 tests; eval `npx vitest run tests/live.test.ts` passed
+  16 tests. These are offline tests, not fresh live-provider or browser evidence.
+  No build, dependency audit, full monorepo suite, commit, or proxy restart was run.
+  Findings A1-A14 remain open despite the passing tests.
 
 - **2026-08-29, existing baseline:** `npm run build` passed.
 - **2026-08-29, existing baseline:** 6 Vitest files and 37 tests passed.
@@ -342,11 +403,28 @@ Supported strategies:
   payment method). Reran locally with Muse (Responses) + Nemotron 3.5 Lightning Free
   (chat) + Muse judge, `MAX_OUTPUT_TOKENS=4096`. Report
   `phase-3-zen-live-free.live.eval-report.local.json`: 24/30 complete live cases,
-  router judge quality 0.873, live quality gate failed (`requires at least 30 complete
-  live cases`). Six incomplete cases were Muse incomplete output, missing judge
-  content, or Nemotron timeout. No dataset or report was committed.
+   router judge quality 0.873, live quality gate failed (`requires at least 30 complete
+   live cases`). Six incomplete cases were Muse incomplete output, missing judge
+   content, or Nemotron timeout. No dataset or report was committed.
+- **2026-09-05, subscription live eval:** proxy live run against Grok, Claude, and
+  ChatGPT completed 14/30 cases (16× HTTP 429). Replay estimated cost savings 60%.
+  Live quality gate left unchecked. Dataset and report remain local/gitignored.
 
 ## Decision Log
+
+- **2026-09-06:** Support both dashboard and terminal login through shared provider
+  flows and credential storage. Preserve the user's primary login when adding another
+  credential. The current CLI is an npm workspace command, not a published
+  `npx auto-router` binary; a fresh `--code` invocation does not preserve PKCE state.
+- **2026-09-06:** Separate task/model stickiness from account failover. A confirmed 429
+  may try another eligible credential for the same provider/model; account cooldown and
+  stable selection still require implementation. Zen billing failover is the previously
+  approved narrow provider-switch exception, not permission for arbitrary per-turn
+  model switching.
+- **2026-09-06:** Treat multi-account/login as partially complete until the audit gates
+  pass. Keep live quality claims and Phase 4 activation deferred. Reconfirm native-plugin
+  deployment parity only when that optional integration is changed, not as a prerequisite
+  for unrelated public-proxy account work.
 
 - **2026-08-29:** Use task/theme-level routing. Per-turn routing is rejected because it
   harms cache reuse and task coherence.
@@ -396,13 +474,17 @@ Supported strategies:
   production activation requires the held-out validation gate.
 - **2026-09-03:** Substantive `run` verification instructions may establish a boundary
   when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
-- **2026-09-04:** Proxy credentials prefer settings `.env`, then OpenCode
-  `auth.json`, then Claude Code login. Multi-provider; Cursor Pro unused. Live eval
-  may call the same proxy.
+- **2026-09-04:** Proxy credentials prefer provider login (`auth.json`, Claude Code
+  file), then settings `.env`. Gemini is the exception: use `GEMINI_API_KEY` / AI Studio
+  key only; Google OAuth access tokens are never sent to the Gemini API. Multi-provider;
+  Cursor Pro unused. Live eval may call the same proxy.
 - **2026-09-04:** Public apply path is the local proxy plus an installer (Claude Code,
-  Codex, Cursor, OpenCode) and a loopback settings UI. Task stickiness and fail-open
-  stay. The OpenCode `/connect` plugin remains private and is not shipped. No Postgres
-  or `rk_` keys in v1.
+  Codex, Cursor, OpenCode) and a loopback settings UI with in-browser connect. Task
+  stickiness and fail-open stay. The OpenCode plugin in `.opencode/plugins` is optional
+  native apply. No Postgres or `rk_` keys in v1.
+- **2026-09-05:** Include OpenCode Zen in the proxy catalog only when a Zen credential
+  exists, and fail over to another provider on Zen billing errors. Codex uses
+  `wire_api = "responses"`. Anthropic ingress accepts `/messages` and `/v1/messages`.
 - **2026-09-03:** Supersede the recommendation-only OpenCode decisions above after a
   source audit of OpenCode 1.18.27. The existing mutable
   `chat.message.output.message.model` seam applies a complete request before provider,
@@ -414,6 +496,9 @@ Supported strategies:
 - [ ] production artifact activation gate passed
 
 ## Supporting Documents
+
+- `docs/plans/2026-09-06-proxy-account-audit.md`: current code findings, proposed fixes,
+  regression gates, and verification limits for the public proxy/account work.
 
 - `design.md`: architecture rationale and selection model.
 - `roadmap.md`: broader project phases and implementation status.

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { readClaudeCodeOauth } from "./claude-code-auth.js";
 
 export interface ResolveCredentialOptions {
   env: NodeJS.ProcessEnv;
@@ -57,6 +58,10 @@ function tokenFromClaudeFile(path: string): string | undefined {
 }
 
 function loginToken(provider: string, opts: ResolveCredentialOptions): string | undefined {
+  if (provider === "anthropic") {
+    const fromCode = readClaudeCodeOauth();
+    if (fromCode?.access) return fromCode.access;
+  }
   const auth = opts.authPath ? readJson(opts.authPath) : undefined;
   if (auth && typeof auth === "object") {
     const fromAuth = fromAuthEntry((auth as Record<string, unknown>)[provider], provider);
@@ -94,6 +99,7 @@ export function resolveGoogleProject(opts: ResolveCredentialOptions): string | u
 }
 
 export function loginIsOAuth(provider: string, opts: ResolveCredentialOptions): boolean {
+  if (provider === "anthropic" && readClaudeCodeOauth()?.access) return true;
   const auth = opts.authPath ? readJson(opts.authPath) : undefined;
   if (!auth || typeof auth !== "object") return false;
   const entry = (auth as Record<string, unknown>)[provider];
@@ -103,4 +109,17 @@ export function loginIsOAuth(provider: string, opts: ResolveCredentialOptions): 
 
 export function providerLoginSet(provider: string, opts: ResolveCredentialOptions): boolean {
   return Boolean(loginToken(provider, opts));
+}
+
+export function loginExpires(provider: string, opts: ResolveCredentialOptions): number | undefined {
+  if (provider === "anthropic") {
+    const expires = readClaudeCodeOauth()?.expires;
+    if (expires) return expires;
+  }
+  const auth = opts.authPath ? readJson(opts.authPath) : undefined;
+  if (!auth || typeof auth !== "object") return undefined;
+  const entry = (auth as Record<string, unknown>)[provider];
+  if (!entry || typeof entry !== "object") return undefined;
+  const expires = (entry as Record<string, unknown>).expires;
+  return typeof expires === "number" ? expires : undefined;
 }

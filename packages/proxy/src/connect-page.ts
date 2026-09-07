@@ -1,3 +1,5 @@
+import { UI_STYLES } from "./settings-ui.js";
+
 export interface ConnectPageInput {
   id: string;
   label: string;
@@ -61,18 +63,14 @@ start();
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Connect ${input.label}</title>
 <style>
-:root { color-scheme: dark; --bg:#111113; --fg:#ececec; --muted:#9a9aa3; --line:#2a2a30; --btn:#ececec; --btn-fg:#111113; }
-* { box-sizing: border-box; }
-body { margin:0; font:15px/1.45 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-main { max-width:36rem; margin:0 auto; padding:2rem 1.25rem; }
-a { color:var(--fg); }
+${UI_STYLES}
 .btn { display:inline-block; background:var(--btn); color:var(--btn-fg); text-decoration:none; padding:0.5rem 0.85rem; font-weight:600; border:0; cursor:pointer; }
 label, input { display:block; width:100%; }
-input { margin:0.35rem 0 0.75rem; background:#0c0c0e; color:var(--fg); border:1px solid var(--line); padding:0.5rem; font:13px ui-monospace, Menlo, monospace; }
+input { margin:0.35rem 0 0.75rem; }
 .code { font:18px ui-monospace, Menlo, monospace; letter-spacing:0.08em; }
 .muted { color:var(--muted); font-size:0.875rem; }
-h1 { font-size:1.25rem; }
-section { border:1px solid var(--line); padding:1rem; margin:1rem 0; }
+h1 { font-size:1.25rem; margin:0 0 0.75rem; }
+section { border:1px solid var(--line); background:var(--panel); padding:1rem; margin:1rem 0; }
 </style>
 </head>
 <body>
