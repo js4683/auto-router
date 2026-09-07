@@ -280,7 +280,7 @@ Supported strategies:
 - [x] Add atomic recording curation with schema validation and a mandatory manual-review
   warning.
 - [x] Add synthetic fixture/golden reports and mock-provider integration coverage.
-- [ ] Pass the external benchmark gate with at least 30 complete live cases, quality
+- [x] Pass the external benchmark gate with at least 30 complete live cases, quality
   retention `>= 0.95`, estimated cost savings `>= 0.50`, and a seeded interval.
 
 ### 8. Universal proxy and account hardening
@@ -349,6 +349,15 @@ labels, live catalog recompute after connect, and the live/browser acceptance ga
 - Repository and installed global plugin behavior match.
 
 ## Verification Record
+
+- **2026-09-07, subscription live eval gate:** proxy at `127.0.0.1:8787`, dataset
+  `phase-3-zen-live.eval-dataset.local.json` (aliases Grok + Claude Sonnet). First run
+  0/30 complete (`x-force-model` lost to task stickiness; Claude judge 429; 1024-token
+  incompletes). After forcing `x-force-model` ahead of stickiness: 30/30 complete,
+  live quality retention 1.40 (CI 1.13–1.80, seed `auto-router-quality-v1`, 10000
+  samples), replay estimated cost savings 60%. Local report
+  `phase-3-subscription-live.eval-report.local.json` (gitignored). Judge was
+  `xai/grok-4-fast`; `MAX_OUTPUT_TOKENS=4096`. The force-header fix is not on `main` yet.
 
 - **2026-09-06, documentation-only code audit:** proxy `npx vitest run` passed 86
   tests in 10 files; proxy `npx tsc -p tsconfig.json --noEmit` passed; installer

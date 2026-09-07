@@ -78,12 +78,13 @@ client/protocol/account combination meets the new hardening gate.
 - [x] Compare against always-frontier and always-cheap with shared eligibility rules
 - [x] Opt-in proxy recording, redaction, retention, and manual-review curation flow
 - [x] Explicitly confirmed live generation with blinded judging and confidence intervals
-- [ ] Benchmark gate: at least 30 complete live cases, >=95% quality retention, >=50%
-      estimated cost savings, and a seeded bootstrap interval
+- [x] Benchmark gate: at least 30 complete live cases, >=95% quality retention, >=50%
+      estimated cost savings, and a seeded bootstrap interval (2026-09-07 subscription
+      live run via local proxy; see PLAN.md)
 
-The implementation can ship with deterministic and mock-live verification while
-provider quota is unavailable. The live quality/cost bar remains unproven until the
-unchecked benchmark gate passes.
+The 2026-09-07 live run passed completeness, quality retention, and estimated cost
+savings. Reports stay local/gitignored. The `x-force-model` stickiness fix used for
+that run is not on `main` until it is committed.
 
 ## Stretch
 

@@ -3180,4 +3180,57 @@ describe("proxy", () => {
     expect(res.body).toContain("grok-ok");
     expect(res.body).toContain("output_text");
   });
+
+  it("lets x-force-model override an existing task lock", async () => {
+    const models: string[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async (_url, init) => {
+            models.push("openai");
+            return new Response(JSON.stringify({ choices: [{ message: { content: "o" } }] }), { headers: { "content-type": "application/json" } });
+          },
+        },
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "k",
+          fetchImpl: async () => {
+            models.push("anthropic");
+            return new Response(JSON.stringify({ id: "msg", type: "message", role: "assistant", content: [{ type: "text", text: "a" }], stop_reason: "end_turn" }), {
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "same thread" }] }, { "x-force-model": "openai/gpt-5.6-sol" }),
+      collectRes() as never,
+    );
+    await server.handle(
+      fakeReq(
+        "/v1/chat/completions",
+        { model: "auto", messages: [{ role: "user", content: "same thread" }, { role: "assistant", content: "o" }, { role: "user", content: "again" }] },
+        { "x-force-model": "anthropic/claude-sonnet-4-5" },
+      ),
+      collectRes() as never,
+    );
+    expect(models).toEqual(["openai", "anthropic"]);
+  });
 });

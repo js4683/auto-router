@@ -1152,6 +1152,22 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
     const state = sessionState(body, text, isNewSession);
     const boundary = detectBoundary(state, undefined, stored.prevMessage);
     const lockedProvider = stored.taskTarget ? resolveProvider(stored.taskTarget).provider : "";
+    const forcedHeader = req.headers["x-force-model"];
+    if (typeof forcedHeader === "string" && forcedHeader) {
+      const result: SelectionResult = {
+        modelId: forcedHeader,
+        tier: "simple",
+        taskType: null,
+        confidence: 1,
+        reason: "x-force-model",
+        via: "force",
+        catalogSource: opts.catalog.source,
+        score: 0,
+        boundary,
+      };
+      opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
+      return result;
+    }
     if (stored.taskTarget && !boundary.isBoundary && !skippedProviders.has(lockedProvider)) {
       return {
         modelId: stored.taskTarget,
@@ -1166,8 +1182,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       };
     }
 
-    const forcedHeader = req.headers["x-force-model"];
-    const forced = typeof forcedHeader === "string" && forcedHeader ? forcedHeader : requestedModel(body);
+    const forced = requestedModel(body);
     if (forced) {
       const result: SelectionResult = {
         modelId: forced,
