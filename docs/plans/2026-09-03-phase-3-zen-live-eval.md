@@ -10,6 +10,10 @@
 
 **Spec:** `docs/plans/2026-09-03-phase-3-zen-live-eval-design.md`
 
+> This dated Phase 3 implementation plan records the pre-completion scope. Its Phase 4
+> out-of-scope statements are historical; current Phase 4 evidence and rollout status are
+> maintained in the [Phase 4 completion record](./2026-09-01-phase-4-embedding-classifier-design.md#openai-oauth-production-completion-2026-09-09).
+
 ## Global Constraints
 
 - `schemaVersion` stays 1.

@@ -185,8 +185,6 @@ Collection uses `AUTO_ROUTER_EVAL_BASE_URL`, `AUTO_ROUTER_EVAL_API_KEY`, and
 `AUTO_ROUTER_EVAL_JUDGE_MODEL`. Training and validation use
 `AUTO_ROUTER_EMBEDDING_BASE_URL`, `AUTO_ROUTER_EMBEDDING_API_KEY`, and
 `AUTO_ROUTER_EMBEDDING_MODEL`. Artifacts store aggregate centers and stats only.
-Slow OAuth-backed upstreams can use `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` from 1 through
-600,000 milliseconds (10 minutes); timeout requests are still not retried.
 Local collection, corpus, cache, and validation files stay ignored, mode `0600`,
 and need manual review before any commit.
 

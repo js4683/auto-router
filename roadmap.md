@@ -12,7 +12,7 @@ in [PLAN.md](./PLAN.md). This roadmap covers the broader project phases.
 | **1** | opencode plugin adapter with task-boundary selection/application and decision logging | ~2-3 days |
 | **2** | OpenAI-compatible proxy adapter (any harness via base_url) | ~2-3 days |
 | **3** | Eval harness: replay real sessions, measure cost saved vs quality retained | ~3 days |
-| **4** | Tier-1 embedding classifier (code complete; opt-in, disabled by default) | activation later |
+| **4** | Tier-1 embedding classifier (code and local evidence complete; opt-in, disabled by default) | public rollout later |
 
 ## Phase 0 — router-core (start here)
 
@@ -87,14 +87,13 @@ held-out evidence; retain its pricing/alias and judge limitations.
 
 ## Stretch
 
-Phase 4 is the next requested milestone: use both reviewed real coding tasks and a
-licensed public benchmark, with leakage-safe grouping and a frozen experiment. The
-authoritative execution sequence, budget, Luna/max-reasoning requirement, blockers,
-and activation criteria are in the
+Phase 4 evidence and local digest-bound activation are complete for the OpenAI OAuth
+snapshot. The remaining work is authorized Tier-1 rollout, rollback verification, and
+public default enablement. The authoritative execution sequence, budget,
+Luna/max-reasoning requirement, blockers, and activation criteria are in the
 [existing Phase 4 spec](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#execution-handoff-2026-09-07)
-and PLAN.md's Phase 4 handoff checklist. Corpus and training require their own evidence;
-public activation remains separately gated. No activation is authorized merely by updating
-these docs.
+and PLAN.md's Phase 4 checklist. Public activation remains separately gated. No activation
+is authorized merely by updating these docs.
 
 - [x] Phase 4 code complete
 
@@ -118,7 +117,8 @@ ignored. See the [completion record](PLAN.md#openai-oauth-production-completion-
 
 - [x] real observed-outcome corpus collected
 - [x] production artifact trained
-- [x] production artifact activation gate passed
+- [x] production artifact activation gate passed and local digest-bound activation verified
+- [ ] Tier-1 rollout, rollback verification, and public default enablement
 - [ ] Tier-2 LLM judge (flagged)
 - [ ] Go rewrite of the proxy for perf / single-binary distribution
 

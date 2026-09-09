@@ -11,6 +11,9 @@ default stays disabled after local digest-bound activation verification.
 
 ## Execution Handoff (2026-09-07)
 
+This is the historical execution handoff; the OpenAI completion and current rollout state
+are recorded below.
+
 The user requires **both real coding tasks and a public coding benchmark**, with
 **Luna subagents at maximum reasoning**. Verify the configured model and reasoning
 controls before delegation; report a blocker and ask before substituting. Assign
@@ -148,7 +151,7 @@ delivery require their own authorization and the required repository gate. Compl
 means reviewed mixed corpus, trained production artifact, passing held-out evidence,
 and verified authorized activation, not just a successful training command.
 
-## Production Freeze And Current Blocker (2026-09-07)
+## Historical Gemini Production Freeze And Blocker (2026-09-07)
 
 ### Frozen experiment
 
@@ -219,10 +222,13 @@ and verified authorized activation, not just a successful training command.
 
 ## Live Attempt And Recovery (2026-09-07)
 
+This is a historical pilot record. Its pending-state notes describe that attempt; the later
+OpenAI completion below records the completed recovery, validation, and local activation.
+
 This section supersedes earlier conversation claims that the pilot was production-ready,
 that its dollar estimate was verified, or that cooldown proved an RPM-only limit.
 Collection was attempted inline. **Production curation, training, validation, and
-activation are still pending. Do not train on a success-only subset of this attempt.**
+activation were pending for this attempt. Do not train on a success-only subset of it.**
 The prior Luna/max-reasoning delegation requirement above was not verified or exercised;
 confirm the next execution mode rather than claiming it was satisfied.
 
@@ -317,7 +323,7 @@ the generator overwrites the dataset and manifest.
   3 installer tests, all package builds, corpus invariants, permission/ignore checks, and
   rejection of the partial production collection by curation.
 
-## Anthropic Replacement Snapshot (2026-09-08)
+## Deferred Anthropic Replacement Snapshot (2026-09-08)
 
 - `phase-4-production-anthropic-v1.eval-dataset.local.json` is a separate ignored
   provider snapshot derived from the immutable 80-case production task corpus. It keeps
@@ -337,6 +343,8 @@ the generator overwrites the dataset and manifest.
 
 ## OpenAI OAuth Snapshot (2026-09-08)
 
+This section records the initial attempt and is superseded by the completion section below.
+
 - `phase-4-production-openai-v1.eval-dataset.local.json` and its source manifest are
   separate ignored snapshots derived from the immutable 80-case production corpus. They
   retain the 45/35 split and 57 leakage groups and do not reuse provider outcomes.
@@ -350,14 +358,14 @@ the generator overwrites the dataset and manifest.
 - The confirmed collection produced 51 complete judged rows, then stopped at
   `real-client-installer/real-2ad6fe28d89f`: the Luna outcome completed and the Sol
   request timed out at the shared 120-second eval/proxy boundary. The partial collection
-  is rejected evidence. Do not retry the timed-out request or train from this partial
-  matrix without explicit recovery approval because its billing outcome is ambiguous.
+  is rejected evidence. The timed-out request was not retried; its row is preserved
+  separately in the completed recovery record because its billing outcome was ambiguous.
 - The user chose to skip further expensive frontier calls for now. The synthetic fixture
   pipeline was exercised instead with local Ollama embeddings: three training embeddings,
   three held-out embeddings, a 62.54 ms p95 at a two-second timeout, and mode-0600 artifact
   files. Validation correctly remained ineligible because the fixture is synthetic, has
   fewer than 30 held-out cases, and misses the cost-savings gate. This is mechanics-only
-  evidence; no production artifact or Tier 1 activation exists.
+  evidence; it did not establish production-artifact eligibility or activation.
 
 ## OpenAI OAuth Production Completion (2026-09-09)
 
@@ -488,8 +496,9 @@ existing task-policy, Tier-0, context-fit, and stickiness contracts.
    strategy at selection time.
 4. Use deterministic seeded k-means over L2-normalized embeddings.
 5. Require a leakage-free held-out validation manifest bound to the exact artifact.
-6. Consider Phase 4 code complete with deterministic fixtures and mock integrations, but
-   keep production activation unchecked until a real artifact passes the live-data gate.
+6. Keep the checked-in Tier-1 default disabled and require a separately authorized rollout,
+   rollback verification, and public-default decision after a real artifact passes the
+   live-data gate.
 
 ## Ownership Boundaries
 
@@ -660,8 +669,8 @@ retraining.
 ## Artifact Contract
 
 The existing unversioned fixture format is replaced by a strict versioned format. Old
-fixture artifacts intentionally fail validation; Phase 4 has not shipped a production
-artifact requiring backward compatibility.
+fixture artifacts intentionally fail validation; the eligible OpenAI artifact remains
+private and ignored, so it is not a checked-in compatibility surface.
 
 The artifact directory contains:
 
@@ -870,9 +879,11 @@ Implementation updates must keep `README.md`, `PLAN.md`, `roadmap.md`, configura
 examples, and the verification record aligned. Status must distinguish:
 
 - Phase 4 code complete.
-- Real observed-outcome corpus collected.
-- Production artifact trained.
-- Production artifact activation gate passed.
+- Real observed-outcome corpus collected for the OpenAI snapshot.
+- Production artifact trained and retained as private local evidence.
+- Production artifact activation gate passed and local digest-bound activation verified.
+- Public Tier-1 rollout, rollback verification, and default enablement remain pending.
 
-Until the final state is proven, no documentation may claim production quality or cost
-improvement from Tier 1.
+The OpenAI artifact passed the formal gates, but its cohort metrics must not be generalized
+as product-wide quality or cost improvement. Public rollout and default enablement remain
+separately gated.

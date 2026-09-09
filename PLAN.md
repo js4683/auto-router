@@ -12,7 +12,7 @@ policy, integration behavior, scope, or verification evidence changes.
 
 ## Current Scope
 
-### Current delivery status (2026-09-08)
+### Current delivery status (2026-09-09)
 
 Public v1 is the local proxy, client installer, settings dashboard, and shared UI/CLI
 provider login. The native OpenCode plugin is optional and is not part of the public
@@ -31,10 +31,10 @@ Aliased candidate pricing and candidate-as-judge bias limit generalization; this
 Phase 4 held-out evidence. A successful login does not prove inference, quota accuracy,
 or failover.
 
-### Phase 4 execution handoff
+### Historical Gemini production freeze (2026-09-07)
 
-**Latest attempt (2026-09-07): production experiment frozen; collection blocked by a
-confirmed free-tier daily quota.** `phase-4-production-v1` contains 51 commit-pinned
+**Rejected Gemini attempt (2026-09-07): production experiment frozen; collection blocked
+by a confirmed free-tier daily quota.** `phase-4-production-v1` contains 51 commit-pinned
 HumanEval tasks and 29 bounded tasks reconstructed from this repository's public commits.
 Seed `phase4-production-v1` at ratio `0.5` fixes 45 training examples (25 public, 20 real)
 and 35 held-out examples (26 public, 9 real), with related work grouped before splitting.
@@ -53,7 +53,7 @@ the project as free tier. Confirm the key's AI Studio project shows Tier 1 or hi
 another run.
 No production curation, training, validation, or activation was completed.
 
-### Anthropic replacement handoff (2026-09-08)
+### Deferred Anthropic replacement handoff (2026-09-08)
 
 The Gemini snapshot remains immutable historical evidence. A separate ignored snapshot,
 `phase-4-production-anthropic-v1`, reuses its reviewed task content, leakage groups, and
@@ -76,7 +76,10 @@ test and full proxy/eval/build checks pass. Restart the running proxy from rebui
 before the next live smoke, then use a fresh output path after the subscription window
 resets.
 
-### OpenAI OAuth replacement handoff (2026-09-08)
+### OpenAI OAuth initial attempt (2026-09-08)
+
+This historical handoff records the initial attempt; the completed recovery and activation
+evidence are recorded below.
 
 The initial attempt paused expensive frontier collection after a shared 120-second
 timeout. A separate ignored snapshot, `phase-4-production-openai-v1`, reuses the reviewed
@@ -92,9 +95,9 @@ Offline preflight planned 160 candidate generations and 80 judges for 80 example
 confirmed collection produced 51 complete judged rows, then stopped at
 `real-client-installer/real-2ad6fe28d89f`: Luna completed and Sol timed out at the shared
 120-second eval/proxy boundary. The partial file
-`.cache/phase-4-production-openai-v1.collection.local.jsonl` is rejected evidence. Do not
-retry the timed-out request or train from the partial matrix without explicit recovery
-approval because its billing outcome is ambiguous.
+`.cache/phase-4-production-openai-v1.collection.local.jsonl` is rejected evidence. The
+timed-out request was not retried; the completion record below preserves its rejected row
+separately and trains only from the reconciled matrix.
 
 The checked-in synthetic fixture pipeline was exercised without provider generation. Local
 Ollama `nomic-embed-text` trained a mode-0600 artifact from three training embeddings and
@@ -307,8 +310,9 @@ npm run build && npm test && git diff --check
 ```
 
 Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
-before executing. It lists every local batch/remainder, duplicates, partial and lost
-generations, exact settings, prior checks, and the next-agent recovery sequence.
+when reproducing the workflow. It lists every local batch/remainder, duplicates, partial and
+lost generations, exact settings, prior checks, and the recovery sequence used for this
+completion.
 Collection now records explicit unjudged/judge failures, rejects transport failures from
 curation, binds rows to the frozen dataset and aliases, validates training options before
 embedding calls, and supports opt-in bounded 429/502/503/504 retries using provider delay
@@ -750,7 +754,7 @@ gate.
   approved narrow provider-switch exception, not permission for arbitrary per-turn
   model switching.
 - **2026-09-06:** Treat multi-account/login as partially complete until the audit gates
-  pass. Keep live quality claims and Phase 4 activation deferred. Reconfirm native-plugin
+  pass. Keep live quality claims and public Phase 4 rollout deferred. Reconfirm native-plugin
   deployment parity only when that optional integration is changed, not as a prerequisite
   for unrelated public-proxy account work.
 

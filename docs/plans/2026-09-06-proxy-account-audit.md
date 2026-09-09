@@ -38,7 +38,8 @@ account reliability problems.
 Recent implementation covers happy paths but previous completion statements were too
 broad. More than two credentials, source-aware refresh, concurrent writes, provider
 cooldowns, and real CLI lifecycle tests are not covered. The live quality gate remains
-unproven; Phase 4 activation remains deferred.
+unproven in this audit; public Phase 4 rollout remained deferred at the time. Current
+OpenAI evidence and rollout status are recorded in the [Phase 4 completion record](../../PLAN.md#openai-oauth-production-completion-2026-09-09).
 
 ## Required Findings
 
