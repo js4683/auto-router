@@ -20,16 +20,16 @@ installer. Recent work added extra credentials, per-account cards, same-provider
 retry, and on-use OAuth refresh. These are implemented happy paths, not a completed
 multi-account reliability gate.
 
-The next milestone is completing Phase 4 outcome collection after the current provider
-quota blocker, then curating, training, and validating the frozen mixed corpus.
-See [the code audit](docs/plans/2026-09-06-proxy-account-audit.md) for evidence,
-priorities, and regression criteria. This audit updated documentation only; source,
-tests, credentials, and the running proxy were not intentionally changed.
+Phase 4 production collection, curation, training, held-out validation, and local
+digest-bound activation verification are now complete for the OpenAI OAuth snapshot.
+The checked-in default remains disabled and private corpus/artifact outputs remain
+ignored. See [the code audit](docs/plans/2026-09-06-proxy-account-audit.md) for evidence,
+priorities, and regression criteria.
 
 The Phase 3 subscription run reported 30/30 complete and passed its configured gate.
 Aliased candidate pricing and candidate-as-judge bias limit generalization; this is not
-Phase 4 held-out evidence. Phase 4 production corpus, training, and activation remain
-pending. A successful login does not prove inference, quota accuracy, or failover.
+Phase 4 held-out evidence. A successful login does not prove inference, quota accuracy,
+or failover.
 
 ### Phase 4 execution handoff
 
@@ -78,8 +78,8 @@ resets.
 
 ### OpenAI OAuth replacement handoff (2026-09-08)
 
-The user chose to pause expensive frontier collection and continue with non-billable Phase
-4 work. A separate ignored snapshot, `phase-4-production-openai-v1`, reuses the reviewed
+The initial attempt paused expensive frontier collection after a shared 120-second
+timeout. A separate ignored snapshot, `phase-4-production-openai-v1`, reuses the reviewed
 task content, leakage groups, and pre-outcome split without combining Gemini, Anthropic, or
 OpenAI outcomes. Its candidate aliases are `paper/cheap=openai/gpt-5.6-luna` and
 `paper/frontier=openai/gpt-5.6-sol`; the distinct judge is `openai/gpt-5.6-terra`. The
@@ -100,8 +100,41 @@ The checked-in synthetic fixture pipeline was exercised without provider generat
 Ollama `nomic-embed-text` trained a mode-0600 artifact from three training embeddings and
 validated three held-out embeddings with a 62.54 ms p95 at a two-second embedding timeout.
 Validation correctly marked the artifact ineligible because it is synthetic, below the
-30-case minimum, and misses the cost-savings gate. This verifies mechanics only; no
-production artifact, held-out evidence, or Tier 1 activation exists.
+30-case minimum, and misses the cost-savings gate. This remains mechanics-only evidence.
+
+### OpenAI OAuth production completion (2026-09-09)
+
+- The initial 51-row collection was reconciled by immutable example ID with a fresh
+  29-row recovery collection after increasing the loopback proxy's bounded upstream
+  timeout. The merged matrix contains exactly 80 unique rows, two completed candidate
+  outcomes per row, blinded Terra judgments, provider usage, and no collection errors.
+- The fixed split remains 45 training examples (25 public, 20 real) and 35 held-out
+  examples (26 public, 9 real) across 57 leakage groups. Curation removed responses and
+  retained only reviewed task text, provenance, and candidate outcomes. Local private
+  outputs are mode `0600` and ignored.
+- Training used local Ollama `nomic-embed-text` at 768 dimensions, a 6,000-character
+  input bound, seed `phase4-production-v1`, held-out ratio `0.5`, two clusters, top-K `2`,
+  beta `9`, and minimum observations `3`. The production artifact digest is
+  `17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1`; its corpus digest
+  is `4ff03aa311b305e5d9eca62a03e077d77320b3d5a7195fc2c00e968c2383aeac`.
+- Fresh validation covered all 35 held-out examples. The embedding endpoint digest is
+  `9b514b1a65f6ebfaa4da53a116ea003831b044dc32a989733eace74554ef5b0c`; p95 latency was
+  `239.83 ms` at the 2,000 ms deployment timeout. Quality retention was `1.1097`,
+  estimated candidate-generation cost savings were `0.9537`, and every validation gate
+  passed. The seeded retention interval was `[0.9462, 1.3413]`; the current uncertainty
+  gate requires interval presence rather than a lower-bound threshold.
+- Held-out cohort metrics must not be hidden by the aggregate: public quality/cost was
+  Tier 1 `0.9585`/`$0.000302` versus frontier `0.8046`/`$0.003864`; real-task quality/cost
+  was Tier 1 `0.2556`/`$0.003014` versus frontier `0.4011`/`$0.072664`. Tier 1, Tier 0,
+  and always-cheap selected the same runtime on all 35 held-out cases, so this artifact
+  demonstrates the gate and cost floor but not a measured Tier-0 quality improvement.
+- Candidate usage totals were 43,872 input and 82,526 output tokens for cheap, estimated
+  `$0.107806`, and 43,872 input and 116,711 output tokens for frontier, estimated
+  `$2.509708`. These are API-equivalent estimates; subscription OAuth is not invoiced at
+  those rates, and judge/embedding overhead is not included in those candidate totals.
+- Local authorized runtime activation loaded the exact eligible artifact and ranked a
+  smoke task successfully. The checked-in `auto-router.json` remains `enabled: false`;
+  no private corpus, response, embedding cache, or production artifact is published.
 
 Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
 before executing. It lists every local batch/remainder, duplicates, partial and lost
@@ -123,18 +156,20 @@ only, not approval to publish, commit, or send unreviewed private content extern
   rubrics, candidate identities, prices, split seed/ratio, and training settings.
 - [x] Compute the exact split before outcomes; require >=30 held-out cases, adequate
   training coverage, and both sources represented in both partitions.
-- [ ] Verify the replacement provider's collection transport and usage/cost provenance,
+- [x] Verify the replacement provider's collection transport and usage/cost provenance,
   embeddings endpoint/model, intended deployment latency, and partial-failure handling.
-  The proxy contract and local embedding endpoint pass checks; live Anthropic transport
-  remains quota-blocked.
+  The OpenAI proxy contract and local embedding endpoint pass checks; Anthropic remains a
+  separate historical snapshot whose live transport is quota-blocked.
 - [x] Present generation/judge/embedding counts and bounded cost/token estimates; confirm
   the concrete live budget and private-data review before collection.
-- [ ] Collect and curate real outcomes without relabeling synthetic fixtures, dropping
+- [x] Collect and curate real outcomes without relabeling synthetic fixtures, dropping
   difficult cases, or automatically retrying ambiguously billed timeouts.
-- [ ] Train reproducibly and validate every activation gate plus source-cohort metrics.
-- [ ] Activate only eligible digest-bound artifacts through authorized local configuration;
-  verify boundary-only inference, stickiness, fail-open behavior, and rollback.
-- [ ] Record actual commands, provenance/split counts, digests, metrics, checks, limitations,
+- [x] Train reproducibly and validate every activation gate plus source-cohort metrics.
+- [x] Verify eligible digest-bound artifact loading and a local smoke ranking through
+  authorized configuration; keep the checked-in default disabled.
+- [ ] Complete an authorized Tier-1 rollout verification covering boundary-only inference,
+  stickiness, fail-open behavior, and rollback before enabling the public default.
+- [x] Record actual commands, provenance/split counts, digests, metrics, checks, limitations,
   and activation state in existing documents. Keep private artifacts ignored.
 
 ### In scope

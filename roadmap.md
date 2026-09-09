@@ -97,16 +97,8 @@ until their own evidence exists. No activation is authorized merely by updating 
 
 - [x] Phase 4 code complete
 
-The production experiment is now frozen at 80 cases: 51 commit-pinned HumanEval tasks
-and 29 bounded real repository tasks. Its fixed split has 45 training and 35 held-out
-examples, with both cohorts in both partitions. Provenance, official prices, usage
-accounting, durable failure evidence, explicit unjudged state, strict curation binding,
-training preflight, and bounded provider-advised HTTP retries are verified locally.
-Collection remains blocked by Gemini's confirmed 20-request free-tier daily limit for
-`gemini-3.6-flash`; Batch is unavailable for that model on the free tier. Only one unique
-production case completed both candidates and blinded judging, so no production corpus,
-artifact, validation, or activation exists. A requested paid-tier retry still returned
-the free-tier quota ID after a ten-minute propagation wait. See the
+The original Gemini production attempt remains historical rejected evidence: its confirmed
+20-request free-tier daily limit prevented the frozen run from completing. See the
 [production freeze and current blocker](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#production-freeze-and-current-blocker-2026-09-07).
 
 The current replacement path is the separate Anthropic/Ollama snapshot documented in the
@@ -114,9 +106,17 @@ The current replacement path is the separate Anthropic/Ollama snapshot documente
 Its proxy usage translation and local embedding smoke pass, but Claude subscription quota
 blocked the first live smoke; no replacement outcomes or production artifact exist.
 
-- [ ] real observed-outcome corpus collected
-- [ ] production artifact trained
-- [ ] production artifact activation gate passed
+The OpenAI OAuth replacement completed the frozen 80-case experiment. The reconciled
+corpus has 80 complete judged rows, the fixed split has 45 training and 35 held-out
+examples, and a non-synthetic artifact passed every validation gate with a 239.83 ms p95
+embedding latency, 1.1097 quality retention, and 95.37% estimated candidate-generation
+cost savings. Local digest-bound activation was verified; the checked-in default remains
+disabled and all corpus, response, embedding, artifact, and validation files remain
+ignored. See the [completion record](PLAN.md#openai-oauth-production-completion-2026-09-09).
+
+- [x] real observed-outcome corpus collected
+- [x] production artifact trained
+- [x] production artifact activation gate passed
 - [ ] Tier-2 LLM judge (flagged)
 - [ ] Go rewrite of the proxy for perf / single-binary distribution
 
