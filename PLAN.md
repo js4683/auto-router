@@ -136,6 +136,76 @@ Validation correctly marked the artifact ineligible because it is synthetic, bel
   smoke task successfully. The checked-in `auto-router.json` remains `enabled: false`;
   no private corpus, response, embedding cache, or production artifact is published.
 
+### Sanitized execution record
+
+The commands below record the actual Phase 4 recovery and verification sequence. The
+private API-key environment values are intentionally omitted; local output paths remain
+ignored and mode `0600`.
+
+Recovery collection, using a 600,000-millisecond proxy deadline and a 660,000-millisecond
+eval deadline:
+
+```bash
+AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 \
+AUTO_ROUTER_EVAL_JUDGE_MODEL=openai/gpt-5.6-terra \
+AUTO_ROUTER_EVAL_TIMEOUT_MS=660000 \
+AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
+npm run eval -- collect-avengers \
+  --dataset .cache/phase-4-production-openai-v1.recovery.eval-dataset.local.json \
+  --models paper/cheap=openai/gpt-5.6-luna,paper/frontier=openai/gpt-5.6-sol \
+  --output .cache/phase-4-production-openai-v1.recovery2.collection.local.jsonl \
+  --confirm-live
+```
+
+Immutable-ID reconciliation and compact JSON Lines conversion:
+
+```bash
+jq -s 'add | unique_by(.id)' \
+  .cache/phase-4-production-openai-v1.collection.local.jsonl \
+  .cache/phase-4-production-openai-v1.recovery2.collection.local.jsonl \
+  > .cache/phase-4-production-openai-v1.complete.collection.local.jsonl
+jq -c '.[]' \
+  .cache/phase-4-production-openai-v1.complete.collection.local.jsonl \
+  > .cache/phase-4-production-openai-v1.complete-v2.collection.local.jsonl
+```
+
+Curation, training, and held-out validation used the frozen aliases, split, and local
+Ollama embedding endpoint:
+
+```bash
+npm run eval -- curate-avengers \
+  --input .cache/phase-4-production-openai-v1.complete-v2.collection.local.jsonl \
+  --dataset phase-4-production-openai-v1.eval-dataset.local.json \
+  --models paper/cheap=openai/gpt-5.6-luna,paper/frontier=openai/gpt-5.6-sol \
+  --output .cache/phase-4-production-openai-v1.corpus.local.json
+
+AUTO_ROUTER_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1 \
+AUTO_ROUTER_EMBEDDING_MODEL=nomic-embed-text \
+npm run eval -- train-avengers \
+  --corpus .cache/phase-4-production-openai-v1.corpus.local.json \
+  --artifact-dir .cache/phase-4-production-openai-v1.artifact \
+  --cache .cache/phase-4-production-openai-v1.embeddings.local.json \
+  --clusters 2 --seed phase4-production-v1 --held-out-ratio 0.5 \
+  --top-k 2 --beta 9 --min-observations 3 --max-input-chars 6000 \
+  --timeout-ms 30000 --confirm-live
+
+AUTO_ROUTER_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1 \
+AUTO_ROUTER_EMBEDDING_MODEL=nomic-embed-text \
+npm run eval -- validate-avengers \
+  --corpus .cache/phase-4-production-openai-v1.corpus.local.json \
+  --artifact-dir .cache/phase-4-production-openai-v1.artifact \
+  --output .cache/phase-4-production-openai-v1.validation.local \
+  --bootstrap-seed phase4-production-v1-bootstrap --timeout-ms 2000 --confirm-live
+```
+
+Repository verification was:
+
+```bash
+npm run build
+npm test
+git diff --check
+```
+
 Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
 before executing. It lists every local batch/remainder, duplicates, partial and lost
 generations, exact settings, prior checks, and the next-agent recovery sequence.
@@ -655,9 +725,9 @@ gate.
   auth, and request preparation. `chat.params` remains observation-only; no OpenCode
   patch or upstream hook is required for user-message routing.
 - [x] Phase 4 code complete
-- [ ] real observed-outcome corpus collected
-- [ ] production artifact trained
-- [ ] production artifact activation gate passed
+- [x] real observed-outcome corpus collected
+- [x] production artifact trained
+- [x] production artifact activation gate passed
 
 ## Supporting Documents
 

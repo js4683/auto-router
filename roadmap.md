@@ -92,8 +92,9 @@ licensed public benchmark, with leakage-safe grouping and a frozen experiment. T
 authoritative execution sequence, budget, Luna/max-reasoning requirement, blockers,
 and activation criteria are in the
 [existing Phase 4 spec](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#execution-handoff-2026-09-07)
-and PLAN.md's Phase 4 handoff checklist. Corpus, training, and activation stay unchecked
-until their own evidence exists. No activation is authorized merely by updating these docs.
+and PLAN.md's Phase 4 handoff checklist. Corpus and training require their own evidence;
+public activation remains separately gated. No activation is authorized merely by updating
+these docs.
 
 - [x] Phase 4 code complete
 

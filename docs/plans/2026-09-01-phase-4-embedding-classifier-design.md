@@ -98,9 +98,10 @@ thresholds until validation passes; resolve product tradeoffs explicitly.
   metadata; explicit per-day quota exhaustion fails immediately. Library callers retain
   single-attempt behavior unless they opt in. Timeouts are never retried because their
   billing outcome is ambiguous.
-- The loopback proxy's external-request deadline defaults to 120 seconds and accepts the
-  bounded `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` override through 600 seconds. This is useful
-  for slow OAuth-backed model completions but does not change the no-timeout-retry rule.
+- The loopback proxy's external-request deadline defaults to 120,000 milliseconds and accepts
+  the bounded `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` override from 1 through 600,000 milliseconds
+  (10 minutes). This is useful for slow OAuth-backed model completions but does not change
+  the no-timeout-retry rule.
 - Collection refuses an existing output and has no resume flag. A judge exception can
   abort after billed generation; retain partial results and explicitly reconcile missing
   outcomes without silently repeating calls or cherry-picking successful cases.
@@ -361,9 +362,9 @@ the generator overwrites the dataset and manifest.
 ## OpenAI OAuth Production Completion (2026-09-09)
 
 The initial OpenAI collection stopped at the first real task because the loopback proxy's
-120-second upstream deadline was shorter than the Sol completion. The proxy now accepts
-`AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` from 1 through 600 seconds; timeouts remain single-attempt
-because their billing outcome is ambiguous. Recovery was run with a 600-second proxy
+120,000-millisecond upstream deadline was shorter than the Sol completion. The proxy now
+accepts `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` from 1 through 600,000 milliseconds (10 minutes);
+timeouts remain single-attempt because their billing outcome is ambiguous. Recovery was run with a 600-second proxy
 deadline, a 660-second eval deadline, the frozen two candidates and Terra judge, and a
 fresh output path. The initial 51 rows and fresh 29 rows were reconciled by immutable ID.
 
