@@ -309,6 +309,25 @@ Repository verification was:
 npm run build && npm test && git diff --check
 ```
 
+### Authorized local opt-in rollout verification (2026-09-09)
+
+Using the ignored runtime configuration, the eligible non-synthetic artifact digest
+`17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1`, and local
+`nomic-embed-text` at `http://127.0.0.1:11434/v1`:
+
+- A new session routed through `avengers-pro` and returned the expected artifact digest.
+- A same-session `continue` request returned `stay-sticky` with the same model and digest;
+  a second new session independently routed through `avengers-pro`.
+- `x-force-model: openai/gpt-5.6-sol` bypassed embedding selection and returned `via: force`.
+- Removing `AUTO_ROUTER_EMBEDDING_API_KEY` kept `/health` at 200 and fell back to
+  `free-first` without an artifact digest or proxy crash.
+- Restarting with checked-in `auto-router.json` (`avengersPro.enabled: false`) kept
+  `/health` at 200 and returned Tier-0 `free-first` without an artifact digest.
+
+These are authorized local opt-in and rollback checks only. The checked-in public default
+remains disabled; no private corpus, response, embedding, credential, or artifact file was
+published.
+
 Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
 when reproducing the workflow. It lists every local batch/remainder, duplicates, partial and
 lost generations, exact settings, prior checks, and the recovery sequence used for this
@@ -341,8 +360,10 @@ only, not approval to publish, commit, or send unreviewed private content extern
 - [x] Train reproducibly and validate every activation gate plus source-cohort metrics.
 - [x] Verify eligible digest-bound artifact loading and a local smoke ranking through
   authorized configuration; keep the checked-in default disabled.
-- [ ] Complete an authorized Tier-1 rollout verification covering boundary-only inference,
-  stickiness, fail-open behavior, and rollback before enabling the public default.
+- [x] Complete an authorized local Tier-1 rollout verification covering boundary-only
+  inference, stickiness, fail-open behavior, force-header bypass, and rollback; keep the
+  public default disabled.
+- [ ] Enable the public Tier-1 default after a separately authorized staged rollout.
 - [x] Record actual commands, provenance/split counts, digests, metrics, checks, limitations,
   and activation state in existing documents. Keep private artifacts ignored.
 
@@ -832,7 +853,8 @@ gate.
 - [x] real observed-outcome corpus collected
 - [x] production artifact trained
 - [x] production artifact activation gates passed and digest-bound local activation verified
-- [ ] Tier-1 rollout, rollback verification, and public default enablement
+- [x] Authorized local Tier-1 rollout and rollback verification
+- [ ] Public Tier-1 rollout and default enablement
 
 ## Supporting Documents
 

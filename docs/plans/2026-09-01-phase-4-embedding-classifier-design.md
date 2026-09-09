@@ -5,7 +5,8 @@
 complete: the shared `router-core` embedding boundary, observed-outcome collection,
 artifact building, held-out validation, and opt-in runtime wiring are implemented. The
 80-row production corpus and eligible artifact remain local/ignored; the checked-in
-default stays disabled after local digest-bound activation verification.
+default stays disabled. Current rollout evidence is maintained in the
+[canonical PLAN verification record](../../PLAN.md#authorized-local-opt-in-rollout-verification-2026-09-09).
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
@@ -873,16 +874,18 @@ Rollback is setting `avengersPro.enabled` to `false` and restarting the proxy. N
 migration or state rewrite is required. Existing task locks remain valid until their
 normal session lifetime ends.
 
+Current local rollout evidence, artifact digest, and activation state are maintained in the
+[canonical PLAN verification record](../../PLAN.md#authorized-local-opt-in-rollout-verification-2026-09-09).
+This spec owns the rollout and rollback contract above; public staged rollout and public
+default enablement remain separately authorized work.
+
 ## Documentation And Status
 
 Implementation updates must keep `README.md`, `PLAN.md`, `roadmap.md`, configuration
-examples, and the verification record aligned. Status must distinguish:
-
-- Phase 4 code complete.
-- Real observed-outcome corpus collected for the OpenAI snapshot.
-- Production artifact trained and retained as private local evidence.
-- Production artifact activation gate passed and local digest-bound activation verified.
-- Public Tier-1 rollout, rollback verification, and default enablement remain pending.
+examples, and the verification record aligned. Status must distinguish private local
+evidence, authorized local verification, and public rollout; the [canonical PLAN status
+record](../../PLAN.md#openai-oauth-production-completion-2026-09-09) owns those current
+values.
 
 The OpenAI artifact passed the formal gates, but its cohort metrics must not be generalized
 as product-wide quality or cost improvement. Public rollout and default enablement remain

@@ -202,9 +202,12 @@ trivial-task model.
 Use task-boundary embeddings and observed model outcomes to train deterministic clusters,
 then constrained-rerank eligible models. The checked-in fixture-backed path remains
 disabled by default and falls back to Tier 0. The OpenAI production corpus, artifact,
-validation gate, and local digest-bound activation have been verified, but the checked-in
-default remains disabled and full rollout verification is still pending. The full
-architecture, including the held-out activation gate, is documented in the
+validation gate, and local digest-bound activation have been verified. Authorized local
+Tier-1 rollout and rollback verification are recorded in the
+[canonical PLAN verification record](./PLAN.md#authorized-local-opt-in-rollout-verification-2026-09-09);
+the checked-in default remains disabled while public staged rollout and public default
+enablement remain pending. The full architecture, including the held-out activation gate,
+is documented in the
 [Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md).
 
 ### Tier 2 — LLM judge (optional, later)
