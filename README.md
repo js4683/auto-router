@@ -60,8 +60,8 @@ the primary OpenCode/Claude Code login. API keys are fallback
 and are written to `~/.config/auto-router/.env` mode `0600`. Gemini API-key inference
 uses an AI Studio key; Antigravity login uses Google OAuth and Cloud Code Assist
 instead. Use `npm run login -- gemini` or `npm run login -- antigravity` after setting
-`GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` for the Antigravity OAuth
-client. OAuth client credentials are not bundled. OAuth access tokens are never sent as Gemini API keys.
+`GOOGLE_OAUTH_CLIENT_ID`; set `GOOGLE_OAUTH_CLIENT_SECRET` too when the OAuth client
+requires a secret. OAuth client credentials are not bundled. OAuth access tokens are never sent as Gemini API keys.
 Antigravity OAuth discovery is scoped to each Google account and its Cloud Code Assist
 project; a Gemini API key bypasses OAuth discovery.
 OpenCode Zen is used only when a Zen key exists and is skipped after a billing
@@ -86,8 +86,9 @@ Default listen address is `http://127.0.0.1:8787`.
 - Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.
 
 The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
-requests. It translates text and function calls across Zen's Responses API and
-Gemini's `generateContent` API, including client-compatible streaming envelopes.
+requests. It translates text and function calls across Zen's Responses API, Gemini's
+`generateContent` API, and the separate Antigravity Cloud Code Assist transport,
+including client-compatible streaming envelopes.
 Gemini chat completions and native OpenAI Responses streams are forwarded
 incrementally as upstream chunks arrive. Cross-protocol paths without an incremental
 translator request buffered upstream JSON, then synthesize a client-compatible event

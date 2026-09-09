@@ -32,9 +32,11 @@ provider auth and request preparation. Therefore, assigning
 `output.message.model = { providerID, modelID }` applies the selected model to the
 complete current turn without an OpenCode patch.
 
-For other harnesses, the local proxy remains an apply path but can switch models only
-through four API-key backends. It cannot use all OpenCode `/connect` providers (OAuth,
-Copilot, Bedrock, and custom npm providers). This phase does not extend the proxy.
+For other harnesses, the local proxy remains an apply path. It does not reuse all
+OpenCode `/connect` providers; current provider-specific transport and credential
+behavior, including the later Google OAuth/Antigravity path, is documented in the
+[universal proxy design](./2026-09-04-universal-proxy-installer-design.md). This phase
+does not extend the proxy.
 
 Priority: the lightweight router must apply selections locally in OpenCode using the
 same providers the user already connected.
