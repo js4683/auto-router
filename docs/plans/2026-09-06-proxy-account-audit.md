@@ -135,8 +135,9 @@ now provides Google OAuth for Cloud Code Assist, but it still does not provision
 Studio key required for Gemini API-key inference.
 
 `package.json:12` wraps the login script with a build and another npm command but no
-explicit inner `--`; option forwarding is not subprocess-tested. Neither root nor proxy
-declares a bin, so the approved `npx auto-router login` interface is not delivered.
+explicit inner `--`; option forwarding is not subprocess-tested. Root and proxy now
+declare local `auto-router` bins, but the package remains private, so the approved
+published `npx auto-router login` interface is not delivered.
 
 Fix: keep interactive completion in one process or explicitly persist/reuse bounded
 sessions for non-interactive completion; do not claim a fresh `--code` command works.
@@ -250,7 +251,7 @@ both operator diagnosis and trustworthiness of future evaluation data.
 
 ## Next Delivery Slices
 
-1. A1-A4: secure management, terminating retries, source-aware refresh, Gemini eligibility.
+1. A1-A3: secure management, terminating retries, and source-aware refresh.
 2. A5-A8: session/account identity, persistence/concurrency, CLI lifecycle, cooldowns.
 3. A9-A14: trustworthy quota/evidence, dynamic eligibility, installer safety, bounded IO,
    and protocol completion. Add browser and controlled live acceptance afterwards.

@@ -51,8 +51,7 @@ plugin is not distributed by the installer. UI/CLI login, extra-account storage,
 two-account 429 retry, and on-use token refresh have happy-path tests; release readiness
 is still blocked by [the 2026-09-06 audit](docs/plans/2026-09-06-proxy-account-audit.md).
 
-- [ ] Fix management-route trust boundaries, retry exhaustion, refresh-store identity,
-  and Gemini credential eligibility.
+- [ ] Fix management-route trust boundaries, retry exhaustion, and refresh-store identity.
 - [ ] Verify client session identity, safe concurrent persistence, CLI session lifecycle,
   and cooldown-aware account selection.
 - [ ] Correct quota reporting, dynamic eligibility, installer ownership, bounded IO,

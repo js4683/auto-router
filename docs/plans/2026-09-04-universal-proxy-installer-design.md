@@ -43,8 +43,10 @@ npm test --workspace=@auto-router/proxy
 The installer workspace is `@auto-router/install`. Terminal login currently lives in
 `@auto-router/proxy`; after building it, the explicit workspace form is
 `npm run login --workspace=@auto-router/proxy -- claude` (also codex/grok/zen/gemini/antigravity).
-There is no published `auto-router` binary or package `bin` entry. Root npm forwarding
-and non-interactive PKCE completion are open acceptance items, not verified interfaces.
+The root package and `@auto-router/proxy` expose a local `auto-router` bin after building.
+The package remains private, so no published `npx auto-router` package is delivered. Root
+npm forwarding and non-interactive PKCE completion are open acceptance items, not verified
+interfaces.
 
 ## Architecture
 

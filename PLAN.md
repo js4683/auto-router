@@ -411,8 +411,8 @@ Supported strategies:
 - [x] Keep headerless follow-ups sticky using the first user message (A5).
 - [x] Atomically persist extra-account files (A6). Malformed-store preservation and
   chmod of existing files remain open.
-- [x] Require `--id` with `--code` and bound device-login polls (A7). Published bin /
-  npm forwarding remain open.
+- [x] Require `--id` with `--code` and bound device-login polls (A7). Local bins are
+  declared; published package delivery and npm forwarding remain open.
 - [x] Cool down rate-limited accounts for 5 minutes without changing the model (A8).
 - [x] Treat Codex `used_percent` as already-percent and do not invent xAI /me usage (A9).
   Opaque-token labels remain open.
@@ -430,8 +430,9 @@ Supported strategies:
   distinct provider accounts or independent quota pools.
 
 A1-A14 behavior tests and fixes landed in the proxy/install workspaces. Remaining:
-malformed extra-account files, published `auto-router` bin, opaque-token dashboard
-labels, live catalog recompute after connect, and the live/browser acceptance gate.
+malformed extra-account files, published `auto-router` package delivery, opaque-token
+dashboard labels, live catalog recompute after connect, and the live/browser acceptance
+gate.
 
 ## Acceptance Criteria
 
