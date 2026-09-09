@@ -136,45 +136,82 @@ Validation correctly marked the artifact ineligible because it is synthetic, bel
   smoke task successfully. The checked-in `auto-router.json` remains `enabled: false`;
   no private corpus, response, embedding cache, or production artifact is published.
 
-### Sanitized execution record
+### Sanitized OpenAI production execution record
 
-The commands below record the actual Phase 4 recovery and verification sequence. The
-private API-key environment values are intentionally omitted; local output paths remain
-ignored and mode `0600`.
+Required credential variables were inherited from the authorized local environment; their
+values are intentionally omitted. Every path below is an ignored local output. The proxy
+used the 600,000 ms upstream deadline and the eval client used a 660,000 ms deadline.
 
-Recovery collection, using a 600,000-millisecond proxy deadline and a 660,000-millisecond
-eval deadline:
+Run the collection proxy in one terminal:
 
 ```bash
+set -euo pipefail
+AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
+AUTO_ROUTER_PORT=8787 \
+npm start --workspace=@auto-router/proxy
+```
+
+After the initial collection, run recovery and reconciliation in a second terminal. The
+initial raw file contains 51 usable rows plus one persisted failed timeout row; the
+recovery dataset contains exactly the 29 missing turns. The rejected row remains separate
+and is never retried.
+
+```bash
+set -euo pipefail
+umask 077
+
+initial_collection=".cache/phase-4-production-openai-v1.collection.local.jsonl"
+clean_initial_collection=".cache/phase-4-production-openai-v1.initial-51.collection.local.jsonl"
+rejected_initial_collection=".cache/phase-4-production-openai-v1.rejected-timeout.collection.local.jsonl"
+recovery_dataset=".cache/phase-4-production-openai-v1.recovery.eval-dataset.local.json"
+recovery_collection=".cache/phase-4-production-openai-v1.recovery2.collection.local.jsonl"
+
+jq -c 'select(.id == "real-client-installer/real-2ad6fe28d89f")' \
+  "$initial_collection" > "$rejected_initial_collection"
+jq -c 'select(.id != "real-client-installer/real-2ad6fe28d89f")' \
+  "$initial_collection" > "$clean_initial_collection"
+chmod 600 "$rejected_initial_collection" "$clean_initial_collection"
+test "$(wc -l < "$rejected_initial_collection" | tr -d ' ')" -eq 1
+test "$(wc -l < "$clean_initial_collection" | tr -d ' ')" -eq 51
+jq -e '([.sessions[].turns[]] | length) == 29' "$recovery_dataset" >/dev/null
+
 AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 \
 AUTO_ROUTER_EVAL_JUDGE_MODEL=openai/gpt-5.6-terra \
 AUTO_ROUTER_EVAL_TIMEOUT_MS=660000 \
-AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
 npm run eval -- collect-avengers \
-  --dataset .cache/phase-4-production-openai-v1.recovery.eval-dataset.local.json \
+  --dataset "$recovery_dataset" \
   --models paper/cheap=openai/gpt-5.6-luna,paper/frontier=openai/gpt-5.6-sol \
-  --output .cache/phase-4-production-openai-v1.recovery2.collection.local.jsonl \
+  --output "$recovery_collection" \
   --confirm-live
-```
 
-Immutable-ID reconciliation and compact JSON Lines conversion:
+reconciled=".cache/phase-4-production-openai-v1.complete-v2.collection.local.jsonl"
+temporary="${reconciled}.tmp"
+jq -e -c -s '
+  def valid_outcome:
+    if type != "object" then false
+    elif has("collectionError") or has("error") then false
+    else .terminalState == "completed"
+      and .qualitySource == "judge"
+      and .usageSource == "provider"
+    end;
+  def valid_row:
+    if type != "object" then false
+    elif (.id | type) != "string" or (.id | length) == 0 then false
+    elif has("collectionError") or has("error") then false
+    elif (.outcomes | type) != "array" or (.outcomes | length) != 2 then false
+    else all(.outcomes[]; valid_outcome)
+    end;
+  if type != "array" then error("reconciliation input must be an array")
+  elif length != 80 then error("expected exactly 80 rows")
+  elif ([.[].id] | unique | length) != 80 then error("expected exactly 80 unique example IDs")
+  elif any(.[]; (valid_row | not)) then error("every row must contain two completed judged provider outcomes without errors")
+  else sort_by(.id)[] end
+' "$clean_initial_collection" "$recovery_collection" > "$temporary"
+chmod 600 "$temporary"
+mv "$temporary" "$reconciled"
 
-```bash
-jq -s 'add | unique_by(.id)' \
-  .cache/phase-4-production-openai-v1.collection.local.jsonl \
-  .cache/phase-4-production-openai-v1.recovery2.collection.local.jsonl \
-  > .cache/phase-4-production-openai-v1.complete.collection.local.jsonl
-jq -c '.[]' \
-  .cache/phase-4-production-openai-v1.complete.collection.local.jsonl \
-  > .cache/phase-4-production-openai-v1.complete-v2.collection.local.jsonl
-```
-
-Curation, training, and held-out validation used the frozen aliases, split, and local
-Ollama embedding endpoint:
-
-```bash
 npm run eval -- curate-avengers \
-  --input .cache/phase-4-production-openai-v1.complete-v2.collection.local.jsonl \
+  --input "$reconciled" \
   --dataset phase-4-production-openai-v1.eval-dataset.local.json \
   --models paper/cheap=openai/gpt-5.6-luna,paper/frontier=openai/gpt-5.6-sol \
   --output .cache/phase-4-production-openai-v1.corpus.local.json
@@ -198,12 +235,25 @@ npm run eval -- validate-avengers \
   --bootstrap-seed phase4-production-v1-bootstrap --timeout-ms 2000 --confirm-live
 ```
 
+Stop the collection proxy, then restart it with the runtime configuration. Because the
+workspace script runs from `packages/proxy`, the root `.cache` path is intentionally
+workspace-relative. The route assertion proves the digest-bound Tier-1 path was loaded:
+
+```bash
+AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
+AUTO_ROUTER_CONFIG=../../.cache/phase-4-production-openai-v1.runtime.json \
+npm start --workspace=@auto-router/proxy
+
+curl --fail --silent --show-error http://127.0.0.1:8787/v1/route \
+  -H 'content-type: application/json' \
+  --data '{"model":"auto","messages":[{"role":"user","content":"smoke"}]}' \
+  | jq --exit-status '.via == "avengers-pro"' >/dev/null
+```
+
 Repository verification was:
 
 ```bash
-npm run build
-npm test
-git diff --check
+npm run build && npm test && git diff --check
 ```
 
 Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
@@ -727,7 +777,8 @@ gate.
 - [x] Phase 4 code complete
 - [x] real observed-outcome corpus collected
 - [x] production artifact trained
-- [x] production artifact activation gate passed
+- [x] production artifact activation gates passed and digest-bound local activation verified
+- [ ] Tier-1 rollout, rollback verification, and public default enablement
 
 ## Supporting Documents
 

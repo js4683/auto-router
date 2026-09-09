@@ -395,6 +395,9 @@ fresh output path. The initial 51 rows and fresh 29 rows were reconciled by immu
   task successfully. The checked-in configuration remains `enabled: false`; private corpus,
   responses, embeddings, artifact, and validation outputs are ignored and unpublished.
 
+The sanitized recovery, reconciliation, curation, training, validation, runtime-smoke,
+and repository-check commands are recorded in the [canonical execution record](../../PLAN.md#sanitized-openai-production-execution-record).
+
 ### Deferred Anthropic replacement sequence
 
 The OpenAI completion above satisfies the current Phase 4 delivery. The following
