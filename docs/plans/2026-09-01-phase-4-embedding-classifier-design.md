@@ -5,7 +5,8 @@
 complete: the shared `router-core` embedding boundary, observed-outcome collection,
 artifact building, held-out validation, and opt-in runtime wiring are implemented. The
 80-row production corpus and eligible artifact remain local/ignored; the checked-in
-default stays disabled after local digest-bound activation verification.
+default stays disabled. Current rollout evidence is maintained in the
+[canonical PLAN verification record](../../PLAN.md#authorized-local-opt-in-rollout-verification-2026-09-09).
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
@@ -873,32 +874,18 @@ Rollback is setting `avengersPro.enabled` to `false` and restarting the proxy. N
 migration or state rewrite is required. Existing task locks remain valid until their
 normal session lifetime ends.
 
-### Authorized local rollout evidence (2026-09-09)
-
-The ignored OpenAI runtime configuration was exercised locally with the eligible
-non-synthetic artifact digest `17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1`
-and the local `nomic-embed-text` endpoint. A new session routed through `avengers-pro`,
-same-session follow-up traffic returned `stay-sticky` with the same model and digest, and
-a second new session independently activated Tier 1. The explicit force header bypassed
-embedding selection as `via: force`.
-
-Removing the embedding credential kept the proxy healthy and fell back to Tier 0 without
-an artifact digest. Restarting with the checked-in `avengersPro.enabled: false` config
-also kept the proxy healthy and returned Tier 0 without an artifact digest. These checks
-are local opt-in evidence; public staged rollout and public default enablement remain
-separately authorized work.
+Current local rollout evidence, artifact digest, and activation state are maintained in the
+[canonical PLAN verification record](../../PLAN.md#authorized-local-opt-in-rollout-verification-2026-09-09).
+This spec owns the rollout and rollback contract above; public staged rollout and public
+default enablement remain separately authorized work.
 
 ## Documentation And Status
 
 Implementation updates must keep `README.md`, `PLAN.md`, `roadmap.md`, configuration
-examples, and the verification record aligned. Status must distinguish:
-
-- Phase 4 code complete.
-- Real observed-outcome corpus collected for the OpenAI snapshot.
-- Production artifact trained and retained as private local evidence.
-- Production artifact activation gate passed and local digest-bound activation verified.
-- Authorized local Tier-1 rollout and rollback verification are complete.
-- Public Tier-1 rollout and default enablement remain pending.
+examples, and the verification record aligned. Status must distinguish private local
+evidence, authorized local verification, and public rollout; the [canonical PLAN status
+record](../../PLAN.md#openai-oauth-production-completion-2026-09-09) owns those current
+values.
 
 The OpenAI artifact passed the formal gates, but its cohort metrics must not be generalized
 as product-wide quality or cost improvement. Public rollout and default enablement remain
