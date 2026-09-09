@@ -12,7 +12,7 @@ policy, integration behavior, scope, or verification evidence changes.
 
 ## Current Scope
 
-### Current delivery status (2026-09-06)
+### Current delivery status (2026-09-08)
 
 Public v1 is the local proxy, client installer, settings dashboard, and shared UI/CLI
 provider login. The native OpenCode plugin is optional and is not part of the public
@@ -20,14 +20,122 @@ installer. Recent work added extra credentials, per-account cards, same-provider
 retry, and on-use OAuth refresh. These are implemented happy paths, not a completed
 multi-account reliability gate.
 
-The next work is correctness and security hardening, not more providers or training.
+The next milestone is completing Phase 4 outcome collection after the current provider
+quota blocker, then curating, training, and validating the frozen mixed corpus.
 See [the code audit](docs/plans/2026-09-06-proxy-account-audit.md) for evidence,
 priorities, and regression criteria. This audit updated documentation only; source,
 tests, credentials, and the running proxy were not intentionally changed.
 
-Live benchmark acceptance remains unproven and deferred at the user's request.
-Phase 4 code exists, but corpus collection, training, and production activation remain
-deferred. A successful login does not prove inference, quota accuracy, or failover.
+The Phase 3 subscription run reported 30/30 complete and passed its configured gate.
+Aliased candidate pricing and candidate-as-judge bias limit generalization; this is not
+Phase 4 held-out evidence. Phase 4 production corpus, training, and activation remain
+pending. A successful login does not prove inference, quota accuracy, or failover.
+
+### Phase 4 execution handoff
+
+**Latest attempt (2026-09-07): production experiment frozen; collection blocked by a
+confirmed free-tier daily quota.** `phase-4-production-v1` contains 51 commit-pinned
+HumanEval tasks and 29 bounded tasks reconstructed from this repository's public commits.
+Seed `phase4-production-v1` at ratio `0.5` fixes 45 training examples (25 public, 20 real)
+and 35 held-out examples (26 public, 9 real), with related work grouped before splitting.
+The source manifest, original tests, candidate identities, official prices, judge,
+embedding model, and training settings are local, ignored, and mode 0600.
+
+The direct Gemini smoke case completed and was judged. The full attempt is rejected:
+its first run generated no complete judged pairs, and the retry run produced one complete
+pair before `gemini-3.6-flash` exhausted
+`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20. Official documentation says
+RPD resets at midnight Pacific; Batch is unavailable on that model's free tier. Collection
+cannot reach 80 complete pairs without a paid-tier project or multiple daily reset windows.
+The requested paid-tier retry did not verify: after a ten-minute propagation wait one
+minimal frontier request returned 200, but the immediate next request again identified
+the project as free tier. Confirm the key's AI Studio project shows Tier 1 or higher before
+another run.
+No production curation, training, validation, or activation was completed.
+
+### Anthropic replacement handoff (2026-09-08)
+
+The Gemini snapshot remains immutable historical evidence. A separate ignored snapshot,
+`phase-4-production-anthropic-v1`, reuses its reviewed task content, leakage groups, and
+pre-outcome split without combining any Gemini outcomes. Candidates are
+`paper/cheap=anthropic/claude-haiku-4-5` and `paper/frontier=anthropic/claude-sonnet-5`;
+the distinct judge is `anthropic/claude-opus-5`. Anthropic's official model and pricing
+pages support those IDs and API-equivalent rates of $1/$5, $2/$10, and $5/$25 per million
+input/output tokens respectively. Cache rates are recorded in the local manifest.
+
+Generation is configured through the loopback proxy at `http://127.0.0.1:8787/v1`; the
+Claude subscription OAuth credential is not sent directly to Anthropic by the eval CLI.
+Training and validation use local Ollama `nomic-embed-text` at 768 dimensions. The first
+Anthropic smoke after preparation returned HTTP 429 because the Claude Pro five-hour
+window was at 100% and reported about one hour until reset. No Anthropic outcomes have
+been collected, curated, trained, validated, or activated.
+
+The proxy now maps Anthropic native usage, including cache read/write tokens, into the
+OpenAI-compatible `usage` envelope required by the eval collector. The focused regression
+test and full proxy/eval/build checks pass. Restart the running proxy from rebuilt `dist`
+before the next live smoke, then use a fresh output path after the subscription window
+resets.
+
+### OpenAI OAuth replacement handoff (2026-09-08)
+
+The user chose to pause expensive frontier collection and continue with non-billable Phase
+4 work. A separate ignored snapshot, `phase-4-production-openai-v1`, reuses the reviewed
+task content, leakage groups, and pre-outcome split without combining Gemini, Anthropic, or
+OpenAI outcomes. Its candidate aliases are `paper/cheap=openai/gpt-5.6-luna` and
+`paper/frontier=openai/gpt-5.6-sol`; the distinct judge is `openai/gpt-5.6-terra`. The
+snapshot records official OpenAI standard short-context API-equivalent prices of
+$0.20/$1.20 for Luna, $4/$20 for Sol, and $2/$12 for Terra per million input/output
+tokens, with cache rates in the local manifest. Chat Completions probes for all three
+models returned HTTP 200 with provider usage through the rebuilt loopback proxy.
+
+Offline preflight planned 160 candidate generations and 80 judges for 80 examples. The
+confirmed collection produced 51 complete judged rows, then stopped at
+`real-client-installer/real-2ad6fe28d89f`: Luna completed and Sol timed out at the shared
+120-second eval/proxy boundary. The partial file
+`.cache/phase-4-production-openai-v1.collection.local.jsonl` is rejected evidence. Do not
+retry the timed-out request or train from the partial matrix without explicit recovery
+approval because its billing outcome is ambiguous.
+
+The checked-in synthetic fixture pipeline was exercised without provider generation. Local
+Ollama `nomic-embed-text` trained a mode-0600 artifact from three training embeddings and
+validated three held-out embeddings with a 62.54 ms p95 at a two-second embedding timeout.
+Validation correctly marked the artifact ineligible because it is synthetic, below the
+30-case minimum, and misses the cost-savings gate. This verifies mechanics only; no
+production artifact, held-out evidence, or Tier 1 activation exists.
+
+Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
+before executing. It lists every local batch/remainder, duplicates, partial and lost
+generations, exact settings, prior checks, and the next-agent recovery sequence.
+Collection now records explicit unjudged/judge failures, rejects transport failures from
+curation, binds rows to the frozen dataset and aliases, validates training options before
+embedding calls, and supports opt-in bounded 429/502/503/504 retries using provider delay
+metadata. Timeouts remain single-attempt because billing outcome is ambiguous. Keep all
+rejected evidence and Tier 1 disabled.
+
+Follow the [existing Phase 4 spec](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#execution-handoff-2026-09-07).
+The user requires both real coding tasks and a public coding benchmark, with Luna
+subagents at maximum reasoning. Verify those model controls are available; do not
+silently substitute or claim an unavailable configuration. This update is documentation
+only, not approval to publish, commit, or send unreviewed private content externally.
+
+- [x] Inventory authorized real tasks; select a licensed, version-pinned public benchmark.
+- [x] Review privacy/provenance and freeze source mix, grouping/deduplication, checks,
+  rubrics, candidate identities, prices, split seed/ratio, and training settings.
+- [x] Compute the exact split before outcomes; require >=30 held-out cases, adequate
+  training coverage, and both sources represented in both partitions.
+- [ ] Verify the replacement provider's collection transport and usage/cost provenance,
+  embeddings endpoint/model, intended deployment latency, and partial-failure handling.
+  The proxy contract and local embedding endpoint pass checks; live Anthropic transport
+  remains quota-blocked.
+- [x] Present generation/judge/embedding counts and bounded cost/token estimates; confirm
+  the concrete live budget and private-data review before collection.
+- [ ] Collect and curate real outcomes without relabeling synthetic fixtures, dropping
+  difficult cases, or automatically retrying ambiguously billed timeouts.
+- [ ] Train reproducibly and validate every activation gate plus source-cohort metrics.
+- [ ] Activate only eligible digest-bound artifacts through authorized local configuration;
+  verify boundary-only inference, stickiness, fail-open behavior, and rollback.
+- [ ] Record actual commands, provenance/split counts, digests, metrics, checks, limitations,
+  and activation state in existing documents. Keep private artifacts ignored.
 
 ### In scope
 
@@ -162,6 +270,9 @@ requirements. Any connected model with equivalent or better quality may win.
 - Conservative `SessionState` reconstruction from the normalized request context.
 - Task-target selection and locking through `router-core`.
 - Provider routing, credential isolation, and request/response translation.
+- Google OAuth/Antigravity model discovery per account at task boundaries, with bounded
+  caching, capability filtering, and project-aware Cloud Code Assist requests; Google
+  API-key routing bypasses OAuth discovery.
 
 The proxy estimates full-context tokens from normalized messages and tool schemas. Tool
 history contributes tool depth, file and patch hints, and prior-error signals. Signals a
@@ -295,7 +406,8 @@ Supported strategies:
 - [x] Make every retry path terminate, drain 429 bodies, and return after all accounts
   are limited (A2).
 - [x] Track credential source explicitly and refresh that store (A3).
-- [x] Apply Gemini API-key-only eligibility to extras (A4).
+- [x] Isolate Gemini API-key routing from Google OAuth accounts (A4); OAuth accounts
+  remain eligible only for the separate Antigravity Cloud Code Assist transport.
 - [x] Keep headerless follow-ups sticky using the first user message (A5).
 - [x] Atomically persist extra-account files (A6). Malformed-store preservation and
   chmod of existing files remain open.
@@ -305,7 +417,8 @@ Supported strategies:
 - [x] Treat Codex `used_percent` as already-percent and do not invent xAI /me usage (A9).
   Opaque-token labels remain open.
 - [x] Include extra Google/Zen credentials in bootstrap catalog eligibility (A10).
-  Eligibility is still not recomputed live after connect.
+  Google OAuth model eligibility is now refreshed at task boundaries; Zen and other
+  providers still do not recompute catalog eligibility live after connect.
 - [x] Set Codex `model_provider` and only uninstall a Claude base URL the installer
   owns (A11).
 - [x] Cap management bodies, expire pending OAuth after 15 minutes, bound device polls,
@@ -484,9 +597,15 @@ labels, live catalog recompute after connect, and the live/browser acceptance ga
 - **2026-09-03:** Substantive `run` verification instructions may establish a boundary
   when corroborated; short anaphoric `run that/this/it again` follow-ups remain sticky.
 - **2026-09-04:** Proxy credentials prefer provider login (`auth.json`, Claude Code
-  file), then settings `.env`. Gemini is the exception: use `GEMINI_API_KEY` / AI Studio
-  key only; Google OAuth access tokens are never sent to the Gemini API. Multi-provider;
-  Cursor Pro unused. Live eval may call the same proxy.
+  file), then settings `.env`. Gemini API-key inference uses `GEMINI_API_KEY` / an AI
+  Studio key; Antigravity OAuth uses the Cloud Code Assist transport and is never sent
+  to the Gemini API as a `?key` credential. Multi-provider; Cursor Pro unused. Live eval
+  may call the same proxy.
+- **2026-09-08:** Google OAuth model discovery is account-scoped and cached with a bounded
+  freshness window; advertised capabilities and the account project determine Google
+  eligibility and generation. API-key routing bypasses OAuth discovery. Model free status
+  follows the explicit configuration/authoritative zero-pricing rule in `design.md`, not
+  the provider name.
 - **2026-09-04:** Public apply path is the local proxy plus an installer (Claude Code,
   Codex, Cursor, OpenCode) and a loopback settings UI with in-browser connect. Task
   stickiness and fail-open stay. The OpenCode plugin in `.opencode/plugins` is optional

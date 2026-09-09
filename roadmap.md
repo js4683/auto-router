@@ -83,12 +83,38 @@ client/protocol/account combination meets the new hardening gate.
       live run via local proxy; see PLAN.md)
 
 The 2026-09-07 live run passed completeness, quality retention, and estimated cost
-savings. Reports stay local/gitignored. The `x-force-model` stickiness fix used for
-that run is not on `main` until it is committed.
+savings. Reports stay local/gitignored. This configured Phase 3 result is not Phase 4
+held-out evidence; retain its pricing/alias and judge limitations.
 
 ## Stretch
 
+Phase 4 is the next requested milestone: use both reviewed real coding tasks and a
+licensed public benchmark, with leakage-safe grouping and a frozen experiment. The
+authoritative execution sequence, budget, Luna/max-reasoning requirement, blockers,
+and activation criteria are in the
+[existing Phase 4 spec](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#execution-handoff-2026-09-07)
+and PLAN.md's Phase 4 handoff checklist. Corpus, training, and activation stay unchecked
+until their own evidence exists. No activation is authorized merely by updating these docs.
+
 - [x] Phase 4 code complete
+
+The production experiment is now frozen at 80 cases: 51 commit-pinned HumanEval tasks
+and 29 bounded real repository tasks. Its fixed split has 45 training and 35 held-out
+examples, with both cohorts in both partitions. Provenance, official prices, usage
+accounting, durable failure evidence, explicit unjudged state, strict curation binding,
+training preflight, and bounded provider-advised HTTP retries are verified locally.
+Collection remains blocked by Gemini's confirmed 20-request free-tier daily limit for
+`gemini-3.6-flash`; Batch is unavailable for that model on the free tier. Only one unique
+production case completed both candidates and blinded judging, so no production corpus,
+artifact, validation, or activation exists. A requested paid-tier retry still returned
+the free-tier quota ID after a ten-minute propagation wait. See the
+[production freeze and current blocker](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#production-freeze-and-current-blocker-2026-09-07).
+
+The current replacement path is the separate Anthropic/Ollama snapshot documented in the
+[Phase 4 replacement handoff](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#anthropic-replacement-snapshot-2026-09-08).
+Its proxy usage translation and local embedding smoke pass, but Claude subscription quota
+blocked the first live smoke; no replacement outcomes or production artifact exist.
+
 - [ ] real observed-outcome corpus collected
 - [ ] production artifact trained
 - [ ] production artifact activation gate passed

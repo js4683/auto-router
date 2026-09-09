@@ -11,9 +11,10 @@ const ALIASES: Record<string, string> = {
   grok: "xai",
   zen: "opencode",
   gemini: "google",
+  antigravity: "google",
 };
 
-const USAGE = "help: auto-router login <claude|codex|grok|zen|gemini> [--code <auth-code> --id <session-id>]";
+const USAGE = "help: auto-router login <claude|codex|grok|zen|gemini|antigravity> [--code <auth-code> --id <session-id>]";
 
 export interface LoginCliDeps {
   startOAuth: (provider: string) => Promise<OAuthStart>;
@@ -76,7 +77,7 @@ async function pollUntilDone(id: string, provider: string, deps: LoginCliDeps): 
 export async function runLogin(args: string[], deps: LoginCliDeps): Promise<number> {
   const parsed = parseLoginArgs(args);
   if (parsed.help) {
-    deps.stdout.write(`usage: auto-router login <claude|codex|grok|zen|gemini> [--code <auth-code> --id <session-id>]\n${USAGE}\n`);
+    deps.stdout.write(`usage: auto-router login <claude|codex|grok|zen|gemini|antigravity> [--code <auth-code> --id <session-id>]\n${USAGE}\n`);
     return 0;
   }
   if (parsed.error) {

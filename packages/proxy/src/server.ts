@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,11 +33,18 @@ import { ENV_KEYS, defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
 import { memorySessions, type ProxySessionStore } from "./session.js";
 import { defaultAuthPath, readAuthFile, writeAuthEntry } from "./auth-store.js";
-import { completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, ensureGoogleProject, pollOAuth, refreshAccountToken, refreshOAuthToken, startOAuth } from "./oauth.js";
+import { antigravityUserAgent, completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, ensureGoogleProject, pollOAuth, refreshAccountToken, refreshOAuthToken, startOAuth } from "./oauth.js";
 import { connectPage } from "./connect-page.js";
 import { mainLogin } from "./login-cli.js";
 import { loginProviderId } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
+import {
+  googleModelDiscovery,
+  ModelDiscoveryManager,
+  type DiscoveryAccount,
+  type DiscoveryCapability,
+  type ModelDiscoveryAdapter,
+} from "./model-discovery.js";
 
 export interface ProxyBackend {
   baseUrl: string;
@@ -56,6 +64,7 @@ export interface CreateProxyServerOptions {
   authPath?: string;
   accountsPath?: string;
   claudePath?: string;
+  modelDiscovery?: readonly ModelDiscoveryAdapter[];
 }
 
 function isLoopbackManagement(req: IncomingMessage): boolean {
@@ -78,6 +87,10 @@ function isLoopbackManagement(req: IncomingMessage): boolean {
 
 const MANAGEMENT_BODY_LIMIT = 64_000;
 const REQUEST_BODY_LIMIT = 2_000_000;
+const ANTIGRAVITY_GENERATE_BASE_URL = "https://daily-cloudcode-pa.googleapis.com";
+const ANTIGRAVITY_MODEL_ALIASES: Record<string, string> = {
+  "gemini-3.6-flash": "gemini-3.6-flash-high",
+};
 
 function readBody(req: IncomingMessage, limit = REQUEST_BODY_LIMIT): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -126,25 +139,35 @@ function pickAccount(
   opts: CreateProxyServerOptions,
   skipped: Set<string>,
   limitedUntil: Map<string, number>,
-): { account?: ResolvedAccount; token?: string; oauth: boolean } {
+  discovery?: ModelDiscoveryManager,
+): { account?: ResolvedAccount; token?: string; oauth: boolean; discoveryConstrained: boolean } {
   const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
   const accounts = listProviderAccounts(provider, {
     env: process.env,
     authPath: opts.authPath,
     accountsPath: opts.accountsPath,
   });
+  const googleApiKey = provider === "google"
+    ? process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || opts.backends.google?.apiKey
+    : undefined;
+  const eligibleAccounts = googleApiKey ? accounts.filter((item) => item.type !== "oauth") : accounts;
   const now = Date.now();
   const blocked = new Set(skipped);
   for (const [id, until] of limitedUntil) {
     if (until <= now) limitedUntil.delete(id);
     else blocked.add(id);
   }
-  const account = nextOpenAccount(accounts, blocked);
-  const token = account?.token ?? resolveCredential(modelId, credOpts);
+  const discoveredAccounts = googleApiKey ? undefined : discovery?.accountIdsFor(provider, modelId);
+  const discoveryConstrained = discoveredAccounts !== undefined;
+  const modelAccounts = discoveredAccounts
+    ? eligibleAccounts.filter((candidate) => discoveredAccounts.has(candidate.id))
+    : eligibleAccounts;
+  const account = nextOpenAccount(modelAccounts, blocked);
+  const token = account?.token ?? googleApiKey ?? (discoveryConstrained ? undefined : resolveCredential(modelId, credOpts));
   const oauth = Boolean(
-    account ? account.type === "oauth" && provider !== "google" : token && loginIsOAuth(provider, credOpts) && provider !== "google",
+    !googleApiKey && (account ? account.type === "oauth" : token && loginIsOAuth(provider, credOpts)),
   );
-  return { account, token, oauth };
+  return { account, token, oauth, discoveryConstrained };
 }
 
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
@@ -252,7 +275,13 @@ function chatgptAccountId(token: string): string | undefined {
 function isZenBillingError(status: number, payload: string): boolean {
   if (status < 400) return false;
   const text = payload.toLowerCase();
-  return text.includes("payment method") || text.includes("creditserror") || text.includes("add a payment");
+  return (
+    text.includes("payment method") ||
+    text.includes("creditserror") ||
+    text.includes("add a payment") ||
+    text.includes("missingsessionid") ||
+    text.includes("only be used in opencode")
+  );
 }
 
 function catalogExcluding(catalog: Catalog, skipped: Set<string>): Catalog {
@@ -270,7 +299,7 @@ function resolveProvider(modelId: string): { provider: string; bareModel: string
   const slash = modelId.indexOf("/");
   const providerFromId = slash >= 0 ? modelId.slice(0, slash) : "";
   const bareModel = slash >= 0 ? modelId.slice(slash + 1) : modelId;
-  if (providerFromId === "google" || providerFromId === "gemini" || /^gemini/i.test(bareModel)) {
+  if (providerFromId === "google" || providerFromId === "gemini" || providerFromId === "antigravity" || /^gemini/i.test(bareModel)) {
     return { provider: "google", bareModel };
   }
   if (providerFromId === "anthropic" || (!providerFromId && /^claude/i.test(bareModel))) {
@@ -580,6 +609,35 @@ function geminiTools(body: any): unknown[] {
 
 const geminiThoughtSignatures = new Map<string, string>();
 
+function antigravitySessionId(sessionKey: string): string {
+  const digest = createHash("sha256").update(sessionKey || "global").digest();
+  const value = digest.readBigUInt64BE(0) & 0x7fffffffffffffffn;
+  return `-${value.toString()}`;
+}
+
+function antigravityModel(model: string): string {
+  return ANTIGRAVITY_MODEL_ALIASES[model] ?? model;
+}
+
+function antigravityRequest(model: string, body: any, projectId: string | undefined, sessionKey: string): Record<string, unknown> {
+  const upstreamModel = antigravityModel(model);
+  const request = geminiRequest(body);
+  const imageModel = upstreamModel.toLowerCase().includes("image");
+  return {
+    model: upstreamModel,
+    userAgent: "antigravity",
+    requestType: imageModel ? "image_gen" : "agent",
+    requestId: imageModel ? `image_gen/${Date.now()}/${randomUUID()}/12` : `agent-${randomUUID()}`,
+    ...(projectId ? { project: projectId } : {}),
+    request: { ...request, sessionId: antigravitySessionId(sessionKey) },
+  };
+}
+
+function unwrapAntigravityResponse(payload: any): any {
+  const response = payload?.response;
+  return response && typeof response === "object" ? response : payload;
+}
+
 function geminiRequest(body: any): Record<string, unknown> {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const systemParts = messages
@@ -666,6 +724,7 @@ function upstreamRequest(
   token: string | undefined,
   inboundPath: string | undefined,
   projectId?: string,
+  sessionKey?: string,
   googleOAuth?: boolean,
   openaiOAuth?: boolean,
   anthropicOAuth?: boolean,
@@ -690,8 +749,8 @@ function upstreamRequest(
       const action = isStream ? "streamGenerateContent" : "generateContent";
       const alt = isStream ? "?alt=sse" : "";
       return {
-        body: { model, ...(projectId ? { project: projectId } : {}), request: geminiRequest(normalizedBody) },
-        path: `https://cloudcode-pa.googleapis.com/v1internal:${action}${alt}`,
+        body: antigravityRequest(model, normalizedBody, projectId, sessionKey ?? "global"),
+        path: `${ANTIGRAVITY_GENERATE_BASE_URL}/v1internal:${action}${alt}`,
         translateResponse: true,
         useGemini: true,
       };
@@ -735,7 +794,7 @@ function sessionId(req: IncomingMessage, body: unknown, text: string): string {
   return (first || "global").slice(0, 64);
 }
 
-function requiredCapabilities(body: any): string[] {
+function requiredCapabilities(body: any): DiscoveryCapability[] {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const declaredTools = Array.isArray(body?.tools) && body.tools.length > 0;
   const toolMessages = messages.some(
@@ -743,7 +802,9 @@ function requiredCapabilities(body: any): string[] {
       message?.role === "tool" ||
       (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0)
   );
-  return ["text", ...(declaredTools || toolMessages ? ["tools"] : [])];
+  const capabilities: DiscoveryCapability[] = ["text"];
+  if (declaredTools || toolMessages) capabilities.push("tools");
+  return capabilities;
 }
 
 function estimateTokens(text: string): number {
@@ -820,8 +881,8 @@ function parseSsePayload(raw: string): unknown {
   let last: Record<string, unknown> | undefined;
   let message: unknown;
   let text = "";
-  for (const block of raw.split("\n\n")) {
-    const line = block.split("\n").find((part) => part.startsWith("data:"));
+  for (const block of raw.split(/\r?\n\r?\n/)) {
+    const line = block.split(/\r?\n/).find((part) => part.startsWith("data:"));
     if (!line) continue;
     const data = line.slice(5).trim();
     if (!data || data === "[DONE]") continue;
@@ -954,12 +1015,82 @@ function nativeIncompleteDetails(payload: any, status: ResponseStatus, finishRea
   return undefined;
 }
 
+interface NativeChatUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
+}
+
+/**
+ * Maps each upstream provider's native usage envelope to OpenAI chat-completion
+ * usage shape so downstream consumers (billing, eval collection) get real
+ * provider-reported token counts instead of silently missing usage.
+ */
+function nativeUsage(payload: any, provider: string): NativeChatUsage | undefined {
+  if (provider === "openai" && Array.isArray(payload?.output)) {
+    const usage = payload?.usage;
+    if (!usage) return undefined;
+    const inputTokens = usage.input_tokens ?? 0;
+    const outputTokens = usage.output_tokens ?? 0;
+    const cachedTokens = usage.input_tokens_details?.cached_tokens;
+    return {
+      prompt_tokens: inputTokens,
+      completion_tokens: outputTokens,
+      total_tokens: usage.total_tokens ?? inputTokens + outputTokens,
+      ...(cachedTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {}),
+    };
+  }
+  if (provider === "openai" || provider === "xai") {
+    const usage = payload?.usage;
+    if (!usage) return undefined;
+    const promptTokens = usage.prompt_tokens ?? 0;
+    const completionTokens = usage.completion_tokens ?? 0;
+    return {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: usage.total_tokens ?? promptTokens + completionTokens,
+      ...(usage.prompt_tokens_details ? { prompt_tokens_details: usage.prompt_tokens_details } : {}),
+    };
+  }
+  if (provider === "google") {
+    const usage = payload?.usageMetadata;
+    if (!usage) return undefined;
+    const promptTokens = usage.promptTokenCount ?? 0;
+    const outputTokens = (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0);
+    return {
+      prompt_tokens: promptTokens,
+      completion_tokens: outputTokens,
+      total_tokens: usage.totalTokenCount ?? promptTokens + outputTokens,
+      ...(usage.cachedContentTokenCount !== undefined
+        ? { prompt_tokens_details: { cached_tokens: usage.cachedContentTokenCount } }
+        : {}),
+    };
+  }
+  if (provider === "anthropic") {
+    const usage = payload?.usage;
+    if (!usage) return undefined;
+    const inputTokens = usage.input_tokens ?? 0;
+    const outputTokens = usage.output_tokens ?? 0;
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
+    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    return {
+      prompt_tokens: inputTokens + cacheRead + cacheWrite,
+      completion_tokens: outputTokens,
+      total_tokens: inputTokens + cacheRead + cacheWrite + outputTokens,
+      ...(cacheRead || cacheWrite ? { prompt_tokens_details: { cached_tokens: cacheRead, cache_creation_tokens: cacheWrite } } : {}),
+    };
+  }
+  return undefined;
+}
+
 function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
   const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
   const created = Math.floor(Date.now() / 1000);
   const { content, refusal } = nativeResponse(payload, provider);
   const toolCalls = nativeToolCalls(payload, provider);
   const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
+  const usage = nativeUsage(payload, provider);
   const message = refusal
     ? { role: "assistant", content: content || null, refusal }
     : toolCalls.length
@@ -977,6 +1108,7 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
       created,
       model,
       choices: [{ index: 0, message, logprobs: null, finish_reason: finishReason }],
+      ...(usage ? { usage } : {}),
     });
     return;
   }
@@ -1143,7 +1275,50 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   const routeLog: Array<{ at: number; via: string; modelId: string; status?: number }> = [];
   const quotas = new Map<string, ProviderQuota>();
   const limitedUntil = new Map<string, number>();
+  const modelDiscovery = new ModelDiscoveryManager(opts.modelDiscovery ?? []);
   const accountsFile = () => opts.accountsPath;
+
+  async function discoveryCatalog(body: any): Promise<Catalog> {
+    if (!opts.modelDiscovery?.length) return opts.catalog;
+    const authFile = opts.authPath ?? defaultAuthPath();
+    const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
+    const accounts = new Map<string, DiscoveryAccount[]>();
+    const fetches = new Map<string, typeof fetch>();
+    for (const adapter of opts.modelDiscovery) {
+      const googleApiKey = adapter.provider === "google"
+        ? process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || opts.backends.google?.apiKey
+        : undefined;
+      if (googleApiKey) {
+        accounts.set(adapter.provider, []);
+        continue;
+      }
+      const providerAccounts = listProviderAccounts(adapter.provider, {
+        env: process.env,
+        authPath: opts.authPath,
+        accountsPath: accountsFile(),
+      }).filter((account) => account.type === "oauth");
+      const discoveredAccounts: DiscoveryAccount[] = [];
+      for (const account of providerAccounts) {
+        const token = await refreshAccountToken(account, {
+          authPath: authFile,
+          accountsPath: accountsFile(),
+          fetchImpl: opts.backends[adapter.provider]?.fetchImpl ?? fetch,
+        });
+        if (!token) continue;
+        discoveredAccounts.push({
+          id: account.id,
+          token,
+          ...(adapter.provider === "google"
+            ? { projectId: account.projectId ?? (account.primary ? resolveGoogleProject(credOpts) : undefined) }
+            : {}),
+        });
+      }
+      accounts.set(adapter.provider, discoveredAccounts);
+      const fetchImpl = opts.backends[adapter.provider]?.fetchImpl;
+      if (fetchImpl) fetches.set(adapter.provider, fetchImpl);
+    }
+    return modelDiscovery.prepareCatalog(opts.catalog, accounts, requiredCapabilities(body), fetches);
+  }
 
   async function decide(req: IncomingMessage, body: any, text: string): Promise<SelectionResult> {
     const id = sessionId(req, body, text);
@@ -1206,7 +1381,8 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       prediction = undefined;
     }
 
-    const result = opts.select(state, catalogExcluding(opts.catalog, skippedProviders), opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
+    const catalog = await discoveryCatalog(body);
+    const result = opts.select(state, catalogExcluding(catalog, skippedProviders), opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
     opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
     return result;
   }
@@ -1318,6 +1494,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         const authFile = opts.authPath ?? defaultAuthPath();
         if (!provider) {
           json(res, 404, { error: "unknown provider" });
+          return;
+        }
+        if (["oauth/start", "oauth/code", "oauth/callback", "oauth/poll"].includes(rest) && !isLoopbackManagement(req)) {
+          json(res, 403, { error: "forbidden" });
           return;
         }
         if (req.method === "GET" && rest === "") {
@@ -1490,6 +1670,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
       const skippedAccounts = new Set<string>();
       let zenFailovers = 0;
+      let googleAuthRetries = 0;
       let lastLimited: { status: number; payload: string; type: string } | undefined;
       for (let attempt = 0; attempt < 8; attempt++) {
       const { provider, bareModel } = resolveProvider(result.modelId);
@@ -1501,24 +1682,37 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
 
       const inbound = inboundCredentials(req.headers, protocol, provider);
       const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
-      const picked = pickAccount(provider, result.modelId, opts, skippedAccounts, limitedUntil);
+      const picked = pickAccount(provider, result.modelId, opts, skippedAccounts, limitedUntil, modelDiscovery);
+      if (picked.discoveryConstrained && !picked.account) {
+        if (lastLimited) {
+          if (typeof res.writeHead === "function") res.writeHead(lastLimited.status, { "content-type": lastLimited.type });
+          else res.statusCode = lastLimited.status;
+          res.end(lastLimited.payload);
+        } else {
+          json(res, 503, { error: "no eligible account for discovered model" });
+        }
+        return;
+      }
       const oauth = picked.oauth;
       const authFile = opts.authPath ?? defaultAuthPath();
       let resolved = picked.token ?? backend.apiKey;
-      if (picked.account && (provider === "anthropic" || provider === "openai" || provider === "xai")) {
+      if (picked.account && (provider === "anthropic" || provider === "openai" || provider === "xai" || provider === "google")) {
         const refreshed = await refreshAccountToken(picked.account, {
           authPath: authFile,
           accountsPath: accountsFile(),
           fetchImpl: backend.fetchImpl ?? fetch,
         });
         if (refreshed) resolved = refreshed;
-      } else if (oauth && (provider === "anthropic" || provider === "openai" || provider === "xai")) {
+      } else if (oauth && (provider === "anthropic" || provider === "openai" || provider === "xai" || provider === "google")) {
         const refreshed = await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch);
         if (refreshed) resolved = refreshed;
       }
       const authorization = resolved ? `Bearer ${resolved}` : inbound.authorization;
       let token = resolved ?? inbound.token;
-      let googleProject = resolveGoogleProject(credOpts);
+      let googleProject = provider === "google" && picked.account
+        ? modelDiscovery.projectIdFor(provider, picked.account.id) ?? picked.account.projectId
+        : undefined;
+      googleProject ??= resolveGoogleProject(credOpts);
       if (oauth && provider === "google" && token && !googleProject) {
         googleProject = await ensureGoogleProject(token).catch(() => undefined);
         if (googleProject) {
@@ -1539,6 +1733,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         token,
         req.url,
         googleProject,
+        id,
         oauth && provider === "google",
         oauth && provider === "openai",
         oauth && provider === "anthropic",
@@ -1557,6 +1752,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         }
       } else if (provider === "google" && oauth) {
         headers.authorization = `Bearer ${token}`;
+        headers["user-agent"] = antigravityUserAgent();
       } else if (!upstreamRequestPlan.useGemini && typeof authorization === "string" && authorization) {
         headers.authorization = authorization;
         if (oauth && provider === "openai" && token) {
@@ -1577,12 +1773,33 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       routeRow.status = upstream.status;
       routeRow.via = result.via;
       routeRow.modelId = result.modelId;
+      if (
+        oauth &&
+        provider === "google" &&
+        googleAuthRetries === 0 &&
+        (upstream.status === 401 || upstream.status === 403)
+      ) {
+        googleAuthRetries += 1;
+        const previous = resolved;
+        const refreshed = picked.account
+          ? await refreshAccountToken(picked.account, {
+              authPath: authFile,
+              accountsPath: accountsFile(),
+              fetchImpl: backend.fetchImpl ?? fetch,
+              force: true,
+            })
+          : await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch, true);
+        if (refreshed && refreshed !== previous) {
+          await upstream.arrayBuffer();
+          continue;
+        }
+      }
       if (upstream.status === 429 && picked.account) {
         skippedAccounts.add(picked.account.id);
         limitedUntil.set(picked.account.id, Date.now() + 300_000);
         const limitedPayload = await upstream.text();
         lastLimited = { status: 429, payload: limitedPayload, type: upstream.headers.get("content-type") ?? "application/json" };
-        if (nextOpenAccount(listProviderAccounts(provider, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() }), skippedAccounts)) {
+        if (picked.discoveryConstrained || nextOpenAccount(listProviderAccounts(provider, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() }), skippedAccounts)) {
           continue;
         }
         if (typeof res.writeHead === "function") res.writeHead(429, { "content-type": lastLimited.type });
@@ -1612,10 +1829,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
                 if (done) break;
                 const chunk = typeof value === "string" ? value : decoder.decode(value, { stream: true });
                 buf += chunk;
-                let idx;
-                while ((idx = buf.indexOf("\n\n")) !== -1) {
-                  const raw = buf.slice(0, idx);
-                  buf = buf.slice(idx + 2);
+                let separator: RegExpExecArray | null;
+                while ((separator = /\r?\n\r?\n/.exec(buf))) {
+                  const raw = buf.slice(0, separator.index);
+                  buf = buf.slice(separator.index + separator[0].length);
                   if (raw.trim()) (res as any).write(raw + "\n\n");
                 }
               }
@@ -1655,14 +1872,14 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
             if (done) break;
             const chunk = typeof value === "string" ? value : decoder.decode(value, { stream: true });
             buf += chunk;
-            let idx;
-            while ((idx = buf.indexOf("\n\n")) !== -1) {
-              const raw = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
+            let separator: RegExpExecArray | null;
+            while ((separator = /\r?\n\r?\n/.exec(buf))) {
+              const raw = buf.slice(0, separator.index);
+              buf = buf.slice(separator.index + separator[0].length);
               const line = raw.split("\n").find((l) => l.startsWith("data:"))?.slice(5).trim();
               if (!line || line === "[DONE]") continue;
               try {
-                const payloadJson = JSON.parse(line);
+                const payloadJson = unwrapAntigravityResponse(JSON.parse(line));
                 const textDelta = payloadJson.candidates?.[0]?.content?.parts?.[0]?.text ?? payloadJson.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("") ?? "";
                 if (textDelta) {
                   const delta: any = firstDelta ? { role: "assistant", content: textDelta } : { content: textDelta };
@@ -1696,9 +1913,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           json(res, 502, { error: "empty upstream stream" });
           return;
         }
-        if (protocol === "chat") writeChatCompletion(res, normalizedBody, provider, bareModel, parsed);
-        if (protocol === "anthropic") writeAnthropicMessage(res, normalizedBody, provider, bareModel, parsed);
-        if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, parsed);
+        const translated = provider === "google" ? unwrapAntigravityResponse(parsed) : parsed;
+        if (protocol === "chat") writeChatCompletion(res, normalizedBody, provider, bareModel, translated);
+        if (protocol === "anthropic") writeAnthropicMessage(res, normalizedBody, provider, bareModel, translated);
+        if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, translated);
         return;
       }
       if (zenFailovers < 1 && provider === "opencode" && isZenBillingError(upstream.status, payload)) {
@@ -1774,6 +1992,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
     authPath,
     accountsPath: defaultAccountsPath(),
     claudePath: join(homedir(), ".claude/.credentials.json"),
+    modelDiscovery: [googleModelDiscovery],
   };
 }
 

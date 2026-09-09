@@ -40,8 +40,9 @@ of the above do.
 7. **High-capability planning:** planning and architecture tasks require a quality floor
    and quality-first selection, favoring connected Sol, Fable, or Opus-class models.
 8. **Routing trigger:** switch on *confident task boundaries*, not every turn and not
-   every session. Model names are never hardcoded — catalog + free-set + task policy drive
-   selection, so the router survives model churn.
+   every session. Model names are never hardcoded — catalog + explicit free-model
+   configuration or authoritative zero pricing + task policy drive selection, so the
+   router survives model churn.
 
 ## Apply path
 
@@ -56,9 +57,15 @@ npm run install-clients -- --claude --codex --opencode --cursor
 Open http://127.0.0.1:8787 and log in (`/connect/...` or `npm run login -- claude`).
 Extra logins are stored in `~/.config/auto-router/accounts.json` and do not overwrite
 the primary OpenCode/Claude Code login. API keys are fallback
-and are written to `~/.config/auto-router/.env` mode `0600`. Gemini inference needs an
-AI Studio key; Google OAuth tokens are not used for the Gemini API. OpenCode Zen is
-used only when a Zen key exists and is skipped after a billing error. Cursor Pro
+and are written to `~/.config/auto-router/.env` mode `0600`. Gemini API-key inference
+uses an AI Studio key; Antigravity login uses Google OAuth and Cloud Code Assist
+instead. Use `npm run login -- gemini` or `npm run login -- antigravity` after setting
+`GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` for the Antigravity OAuth
+client. OAuth client credentials are not bundled. OAuth access tokens are never sent as Gemini API keys.
+Antigravity OAuth discovery is scoped to each Google account and its Cloud Code Assist
+project; a Gemini API key bypasses OAuth discovery.
+OpenCode Zen is used only when a Zen key exists and is skipped after a billing
+error. Cursor Pro
 quota is not used. Codex is wired with `wire_api = "responses"`.
 
 Live eval can target the same proxy:

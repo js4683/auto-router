@@ -1,10 +1,17 @@
 # Subscription Credentials Design
 
-**Status:** Approved in design review on 2026-09-04
+**Status:** Superseded for current OAuth and Google inference behavior; retained as the
+historical Slice 1 design from 2026-09-04.
 **Implementation status:** Slice 1 implemented (env then OpenCode then Claude Code credentials).
-**Scope:** Slice 1 — resolve per-provider credentials for the local proxy from env API keys, then OpenCode auth, then Claude Code login. Live eval calls the same proxy. In-UI OAuth is out of scope.
+**Scope:** Historical Slice 1 — resolve per-provider credentials for the local proxy from
+env API keys, then OpenCode auth, then Claude Code login. Live eval calls the same proxy.
 **Depends on:** [2026-09-04-universal-proxy-installer-design.md](./2026-09-04-universal-proxy-installer-design.md)
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
+
+> Current shared UI/CLI OAuth, Google Antigravity transport, and Google API-key isolation
+> are owned by the [universal proxy design](./2026-09-04-universal-proxy-installer-design.md)
+> and [PLAN.md](../../PLAN.md). The historical boundaries below do not describe those
+> later flows.
 
 ## Objective
 
@@ -12,7 +19,8 @@ The proxy sits in front of many providers. It is not tied to one vendor. For eac
 
 ## Assumptions
 
-1. OpenCode `~/.local/share/opencode/auth.json` may hold openai/xai oauth and anthropic/google/openrouter api keys.
+1. OpenCode `~/.local/share/opencode/auth.json` may hold openai/xai/google OAuth and
+   anthropic/google/openrouter API-key entries.
 2. Claude Code may have a local Anthropic credential we can read; if the file layout is unknown, skip that provider rather than guess.
 3. Cursor Pro quota cannot be used. Cursor as a *client* of the proxy is unchanged.
 4. Tokens are never logged. Empty env values do not wipe a stored key.
@@ -55,7 +63,7 @@ Unknown prefixes: env only if we add them later; otherwise 401.
 ## Boundaries
 
 - Always: multi-provider; fail-open; no secret logs.
-- Ask first: in-UI OAuth; new provider prefixes; reading Cursor’s own tokens.
+- Ask first in this historical slice: new provider prefixes; reading Cursor’s own tokens.
 - Never: claim Cursor Pro works; retry after timeout; log tokens.
 
 ## Success Criteria
@@ -66,4 +74,5 @@ Unknown prefixes: env only if we add them later; otherwise 401.
 
 ## Open Questions
 
-None for slice 1. In-UI OAuth is slice 2.
+None for the historical Slice 1. Later OAuth behavior is documented by the current
+universal-proxy design and PLAN.md.

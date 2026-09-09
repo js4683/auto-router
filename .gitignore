@@ -18,3 +18,5 @@ phase-4-corpus.local.json
 phase-4-embeddings.local.json
 phase-4-validation.local.json
 phase-4-validation.local.md
+phase-4-source-manifest.local.json
+phase-4-*-source-manifest.local.json

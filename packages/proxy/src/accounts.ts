@@ -20,6 +20,7 @@ export interface ExtraAccount {
   key?: string;
   email?: string;
   plan?: string;
+  projectId?: string;
 }
 
 export interface ResolvedAccount {
@@ -29,6 +30,7 @@ export interface ResolvedAccount {
   type: "oauth" | "api";
   email?: string;
   plan?: string;
+  projectId?: string;
   expires?: number;
   primary: boolean;
   refresh?: string;
@@ -159,7 +161,7 @@ export function removeExtraAccount(path: string, id: string): boolean {
 }
 
 function entryToken(entry: Record<string, unknown>, provider: string): string | undefined {
-  if (provider === "google" && entry.type === "oauth") return typeof entry.key === "string" ? entry.key : undefined;
+  if (provider === "google" && entry.type === "oauth") return typeof entry.access === "string" ? entry.access : undefined;
   for (const name of ["key", "token", "access"] as const) {
     const value = entry[name];
     if (typeof value === "string" && value) return value;
@@ -168,7 +170,7 @@ function entryToken(entry: Record<string, unknown>, provider: string): string | 
 }
 
 function extraToken(account: ExtraAccount): string | undefined {
-  if (account.provider === "google" && account.type === "oauth") return account.key;
+  if (account.provider === "google" && account.type === "oauth") return account.access;
   return account.key || account.access;
 }
 
@@ -178,9 +180,10 @@ function fromEntry(provider: string, entry: Record<string, unknown>, id: string,
   const type = entry.type === "oauth" ? "oauth" : "api";
   const email = typeof entry.email === "string" ? entry.email : jwtEmail(token);
   const plan = typeof entry.plan === "string" ? entry.plan : undefined;
+  const projectId = typeof entry.projectId === "string" ? entry.projectId : undefined;
   const expires = typeof entry.expires === "number" ? entry.expires : undefined;
   const refresh = typeof entry.refresh === "string" ? entry.refresh : undefined;
-  return { id, provider, token, type, email, plan, expires, primary, refresh, source: "auth" };
+  return { id, provider, token, type, email, plan, projectId, expires, primary, refresh, source: "auth" };
 }
 
 export function listProviderAccounts(
@@ -230,6 +233,7 @@ export function listProviderAccounts(
         type: extra.type,
         email: extra.email,
         plan: extra.plan,
+        projectId: extra.projectId,
         expires: extra.expires,
         primary: out.length === 0,
         refresh: extra.refresh,
@@ -261,6 +265,7 @@ function extraFromEntry(provider: string, entry: Record<string, unknown>): Omit<
     key,
     email,
     plan: typeof entry.plan === "string" ? entry.plan : undefined,
+    projectId: typeof entry.projectId === "string" ? entry.projectId : undefined,
   };
 }
 

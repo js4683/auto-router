@@ -8,7 +8,7 @@ import {
 } from "./avengers-collection.js";
 import { readAvengersCorpus, splitAvengersCorpus } from "./avengers-corpus.js";
 import { embedCorpusExamples } from "./avengers-embedding-cache.js";
-import { trainAvengersArtifact, writeAvengersArtifact } from "./avengers-training.js";
+import { trainAvengersArtifact, validateAvengersTrainingPlan, writeAvengersArtifact } from "./avengers-training.js";
 import { validateAvengersArtifact, writeAvengersValidation } from "./avengers-validation.js";
 import type { CliIo, ParsedArgs } from "./cli.js";
 import { positiveEnv, requiredEnv, requireValue } from "./cli.js";
@@ -49,6 +49,11 @@ async function runCollect(parsed: ParsedArgs, io: CliIo): Promise<number> {
       judgeModel: requiredEnv(io, "AUTO_ROUTER_EVAL_JUDGE_MODEL"),
       timeoutMs: positiveEnv(io, "AUTO_ROUTER_EVAL_TIMEOUT_MS", 60_000),
       maxOutputTokens: positiveEnv(io, "AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS", 1024),
+      retry: {
+        maxAttempts: positiveEnv(io, "AUTO_ROUTER_EVAL_RETRY_MAX_ATTEMPTS", 5),
+        baseDelayMs: positiveEnv(io, "AUTO_ROUTER_EVAL_RETRY_BASE_DELAY_MS", 1_000),
+        maxDelayMs: positiveEnv(io, "AUTO_ROUTER_EVAL_RETRY_MAX_DELAY_MS", 120_000),
+      },
     },
     io.fetch ?? fetch,
     output
@@ -84,6 +89,7 @@ async function runTrain(parsed: ParsedArgs, io: CliIo): Promise<number> {
     beta: positiveFlag(parsed, "--beta"),
     minObservations: positiveFlag(parsed, "--min-observations"),
   };
+  validateAvengersTrainingPlan(corpus, options);
   const split = splitAvengersCorpus(corpus, options.splitSeed, options.heldOutRatio);
   const cachePath = requireValue(parsed, "--cache");
   io.stdout(`planned embeddings: ${split.train.length} train examples`);

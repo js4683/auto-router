@@ -115,10 +115,11 @@ clear the bar:
 | Gap | Why it matters | Source |
 |-----|----------------|--------|
 | No context-window sizes | Context-fit guard needs them | models.dev / provider registry |
-| "Free" is not `price == 0` | AA reports list price, not what's free *to you* | provider config (local, OpenRouter `:free`) joined to AA quality |
+| "Free" needs entitlement evidence | AA reports list price, not what's free *to you* | explicit provider configuration or authoritative zero pricing joined to AA quality |
 
-So "free" is a **registry join**: `providerFreeSet` INTERSECT `AA quality data`, not a
-price filter.
+So "free" is true only when the configured `providerFreeSet` names the model or the
+source reports authoritative zero input/output/blended pricing. Missing, inferred, or
+non-zero pricing is not enough; provider identity alone never makes a model free.
 
 ---
 

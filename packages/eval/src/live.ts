@@ -20,6 +20,13 @@ export interface LiveClientConfig {
   apiKey: string;
   timeoutMs: number;
   maxOutputTokens: number;
+  retry?: LiveRetryConfig;
+}
+
+export interface LiveRetryConfig {
+  maxAttempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
 }
 
 export interface JudgeClientConfig extends LiveClientConfig {
@@ -39,6 +46,58 @@ export interface JudgeCaseInput {
 }
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+
+function validateRetryConfig(config: LiveRetryConfig | undefined): LiveRetryConfig {
+  const retry = config ?? { maxAttempts: 1, baseDelayMs: 1_000, maxDelayMs: 120_000 };
+  if (!Number.isInteger(retry.maxAttempts) || retry.maxAttempts < 1 || retry.maxAttempts > 10) {
+    throw new Error("live retry maxAttempts must be an integer from 1 through 10");
+  }
+  if (!Number.isFinite(retry.baseDelayMs) || retry.baseDelayMs < 0) throw new Error("live retry baseDelayMs must be non-negative");
+  if (!Number.isFinite(retry.maxDelayMs) || retry.maxDelayMs < retry.baseDelayMs) {
+    throw new Error("live retry maxDelayMs must be at least baseDelayMs");
+  }
+  return retry;
+}
+
+function secondsToMs(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)s$/);
+  return match ? Math.ceil(Number(match[1]) * 1_000) : undefined;
+}
+
+function retryDelayMs(response: Response, raw: string, attempt: number, retry: LiveRetryConfig): number {
+  const header = response.headers.get("retry-after");
+  const headerSeconds = header === null ? undefined : Number(header);
+  if (headerSeconds !== undefined && Number.isFinite(headerSeconds) && headerSeconds >= 0) {
+    return Math.min(Math.ceil(headerSeconds * 1_000), retry.maxDelayMs);
+  }
+  try {
+    const payload = JSON.parse(raw);
+    const details = Array.isArray(payload?.error?.details) ? payload.error.details : [];
+    const retryInfo = details.find((item: any) => String(item?.["@type"] ?? "").endsWith("google.rpc.RetryInfo"));
+    const providerDelay = secondsToMs(retryInfo?.retryDelay);
+    if (providerDelay !== undefined) return Math.min(providerDelay, retry.maxDelayMs);
+  } catch {}
+  const fallback = retry.baseDelayMs * 2 ** Math.max(0, attempt - 1);
+  return Math.min(fallback, retry.maxDelayMs);
+}
+
+function isDailyQuotaExhausted(raw: string): boolean {
+  try {
+    const payload = JSON.parse(raw);
+    const details = Array.isArray(payload?.error?.details) ? payload.error.details : [];
+    return details.some((item: any) =>
+      Array.isArray(item?.violations) && item.violations.some((violation: any) => /perday/i.test(String(violation?.quotaId ?? "")))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 function endpoint(baseUrl: string, transport: LiveTransport = "chat"): string {
   let url: URL;
@@ -105,9 +164,12 @@ function usageToken(value: unknown, label: string, required = false): number {
 function parseUsage(value: any): EvalUsage | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("provider usage must be an object");
+  const inputTokens = usageToken(value.prompt_tokens, "prompt_tokens", true);
+  const completionTokens = usageToken(value.completion_tokens, "completion_tokens", true);
+  const totalTokens = value.total_tokens === undefined ? undefined : usageToken(value.total_tokens, "total_tokens");
   const parsed = {
-    inputTokens: usageToken(value.prompt_tokens, "prompt_tokens", true),
-    outputTokens: usageToken(value.completion_tokens, "completion_tokens", true),
+    inputTokens,
+    outputTokens: totalTokens === undefined ? completionTokens : Math.max(completionTokens, totalTokens - inputTokens),
     cacheReadInputTokens: usageToken(value.prompt_tokens_details?.cached_tokens, "cached_tokens"),
     cacheWriteInputTokens: usageToken(value.prompt_tokens_details?.cache_creation_tokens, "cache_creation_tokens"),
   };
@@ -201,6 +263,7 @@ export async function requestCompletion(
   transport: LiveTransport = "chat"
 ): Promise<LiveOutput> {
   const url = endpoint(config.baseUrl, transport);
+  const retry = validateRetryConfig(config.retry);
   const body = transport === "responses"
     ? {
         model: request.model,
@@ -226,22 +289,28 @@ export async function requestCompletion(
   if (new URL(url).hostname === "generativelanguage.googleapis.com") {
     headers["x-goog-api-key"] = config.apiKey;
   }
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      redirect: "error",
-      signal: AbortSignal.timeout(config.timeoutMs),
-    });
-  } catch (error) {
-    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) throw new Error("provider request timed out");
-    throw new Error("provider request failed");
+  for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchImpl(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(config.timeoutMs),
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) throw new Error("provider request timed out");
+      throw new Error("provider request failed");
+    }
+    const raw = await readBounded(response);
+    if (response.ok) return transport === "responses" ? parseResponsesOutput(raw) : parseOutput(raw);
+    if (!RETRYABLE_HTTP_STATUSES.has(response.status) || isDailyQuotaExhausted(raw) || attempt === retry.maxAttempts) {
+      throw new Error(`provider returned HTTP ${response.status}`);
+    }
+    await wait(retryDelayMs(response, raw, attempt, retry));
   }
-  if (!response.ok) throw new Error(`provider returned HTTP ${response.status}`);
-  const raw = await readBounded(response);
-  return transport === "responses" ? parseResponsesOutput(raw) : parseOutput(raw);
+  throw new Error("provider retry attempts exhausted");
 }
 
 const JUDGE_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";

@@ -111,6 +111,19 @@ describe("requestCompletion", () => {
     ).rejects.toThrow("provider usage completion_tokens is required");
   });
 
+  it("accounts for billable thinking tokens included only in total_tokens", async () => {
+    const result = await requestCompletion(
+      { model: "gemini", messages: [{ role: "user", content: "hi" }] },
+      config("https://example.com/v1"),
+      async () => new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 30 },
+      }))
+    );
+
+    expect(result.usage?.outputTokens).toBe(20);
+  });
+
   it("does not retry provider failures or expose credentials", async () => {
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {
@@ -127,6 +140,89 @@ describe("requestCompletion", () => {
     } catch (error) {
       expect(String(error)).not.toContain("test-secret-key");
     }
+  });
+
+  it("retries retryable provider failures when explicitly configured", async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "0s" }],
+            },
+          }),
+          { status: 429 },
+        );
+      }
+      return new Response(chatResponse("recovered"));
+    };
+
+    const result = await requestCompletion(
+      { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
+      {
+        ...config("https://example.com/v1"),
+        retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 10 },
+      },
+      fetchImpl,
+    );
+
+    expect(result.text).toBe("recovered");
+    expect(calls).toBe(2);
+  });
+
+  it("stops after the configured number of retry attempts", async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response("unavailable", { status: 503, headers: { "retry-after": "0" } });
+    };
+
+    await expect(
+      requestCompletion(
+        { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
+        {
+          ...config("https://example.com/v1"),
+          retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 10 },
+        },
+        fetchImpl,
+      ),
+    ).rejects.toThrow("provider returned HTTP 503");
+    expect(calls).toBe(3);
+  });
+
+  it("does not retry an explicitly exhausted daily quota", async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          error: {
+            details: [
+              {
+                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier" }],
+              },
+              { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "1s" },
+            ],
+          },
+        }),
+        { status: 429 },
+      );
+    };
+
+    await expect(
+      requestCompletion(
+        { model: "provider/model", messages: [{ role: "user", content: "hi" }] },
+        {
+          ...config("https://example.com/v1"),
+          retry: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 10 },
+        },
+        fetchImpl,
+      ),
+    ).rejects.toThrow("provider returned HTTP 429");
+    expect(calls).toBe(1);
   });
 
   it("rejects insecure remote URLs, oversized bodies, and malformed responses", async () => {

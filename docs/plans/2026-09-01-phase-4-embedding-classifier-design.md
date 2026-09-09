@@ -9,6 +9,382 @@ remain pending.
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
+## Execution Handoff (2026-09-07)
+
+The user requires **both real coding tasks and a public coding benchmark**, with
+**Luna subagents at maximum reasoning**. Verify the configured model and reasoning
+controls before delegation; report a blocker and ask before substituting. Assign
+disjoint ownership for dataset/provenance, pipeline correctness, and independent
+validation. One coordinator owns the frozen experiment, live budget, and activation.
+Do not claim unsupported model settings. This handoff update performs no collection,
+training, live calls, or activation.
+
+### Dataset and split
+
+- Inventory only user-authorized task sources. Review/redact private prompts, code,
+  paths, secrets, and transcripts before generation, judging, or embedding. Do not
+  scrape unrelated repositories/logs or assume permission to transmit private content.
+- Select a licensed public benchmark and pin name, version, source URL, original item
+  IDs, attribution, and known contamination limitations. Preserve original tests.
+  Generated paraphrases are not independent evidence. Keep reference answers/tests out
+  of generation and embedding inputs. Sandbox executable checks without credentials,
+  network, or host writes.
+- Freeze a justified real/public source mix and task/language/difficulty coverage; no
+  percentage has been approved. Require both sources in both train and held-out splits
+  and report counts and performance separately as well as in aggregate.
+- Deduplicate across sources and group related sessions/issues/variants before splitting.
+  Related examples must share a session group. Record source/group mapping and review
+  decisions locally using schema-supported metadata or an ignored machine-readable
+  manifest, not a new process document.
+- Use the implemented `splitAvengersCorpus` to calculate exact counts before observing
+  outcomes. A 0.2 held-out ratio with 150 examples does not guarantee 30 held-out cases.
+  Require >=30 held-out examples plus meaningful independent training coverage. Never
+  search for a favorable seed, drop difficult cases, or tune on held-out results.
+- Freeze candidate runtime/canonical identities, catalog, capabilities, dated token
+  prices, mappings, checks/rubrics, judge, split parameters, cluster settings, and timeout.
+  Use distinct actual models; do not reuse Phase 3's Gemini-priced Grok/Claude aliases
+  as faithful production pricing. Disclose candidate-as-judge bias if retained.
+
+### Preflight and budget
+
+Use the pure `readDataset`, `planAvengersCollection`, and `splitAvengersCorpus` interfaces
+for offline preflight; the CLI has no collection `--dry-run`. Verify relevant offline
+tests before live work. Do not assume prior audit completion statements prove readiness.
+
+A 60-example/two-candidate pilot with a verified 30/30 split requires up to 120 generation
+calls, 60 judge calls, one training batch of 30 short embedding inputs, and 30 held-out
+single-item embedding calls: up to 211 requests, excluding probes. A one-cluster pilot
+tests mechanics/global ranking, not task-specific learned routing. Production size and
+cluster count must be justified by coverage and per-cluster observations; do not weaken
+minimum observations or activation thresholds to fit this pilot.
+
+For N examples, M candidates, J rubric-scored examples, T training examples, and H
+held-out examples: budget N*M generations, up to J judges, training batches within
+128-item/1-MiB input limits, and H fresh validation embedding requests. Include prompt,
+output/reasoning, judge, and embedding costs, not only candidate generation. Subscription
+access proves neither zero marginal cost nor available quota. Present bounded token/dollar
+estimates and confirm the concrete live-call budget before execution. Do not automatically
+retry timeouts whose billing outcome is unknown.
+
+Configure these variables without printing their values:
+
+```text
+AUTO_ROUTER_EVAL_BASE_URL
+AUTO_ROUTER_EVAL_API_KEY
+AUTO_ROUTER_EVAL_JUDGE_MODEL
+AUTO_ROUTER_EVAL_TIMEOUT_MS
+AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS
+AUTO_ROUTER_EVAL_RETRY_MAX_ATTEMPTS
+AUTO_ROUTER_EVAL_RETRY_BASE_DELAY_MS
+AUTO_ROUTER_EVAL_RETRY_MAX_DELAY_MS
+AUTO_ROUTER_EMBEDDING_BASE_URL
+AUTO_ROUTER_EMBEDDING_API_KEY
+AUTO_ROUTER_EMBEDDING_MODEL
+```
+
+Verify a separate OpenAI-compatible embeddings endpoint/model, authentication, dimensions,
+limits, and realistic latency with approved probes. Do not assume the local proxy or a
+subscription login supports embeddings. Use the same embedding endpoint/model and
+normalization in training, validation, and runtime; use a fresh cache when changing the
+endpoint. The example 400-ms deployment timeout is not permission to inflate latency
+thresholds until validation passes; resolve product tradeoffs explicitly.
+
+### Source-visible hazards and resolutions
+
+- `avengers-collection.ts` uses Chat Completions and does not inherit Phase 3 transport
+  overrides. The production models were verified on that transport. The collection CLI
+  now opts into bounded retries for 429/502/503/504 and honors structured provider delay
+  metadata; explicit per-day quota exhaustion fails immediately. Library callers retain
+  single-attempt behavior unless they opt in. Timeouts are never retried because their
+  billing outcome is ambiguous.
+- Collection refuses an existing output and has no resume flag. A judge exception can
+  abort after billed generation; retain partial results and explicitly reconcile missing
+  outcomes without silently repeating calls or cherry-picking successful cases.
+- Cost needs returned usage and a matching runtime-keyed dataset price. Catalog-derived
+  cost is not an observed invoice; document estimates and classifier overhead separately.
+- Curation now binds every row to the supplied dataset, exact aliases, and runtime IDs,
+  rejects unknown/duplicate/missing examples, and rejects explicit unjudged records.
+- Incomplete sibling generations can skip judging. Do not accept a rubric-only completed
+  answer as deterministically scored zero without meaningful check evidence.
+- Training options are validated before billable embedding requests. Inspect and test
+  affected code paths rather than assuming the Phase 3 passing report validates Phase 4
+  mechanics.
+
+### Execution and acceptance
+
+Use the collect/curate/train/validate commands already documented below; replace example
+paths/settings with the frozen experiment. Actual flags are defined in
+`packages/eval/src/avengers-cli.ts`. Keep private outputs ignored, for example
+`phase-4-collection.local.jsonl`, `phase-4-corpus.local.json`,
+`phase-4-embeddings.local.json`, and `phase-4-validation.local.json`/`.md`.
+Use `.cache/phase-4-artifact` for local production artifacts and verify ignore coverage
+for any alternate paths. Archive prior evidence instead of overwriting it. Never commit
+private text, responses, or individual embeddings.
+
+Train only on the training partition; verify deterministic artifact bytes using frozen
+inputs and cached vectors. Validate using fresh held-out single-item embeddings at the
+intended deployment timeout. Keep all gates below intact, including completeness,
+nonsynthetic provenance, mapping, >=0.95 retention, >=0.50 model-cost savings, no Tier-0
+quality/cost regression, seeded uncertainty, and latency. Current uncertainty validation
+checks interval presence, not a confidence-bound threshold; report the actual interval.
+Check unselected-candidate failures and separate source-cohort results explicitly rather
+than overinterpreting aggregate eligibility. Further tuning needs an untouched holdout.
+
+Only eligible manifests bound to the exact artifact and deployment endpoint can activate
+Tier 1. Preserve checked-in `enabled: false`; use authorized local configuration for
+rollout. Verify boundary-only embeddings, explicit force-header bypass, sticky turns,
+timeout/429/bad-vector fallback, and rollback by disabling Tier 1 and restarting. If
+data, provider compatibility, budget, or validation blocks activation, leave it disabled
+and report the exact blocker.
+
+Update existing PLAN.md, roadmap.md, and this spec with actual commands, source/split
+counts, digests, metrics, checks, limitations, and activation state. Publication and Git
+delivery require their own authorization and the required repository gate. Completion
+means reviewed mixed corpus, trained production artifact, passing held-out evidence,
+and verified authorized activation, not just a successful training command.
+
+## Production Freeze And Current Blocker (2026-09-07)
+
+### Frozen experiment
+
+- Dataset ID `phase-4-production-v1` has 80 examples in 57 leakage groups: 51 HumanEval
+  items and 29 tasks reconstructed from this repository's public history. Real-task
+  commits are bounded to at most 250 changed lines and four source files. Related commits
+  share a feature-family group.
+- HumanEval is pinned to commit `6d43fb980f9fee3c892a914eda09951f772ad10d` under
+  MIT. Archive SHA-256 is
+  `b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef`;
+  license SHA-256 is
+  `bcba3de214851cce46ed5af42d6698044616eeace887c3231bc7a20474ab639e`.
+  Original tests and canonical solutions are retained locally for judging but excluded
+  from candidate and embedding inputs.
+- Seed `phase4-production-v1`, held-out ratio `0.5`, was fixed before outcomes. The exact
+  split is 45 training examples (25 public, 20 real) and 35 held-out examples (26 public,
+  9 real). Validation found no group overlap, duplicate prompt hash, reference leakage,
+  or static API-key pattern.
+- Candidates are `paper/cheap=gemini-3.1-flash-lite` and
+  `paper/frontier=gemini-3.6-flash`; the distinct blinded judge is
+  `gemini-3.8-flash`. Official standard prices through 2026-12-31 are $0.25/$1.50 per
+  million input/output tokens for cheap and $0.75/$3.75 for frontier and judge. Artificial
+  Analysis Intelligence Index values 16 and 34 are mapped into the legacy catalog
+  `codingIndex` field; the source pages did not expose a separate Coding Index.
+- `gemini-embedding-001` is fixed at 3072 dimensions. Official input limit is 2,048
+  tokens, so training text is capped at 6,000 characters. Paid text input is $0.15 per
+  million tokens; free tier is free of charge.
+- Offline validation reported 80 unique prompts, maximum prompt size 10,992 characters,
+  and approximately 37,802 prompt tokens. Planned live work is 160 candidate generations,
+  80 batched blinded judgments, one training embedding batch for 45 examples, and 35
+  held-out embedding calls. The conservative candidate/judge bound is $2.54 at a 4,096
+  output-token cap; bounded embedding input adds less than $0.02 at paid pricing.
+- Local ignored artifacts are `phase-4-production.eval-dataset.local.json`,
+  `phase-4-production-source-manifest.local.json`, and
+  `.cache/phase-4-human-eval-source.local.json`. They are mode 0600. Publication remains
+  unauthorized.
+
+### Collection evidence and blocker
+
+- A one-example smoke run completed both candidates and one blinded judgment. Both
+  outcomes scored 1.0; provider-reported candidate costs were $0.000318 for cheap and
+  $0.004155 for frontier.
+- `.cache/phase-4-production.collection.local.jsonl` is rejected operational evidence.
+  The pre-hardening collector wrote 80 rows and exited zero despite 62 cheap 429s, two
+  cheap 503s, 79 frontier 429s, one frontier 503, and zero judgments.
+- `.cache/phase-4-production-retry1.collection.local.jsonl` is also rejected. With the
+  corrected retry/failure behavior, its first case completed and was judged; the second
+  durably recorded the cheap output plus a frontier 429 and then exited non-zero. The
+  smoke and retry files overlap on the first example, so there is only one unique complete
+  production pair, not two.
+- `.cache/phase-4-production-retry2.collection.local.jsonl` is a rejected one-row partial
+  from the requested paid-tier retry: cheap completed, frontier returned the same free-tier
+  429, and collection stopped before judging. After a ten-minute propagation wait, one
+  minimal frontier probe returned 200 but an immediate second probe again returned the
+  free-tier quota ID. The configured key therefore has not demonstrated paid-tier quota.
+- Gemini returned quota metric
+  `generativelanguage.googleapis.com/generate_content_free_tier_requests`, quota ID
+  `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, value 20 for
+  `gemini-3.6-flash`. Official rate-limit documentation says RPD resets at midnight
+  Pacific. The pricing page marks Batch unavailable on this model's free tier.
+- Completing this fixed experiment therefore requires either a paid-tier Gemini project
+  with sufficient quota or collection across multiple daily reset windows. Do not change
+  candidates, seed, split, or drop blocked examples. Do not combine partial rows or train
+  until all 80 exact examples have complete, judged, usage-bearing outcomes.
+- Tier 1 remains disabled. No production curation, embedding cache, artifact, held-out
+  validation, source-cohort metrics, or activation exists.
+
+## Live Attempt And Recovery (2026-09-07)
+
+This section supersedes earlier conversation claims that the pilot was production-ready,
+that its dollar estimate was verified, or that cooldown proved an RPM-only limit.
+Collection was attempted inline. **Production curation, training, validation, and
+activation are still pending. Do not train on a success-only subset of this attempt.**
+The prior Luna/max-reasoning delegation requirement above was not verified or exercised;
+confirm the next execution mode rather than claiming it was satisfied.
+
+### Experiment actually attempted
+
+- Local root: `phase-4.eval-dataset.local.json`, ID `phase-4-pilot-v1`, 60 independent
+  single-turn sessions: HumanEval/0 through /29 plus `original-001` through `original-030`.
+- HumanEval was fetched from `https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz`.
+  The generator used prompts, not canonical solutions or hidden tests. The source was
+  NOT commit-pinned; the MIT license/attribution must be verified and preserved before reuse.
+  Original benchmark tests were downloaded but not executed in a sandbox.
+- The 30 original prompts were newly authored, not sourced from authorized real task
+  histories. They do NOT establish the required real-task cohort. Do not relabel them.
+- Seed `4683`, ratio `0.5`: original pre-outcome calculation reported 29 training
+  (17 public, 12 original) and 31 held-out (13 public, 18 original). This calculation
+  used a Python reproduction; recheck with `splitAvengersCorpus` before accepting it.
+  Later remainder files are retry queues, NOT new experimental partitions.
+- Direct Chat Completions base: `https://generativelanguage.googleapis.com/v1beta/openai`.
+  Aliases: `paper/cheap=gemini-3.5-flash,paper/frontier=gemini-3.6-flash`.
+  Judge: `gemini-3.1-flash-lite`; timeout 120000 ms. Output cap changed from 1024
+  to 4096 after truncated outputs. This is an unfrozen protocol change, not comparable
+  production evidence. Judge calibration has not been established.
+- Embedding probe: `gemini-embedding-001` at the same base returned 3072 dimensions;
+  index zero was omitted while later indices were explicit. No production cache,
+  latency measurement, trained artifact, or held-out validation was produced.
+- Dataset token rates ($/million input/output) were manually set to 0.15/0.60 for
+  cheap and 0.30/2.50 for frontier after the pricing-page fetch failed. The manifest
+  explicitly says rates were differentiated by hand. **These are unsupported prices;
+  do not use them for cost savings, a budget estimate, or activation.** Catalog quality
+  scores 72/90 and blended prices 0.3/1.5 also lack verified provenance.
+- The stated ~$1-2 budget was not substantiated or concretely confirmed. Reconcile
+  provider usage/billing, all probes, retries, reasoning and judge costs before further
+  paid work. Returned `total_tokens` exceeded prompt plus completion tokens in probes;
+  current accounting must be checked for omitted billable reasoning tokens.
+
+### Local evidence inventory
+
+All paths below are relative to the repository and must remain private, ignored, and
+mode 0600. Verify existence and content before resuming; do not overwrite archives.
+
+| Path | Observed contents / purpose |
+| --- | --- |
+| `phase-4.eval-dataset.local.json` | Original 60-case diagnostic dataset |
+| `phase-4-source-manifest.local.json` | Local source mapping; stale after later retries, includes unsupported pricing and exclusion decisions |
+| `phase-4-remainder.eval-dataset.local.json` | 58 sessions, excluding 000/001 |
+| `phase-4-remainder-2.eval-dataset.local.json` | 46 sessions, public 014 onward plus originals |
+| `phase-4-remainder-3.eval-dataset.local.json` | 42 both-candidate-429 retry sessions |
+| `phase-4-remainder-4.eval-dataset.local.json` | 40 sessions, public 018 onward and outstanding originals |
+| `.cache/phase-4-collection.partial-503.jsonl` | 000/001: truncated/partial, unjudged |
+| `.cache/phase-4-collection.batch1-judged.jsonl` | 11 judged pairs: public 002 through 012 |
+| `.cache/phase-4-collection.batch2-mixed.jsonl` | 46 rows: 42 both-failed 429, 3 partial, 1 judged |
+| `.cache/phase-4-collection.batch2-judged.jsonl` | Copy of original-004, already in batch2-mixed |
+| `.cache/phase-4-collection.batch3-mixed.jsonl` | public 016 judged; 017 cheap 429/frontier completed |
+| `.cache/phase-4-collection.batch3-judged.jsonl` | Copy of public 016, already in batch3-mixed |
+| `.cache/phase-4-collection.batch4-429.jsonl` | public 018 both-candidate 429 |
+| `phase-4-collection.local.jsonl` | Latest retry: public 018 both-candidate 429 again; NOT the combined collection |
+
+There are **13 unique complete judged pairs**, not 13 held-out cases: public 002-012,
+016, and original-004. Never concatenate the `*-judged` copies with their mixed
+parents without deduplicating by example and candidate. Preserve all failed attempts.
+Public 013 generated candidates before a judge 503 aborted without persisting them;
+its responses/usage are unavailable. Public 002 also had an extra generation probe.
+Partial retained rows exist for public 000/001, 014/015/017, and original-024.
+The local generator `/tmp/build_phase4_dataset.py` and downloaded
+`/tmp/HumanEval.jsonl.gz` are ephemeral and must not be assumed available or rerun:
+the generator overwrites the dataset and manifest.
+
+### Historical failures and subsequent fixes
+
+- A proxy Gemini completion returned HTTP 200 without usage. Source inspection found
+  `writeChatCompletion` omitted usage in translated non-stream responses. The proxy now
+  normalizes Anthropic, OpenAI, xAI, Google, and OpenAI-compatible Responses usage into
+  the OpenAI Chat Completions envelope; the Anthropic cache-token regression is covered
+  by `packages/proxy/tests/server.test.ts`.
+- `requestCompletion` already sends `x-force-model` for qualified model IDs. The earlier
+  claim that collection cannot pin non-Anthropic proxy candidates was incorrect.
+- Claude probe returned 429; judge alternatives returned 404/429/503. Availability and
+  quota must be reverified; model-list presence does not establish inference access.
+- Short probes sometimes returned 200 while full requests returned 429. Later sanitized
+  provider details identified a free-tier per-project, per-model RPD limit of 20. The
+  official reset is midnight Pacific; a short retry delay cannot overcome exhausted RPD.
+- `router-core/src/embeddings.ts` now interprets an absent index as zero, not array
+  position. Duplicate/out-of-range checks remain. Two regression tests were added.
+  Targeted checks reported 34 embedding tests and 170 core tests passing.
+- `eval/src/avengers-collection.ts` now persists explicit judge and generation transport
+  errors, marks missing rubric judgments `unjudged`, exits non-zero, and prevents curation
+  from accepting those rows as observed quality zero.
+- Provider usage accounting includes hidden thinking tokens reported only by
+  `total_tokens`. Curation binds all rows and aliases to the frozen dataset, and training
+  validates its options before embedding requests.
+- Final local verification passed 155 eval tests, 170 router-core tests, 104 proxy tests,
+  3 installer tests, all package builds, corpus invariants, permission/ignore checks, and
+  rejection of the partial production collection by curation.
+
+## Anthropic Replacement Snapshot (2026-09-08)
+
+- `phase-4-production-anthropic-v1.eval-dataset.local.json` is a separate ignored
+  provider snapshot derived from the immutable 80-case production task corpus. It keeps
+  the 45/35 split and 57 leakage groups; Gemini outcomes are not reused or combined.
+- Candidates are `anthropic/claude-haiku-4-5` and `anthropic/claude-sonnet-5`; the distinct
+  judge is `anthropic/claude-opus-5`. Official model IDs and standard API-equivalent
+  prices are recorded at [Anthropic's model overview](https://platform.claude.com/docs/en/models/overview)
+  and [pricing page](https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
+  Subscription usage is not invoiced at these API rates; costs are estimates.
+- Embeddings use local Ollama `nomic-embed-text` at 768 dimensions through
+  `http://127.0.0.1:11434/v1/embeddings`. The local endpoint returned a valid vector and
+  the new dataset replay passed offline.
+- The loopback proxy is the only generation path. A live Haiku smoke returned HTTP 429
+  with the account's Claude Pro five-hour window at 100%; no new candidate or judge
+  outcomes exist yet. The snapshot is prepared but not collected, curated, trained,
+  validated, or eligible for activation.
+
+## OpenAI OAuth Snapshot (2026-09-08)
+
+- `phase-4-production-openai-v1.eval-dataset.local.json` and its source manifest are
+  separate ignored snapshots derived from the immutable 80-case production corpus. They
+  retain the 45/35 split and 57 leakage groups and do not reuse provider outcomes.
+- Candidates are `paper/cheap=openai/gpt-5.6-luna` and
+  `paper/frontier=openai/gpt-5.6-sol`; the distinct judge is
+  `openai/gpt-5.6-terra`. Official model pages and standard short-context pricing are
+  recorded in the local manifest. Subscription OAuth usage is not invoiced at those API
+  rates, so the prices are estimates for comparison only.
+- All three model probes returned HTTP 200 with provider usage through the rebuilt
+  loopback proxy. Offline preflight planned 160 candidate generations and 80 judges.
+- The confirmed collection produced 51 complete judged rows, then stopped at
+  `real-client-installer/real-2ad6fe28d89f`: the Luna outcome completed and the Sol
+  request timed out at the shared 120-second eval/proxy boundary. The partial collection
+  is rejected evidence. Do not retry the timed-out request or train from this partial
+  matrix without explicit recovery approval because its billing outcome is ambiguous.
+- The user chose to skip further expensive frontier calls for now. The synthetic fixture
+  pipeline was exercised instead with local Ollama embeddings: three training embeddings,
+  three held-out embeddings, a 62.54 ms p95 at a two-second timeout, and mode-0600 artifact
+  files. Validation correctly remained ineligible because the fixture is synthetic, has
+  fewer than 30 held-out cases, and misses the cost-savings gate. This is mechanics-only
+  evidence; no production artifact or Tier 1 activation exists.
+
+### Next-agent execution sequence
+
+1. Restart the local proxy from the rebuilt `packages/proxy/dist` and wait for the
+   subscription quota reset. Run one forced Haiku smoke and require a Chat Completions
+   response with `usage.prompt_tokens` and `usage.completion_tokens` before collection.
+2. Use the Anthropic snapshot and a fresh output path. Collect all 80 rows through the
+   loopback proxy; require both candidate runtime IDs, complete terminal state, provider
+   usage, and blinded Opus judgment for every row.
+3. Curate only the complete replacement collection, train with local Ollama embeddings,
+   verify deterministic artifact bytes, and validate all 35 untouched held-out examples
+   plus both source cohorts. Keep Tier 1 disabled unless the artifact is eligible and
+   rollout is separately authorized.
+
+### Historical Gemini execution sequence
+
+1. Supply a Gemini project whose AI Studio project shows Tier 1 or higher and verify at
+   least two consecutive frontier requests, or wait across quota reset windows to collect
+   the exact frozen experiment. Do not rotate model aliases or tune the seed, split,
+   corpus, or output cap after observing results.
+2. Use a fresh output path. Reconcile retry artifacts by ID and candidate before any
+   rerun; the stock CLI has no candidate-specific resume or judge-only mode. Never count
+   overlapping smoke/retry rows twice or accept success-only subsets.
+3. Require all 80 exact rows to contain both mapped runtime IDs, complete terminal state,
+   provider usage/cost, and blinded judgment before curation. Run full builds/tests and
+   inspect redaction before training.
+4. Train on the fixed 45-example training partition with the frozen embedding settings,
+   verify deterministic artifact bytes, and validate all 35 untouched held-out examples
+   plus both source cohorts. Keep every original gate unchanged and Tier 1 disabled unless
+   the artifact is eligible and rollout is separately authorized.
+
+Documentation updates do not authorize new live calls, Git publication, or activation.
+
 ## Context
 
 Phase 4 now spans these implemented Tier-1 pieces:
@@ -324,8 +700,9 @@ defaults use `enabled: false`.
 
 The proxy uses this order for each request:
 
-1. Return the existing task lock when the request remains inside a task.
-2. Honor an explicit forced model according to the existing force/stickiness contract.
+1. Honor an explicit `x-force-model` header before task stickiness and bypass embedding.
+2. Otherwise return the existing task lock inside a task; request-body model selection
+   remains subject to that lock.
 3. Confirm a new task boundary.
 4. Normalize and bound the task-boundary text.
 5. Request one embedding with `AbortSignal.timeout` and no automatic retry.

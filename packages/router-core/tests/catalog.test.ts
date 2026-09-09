@@ -82,6 +82,27 @@ describe("catalog build", () => {
     });
   });
 
+  it("only marks OpenCode models free when pricing says they are free", () => {
+    const cat = buildCatalogFromProviders(
+      {
+        connected: ["opencode"],
+        all: [
+          {
+            id: "opencode",
+            models: {
+              "paid-zen": { id: "paid-zen", cost: { input: 1, output: 4 } },
+              "free-zen": { id: "free-zen", cost: { input: 0, output: 0 } },
+            },
+          },
+        ],
+      },
+      { ...cfg, providerFreeSet: [] },
+    );
+
+    expect(cat.models.find((model) => model.id === "paid-zen")?.isFree).toBe(false);
+    expect(cat.models.find((model) => model.id === "free-zen")?.isFree).toBe(true);
+  });
+
   it("infers high capability for Sol, Fable, and Opus model families", () => {
     const cat = buildCatalogFromProviders(
       {

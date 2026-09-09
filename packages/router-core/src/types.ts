@@ -73,7 +73,7 @@ export interface ModelEntry {
   value: number;
   /** context window size (from windowRegistry) */
   windowTokens: number;
-  /** whether model is free to the user (providerFreeSet join) */
+  /** whether model is free to the user (explicit free set or authoritative zero pricing) */
   isFree: boolean;
   /** tie-breakers from AA */
   medianOutputTokensPerSec?: number;
