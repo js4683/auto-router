@@ -88,8 +88,9 @@ held-out evidence; retain its pricing/alias and judge limitations.
 ## Stretch
 
 Phase 4 evidence and local digest-bound activation are complete for the OpenAI OAuth
-snapshot. The remaining work is authorized Tier-1 rollout, rollback verification, and
-public default enablement. The authoritative execution sequence, budget,
+snapshot. Authorized local opt-in rollout and rollback verification are also complete.
+The remaining work is public staged Tier-1 rollout and public default enablement. The
+authoritative execution sequence, budget,
 Luna/max-reasoning requirement, blockers, and activation criteria are in the
 [existing Phase 4 spec](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#execution-handoff-2026-09-07)
 and PLAN.md's Phase 4 checklist. Public activation remains separately gated. No activation
@@ -118,7 +119,8 @@ ignored. See the [completion record](PLAN.md#openai-oauth-production-completion-
 - [x] real observed-outcome corpus collected
 - [x] production artifact trained
 - [x] production artifact activation gate passed and local digest-bound activation verified
-- [ ] Tier-1 rollout, rollback verification, and public default enablement
+- [x] Authorized local Tier-1 rollout and rollback verification
+- [ ] Public Tier-1 rollout and default enablement
 - [ ] Tier-2 LLM judge (flagged)
 - [ ] Go rewrite of the proxy for perf / single-binary distribution
 
