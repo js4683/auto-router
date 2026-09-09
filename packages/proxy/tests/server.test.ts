@@ -1152,6 +1152,81 @@ describe("proxy", () => {
     }
   });
 
+  it("uses the configured upstream timeout for provider requests", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const server = createProxyServer({
+        catalog,
+        config,
+        sessions: memorySessions(),
+        upstreamTimeoutMs: 25,
+        backends: {
+          openai: {
+            baseUrl: "https://api.openai.com",
+            fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] })),
+          },
+        },
+        select: () =>
+          ({
+            modelId: "openai/gpt-5.6-sol",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+          }) as never,
+      });
+
+      await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hello" }] }), collectRes() as never);
+
+      expect(timeout).toHaveBeenCalledWith(25);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("reads the upstream timeout from the proxy environment", async () => {
+    vi.stubEnv("AUTO_ROUTER_UPSTREAM_TIMEOUT_MS", "300000");
+    try {
+      const { bootstrapProxyOptions } = await import("../src/server.js");
+      expect(bootstrapProxyOptions().upstreamTimeoutMs).toBe(300000);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports the active Avengers artifact digest in route responses", async () => {
+    const artifactDigest = "a".repeat(64);
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      avengersArtifactDigest: artifactDigest,
+      rankAvengers: () => avengersPrediction,
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "avengers-pro",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(fakeReq("/v1/route", { model: "auto", messages: [{ role: "user", content: "smoke" }] }), res as never);
+
+    expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro", artifactDigest });
+  });
+
   it("lets an injected async prediction drive avengers-pro selection", async () => {
     const server = createProxyServer({
       catalog,

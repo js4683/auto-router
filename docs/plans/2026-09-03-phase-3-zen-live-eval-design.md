@@ -6,6 +6,10 @@
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 **Prior eval contract:** [2026-08-31-phase-3-eval-harness-design.md](./2026-08-31-phase-3-eval-harness-design.md)
 
+> This dated Phase 3 design records the scope and deferred Phase 4 status as of
+> 2026-09-03. Current Phase 4 evidence and rollout status are maintained in the
+> [Phase 4 completion record](./2026-09-01-phase-4-embedding-classifier-design.md#openai-oauth-production-completion-2026-09-09).
+
 ## Objective
 
 Run the existing Phase 3 live benchmark against OpenCode Zen using Muse as the cheap/free model, GPT 5.6 Sol as frontier, and GPT 5.6 Luna as judge. The current live runner only posts to `{baseUrl}/chat/completions`. Zen GPT and Muse require `{baseUrl}/responses`. This slice adds that transport, authors 30 non-confidential local cases, and records a live report. The 0.95 quality / 0.50 cost gates are measured, not required to pass.

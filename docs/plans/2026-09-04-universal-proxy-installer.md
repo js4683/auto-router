@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: Node `fs`, `os`
-- Produces: `ENV_KEYS = ["OPENAI_API_KEY","OPENCODE_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY","OPENAI_BASE_URL","OPENCODE_BASE_URL","ANTHROPIC_BASE_URL","GEMINI_BASE_URL"] as const`
+- Produces: a managed `ENV_KEYS` allowlist; the current key set is authoritative in [`env-file.ts`](../../packages/proxy/src/env-file.ts), including `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS`
 - Produces: `defaultEnvPath(): string` → `join(homedir(), ".config/auto-router/.env")`
 - Produces: `readEnvFile(path: string): Record<string, string>`
 - Produces: `writeEnvFile(path: string, updates: Record<string, string>): void` — merge, skip empty values, mode `0600`
@@ -141,7 +141,9 @@ if (req.method === "POST" && path === "/settings") {
 }
 ```
 
-Form fields named exactly `ENV_KEYS`. Bind the HTTP server to `127.0.0.1` only (already default).
+Form fields cover the user-facing credential and base-URL settings; managed writes still use
+the authoritative `ENV_KEYS` allowlist. Bind the HTTP server to `127.0.0.1` only (already
+default).
 
 - [ ] **Step 4: Run tests to verify they pass**
 

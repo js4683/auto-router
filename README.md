@@ -138,6 +138,12 @@ retention, 50% estimated cost savings, and a seeded bootstrap interval.
 Replay reports expose recorded terminal state and truncation; incomplete records fail
 the completeness gate and cannot support cost or quality comparisons.
 
+The proxy's upstream request deadline defaults to 120,000 milliseconds (120 seconds). Slow
+provider requests can opt into a bounded deadline from 1 through 600,000 milliseconds (10
+minutes) with
+`AUTO_ROUTER_UPSTREAM_TIMEOUT_MS`; timeouts remain single-attempt because their billing
+outcome is ambiguous.
+
 ### Recording and curation
 
 Proxy recording is off by default. `metadata` excludes request and response content;

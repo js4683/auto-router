@@ -127,5 +127,5 @@ No live provider calls in CI.
 The original v1 direction remains approved. The audit now identifies open implementation
 gates for account identity, concurrency, session stickiness, CLI lifecycle, quota units,
 and local management security. Resolve those before expanding features. Dashboard
-analytics, encrypted key stores, hosted deployment, and classifier activation remain
+analytics, encrypted key stores, hosted deployment, and public classifier rollout remain
 later slices.

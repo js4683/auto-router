@@ -12,7 +12,7 @@ policy, integration behavior, scope, or verification evidence changes.
 
 ## Current Scope
 
-### Current delivery status (2026-09-08)
+### Current delivery status (2026-09-09)
 
 Public v1 is the local proxy, client installer, settings dashboard, and shared UI/CLI
 provider login. The native OpenCode plugin is optional and is not part of the public
@@ -20,21 +20,21 @@ installer. Recent work added extra credentials, per-account cards, same-provider
 retry, and on-use OAuth refresh. These are implemented happy paths, not a completed
 multi-account reliability gate.
 
-The next milestone is completing Phase 4 outcome collection after the current provider
-quota blocker, then curating, training, and validating the frozen mixed corpus.
-See [the code audit](docs/plans/2026-09-06-proxy-account-audit.md) for evidence,
-priorities, and regression criteria. This audit updated documentation only; source,
-tests, credentials, and the running proxy were not intentionally changed.
+Phase 4 production collection, curation, training, held-out validation, and local
+digest-bound activation verification are now complete for the OpenAI OAuth snapshot.
+The checked-in default remains disabled and private corpus/artifact outputs remain
+ignored. See [the code audit](docs/plans/2026-09-06-proxy-account-audit.md) for evidence,
+priorities, and regression criteria.
 
 The Phase 3 subscription run reported 30/30 complete and passed its configured gate.
 Aliased candidate pricing and candidate-as-judge bias limit generalization; this is not
-Phase 4 held-out evidence. Phase 4 production corpus, training, and activation remain
-pending. A successful login does not prove inference, quota accuracy, or failover.
+Phase 4 held-out evidence. A successful login does not prove inference, quota accuracy,
+or failover.
 
-### Phase 4 execution handoff
+### Historical Gemini production freeze (2026-09-07)
 
-**Latest attempt (2026-09-07): production experiment frozen; collection blocked by a
-confirmed free-tier daily quota.** `phase-4-production-v1` contains 51 commit-pinned
+**Rejected Gemini attempt (2026-09-07): production experiment frozen; collection blocked
+by a confirmed free-tier daily quota.** `phase-4-production-v1` contains 51 commit-pinned
 HumanEval tasks and 29 bounded tasks reconstructed from this repository's public commits.
 Seed `phase4-production-v1` at ratio `0.5` fixes 45 training examples (25 public, 20 real)
 and 35 held-out examples (26 public, 9 real), with related work grouped before splitting.
@@ -53,7 +53,7 @@ the project as free tier. Confirm the key's AI Studio project shows Tier 1 or hi
 another run.
 No production curation, training, validation, or activation was completed.
 
-### Anthropic replacement handoff (2026-09-08)
+### Deferred Anthropic replacement handoff (2026-09-08)
 
 The Gemini snapshot remains immutable historical evidence. A separate ignored snapshot,
 `phase-4-production-anthropic-v1`, reuses its reviewed task content, leakage groups, and
@@ -76,10 +76,13 @@ test and full proxy/eval/build checks pass. Restart the running proxy from rebui
 before the next live smoke, then use a fresh output path after the subscription window
 resets.
 
-### OpenAI OAuth replacement handoff (2026-09-08)
+### OpenAI OAuth initial attempt (2026-09-08)
 
-The user chose to pause expensive frontier collection and continue with non-billable Phase
-4 work. A separate ignored snapshot, `phase-4-production-openai-v1`, reuses the reviewed
+This historical handoff records the initial attempt; the completed recovery and activation
+evidence are recorded below.
+
+The initial attempt paused expensive frontier collection after a shared 120-second
+timeout. A separate ignored snapshot, `phase-4-production-openai-v1`, reuses the reviewed
 task content, leakage groups, and pre-outcome split without combining Gemini, Anthropic, or
 OpenAI outcomes. Its candidate aliases are `paper/cheap=openai/gpt-5.6-luna` and
 `paper/frontier=openai/gpt-5.6-sol`; the distinct judge is `openai/gpt-5.6-terra`. The
@@ -92,20 +95,224 @@ Offline preflight planned 160 candidate generations and 80 judges for 80 example
 confirmed collection produced 51 complete judged rows, then stopped at
 `real-client-installer/real-2ad6fe28d89f`: Luna completed and Sol timed out at the shared
 120-second eval/proxy boundary. The partial file
-`.cache/phase-4-production-openai-v1.collection.local.jsonl` is rejected evidence. Do not
-retry the timed-out request or train from the partial matrix without explicit recovery
-approval because its billing outcome is ambiguous.
+`.cache/phase-4-production-openai-v1.collection.local.jsonl` is rejected evidence. The
+timed-out request was not retried; the completion record below preserves its rejected row
+separately and trains only from the reconciled matrix.
 
 The checked-in synthetic fixture pipeline was exercised without provider generation. Local
 Ollama `nomic-embed-text` trained a mode-0600 artifact from three training embeddings and
 validated three held-out embeddings with a 62.54 ms p95 at a two-second embedding timeout.
 Validation correctly marked the artifact ineligible because it is synthetic, below the
-30-case minimum, and misses the cost-savings gate. This verifies mechanics only; no
-production artifact, held-out evidence, or Tier 1 activation exists.
+30-case minimum, and misses the cost-savings gate. This remains mechanics-only evidence.
+
+### OpenAI OAuth production completion (2026-09-09)
+
+- The initial 51-row collection was reconciled by immutable example ID with a fresh
+  29-row recovery collection after increasing the loopback proxy's bounded upstream
+  timeout. The merged matrix contains exactly 80 unique rows, two completed candidate
+  outcomes per row, blinded Terra judgments, provider usage, and no collection errors.
+- The fixed split remains 45 training examples (25 public, 20 real) and 35 held-out
+  examples (26 public, 9 real) across 57 leakage groups. Curation removed responses and
+  retained only reviewed task text, provenance, and candidate outcomes. Local private
+  outputs are mode `0600` and ignored.
+- Training used local Ollama `nomic-embed-text` at 768 dimensions, a 6,000-character
+  input bound, seed `phase4-production-v1`, held-out ratio `0.5`, two clusters, top-K `2`,
+  beta `9`, and minimum observations `3`. The production artifact digest is
+  `17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1`; its corpus digest
+  is `4ff03aa311b305e5d9eca62a03e077d77320b3d5a7195fc2c00e968c2383aeac`.
+- Fresh validation covered all 35 held-out examples. The embedding endpoint digest is
+  `9b514b1a65f6ebfaa4da53a116ea003831b044dc32a989733eace74554ef5b0c`; p95 latency was
+  `239.83 ms` at the 2,000 ms deployment timeout. Quality retention was `1.1097`,
+  estimated candidate-generation cost savings were `0.9537`, and every validation gate
+  passed. The seeded retention interval was `[0.9462, 1.3413]`; the current uncertainty
+  gate requires interval presence rather than a lower-bound threshold.
+- Held-out cohort metrics must not be hidden by the aggregate: public quality/cost was
+  Tier 1 `0.9585`/`$0.000302` versus frontier `0.8046`/`$0.003864`; real-task quality/cost
+  was Tier 1 `0.2556`/`$0.003014` versus frontier `0.4011`/`$0.072664`. Tier 1, Tier 0,
+  and always-cheap selected the same runtime on all 35 held-out cases, so this artifact
+  demonstrates the gate and cost floor but not a measured Tier-0 quality improvement.
+- Candidate usage totals were 43,872 input and 82,526 output tokens for cheap, estimated
+  `$0.107806`, and 43,872 input and 116,711 output tokens for frontier, estimated
+  `$2.509708`. These are API-equivalent estimates; subscription OAuth is not invoiced at
+  those rates, and judge/embedding overhead is not included in those candidate totals.
+- Local authorized runtime activation loaded the exact eligible artifact and ranked a
+  smoke task successfully. The checked-in `auto-router.json` remains `enabled: false`;
+  no private corpus, response, embedding cache, or production artifact is published.
+
+### Sanitized OpenAI production execution record
+
+Required credential variables were inherited from the authorized local environment; their
+values are intentionally omitted. Every path below is an ignored local output. The proxy
+used the 600,000 ms upstream deadline and the eval client used a 660,000 ms deadline.
+
+Run the collection proxy in one terminal:
+
+```bash
+set -euo pipefail
+AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
+AUTO_ROUTER_PORT=8787 \
+npm start --workspace=@auto-router/proxy
+```
+
+After the initial collection, run recovery and reconciliation in a second terminal. The
+initial raw file contains 51 usable rows plus one persisted failed timeout row; the
+recovery dataset contains exactly the 29 missing turns. The rejected row remains separate
+and is never retried.
+
+```bash
+set -euo pipefail
+umask 077
+
+initial_collection=".cache/phase-4-production-openai-v1.collection.local.jsonl"
+clean_initial_collection=".cache/phase-4-production-openai-v1.initial-51.collection.local.jsonl"
+rejected_initial_collection=".cache/phase-4-production-openai-v1.rejected-timeout.collection.local.jsonl"
+recovery_dataset=".cache/phase-4-production-openai-v1.recovery.eval-dataset.local.json"
+recovery_collection=".cache/phase-4-production-openai-v1.recovery2.collection.local.jsonl"
+
+jq -c 'select(.id == "real-client-installer/real-2ad6fe28d89f")' \
+  "$initial_collection" > "$rejected_initial_collection"
+jq -c 'select(.id != "real-client-installer/real-2ad6fe28d89f")' \
+  "$initial_collection" > "$clean_initial_collection"
+chmod 600 "$rejected_initial_collection" "$clean_initial_collection"
+test "$(wc -l < "$rejected_initial_collection" | tr -d ' ')" -eq 1
+test "$(wc -l < "$clean_initial_collection" | tr -d ' ')" -eq 51
+jq -e '([.sessions[].turns[]] | length) == 29' "$recovery_dataset" >/dev/null
+
+AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 \
+AUTO_ROUTER_EVAL_JUDGE_MODEL=openai/gpt-5.6-terra \
+AUTO_ROUTER_EVAL_TIMEOUT_MS=660000 \
+npm run eval -- collect-avengers \
+  --dataset "$recovery_dataset" \
+  --models paper/cheap=openai/gpt-5.6-luna,paper/frontier=openai/gpt-5.6-sol \
+  --output "$recovery_collection" \
+  --confirm-live
+
+reconciled=".cache/phase-4-production-openai-v1.complete-v2.collection.local.jsonl"
+temporary="${reconciled}.tmp"
+jq -e -c -s '
+  def valid_outcome:
+    if type != "object" then false
+    elif has("collectionError") or has("error") then false
+    else .terminalState == "completed"
+      and .qualitySource == "judge"
+      and .usageSource == "provider"
+    end;
+  def valid_row:
+    if type != "object" then false
+    elif (.id | type) != "string" or (.id | length) == 0 then false
+    elif has("collectionError") or has("error") then false
+    elif (.outcomes | type) != "array" or (.outcomes | length) != 2 then false
+    else all(.outcomes[]; valid_outcome)
+    end;
+  if type != "array" then error("reconciliation input must be an array")
+  elif length != 80 then error("expected exactly 80 rows")
+  elif ([.[].id] | unique | length) != 80 then error("expected exactly 80 unique example IDs")
+  elif any(.[]; (valid_row | not)) then error("every row must contain two completed judged provider outcomes without errors")
+  else sort_by(.id)[] end
+' "$clean_initial_collection" "$recovery_collection" > "$temporary"
+chmod 600 "$temporary"
+mv "$temporary" "$reconciled"
+
+npm run eval -- curate-avengers \
+  --input "$reconciled" \
+  --dataset phase-4-production-openai-v1.eval-dataset.local.json \
+  --models paper/cheap=openai/gpt-5.6-luna,paper/frontier=openai/gpt-5.6-sol \
+  --output .cache/phase-4-production-openai-v1.corpus.local.json
+
+AUTO_ROUTER_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1 \
+AUTO_ROUTER_EMBEDDING_MODEL=nomic-embed-text \
+npm run eval -- train-avengers \
+  --corpus .cache/phase-4-production-openai-v1.corpus.local.json \
+  --artifact-dir .cache/phase-4-production-openai-v1.artifact \
+  --cache .cache/phase-4-production-openai-v1.embeddings.local.json \
+  --clusters 2 --seed phase4-production-v1 --held-out-ratio 0.5 \
+  --top-k 2 --beta 9 --min-observations 3 --max-input-chars 6000 \
+  --timeout-ms 30000 --confirm-live
+
+AUTO_ROUTER_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1 \
+AUTO_ROUTER_EMBEDDING_MODEL=nomic-embed-text \
+npm run eval -- validate-avengers \
+  --corpus .cache/phase-4-production-openai-v1.corpus.local.json \
+  --artifact-dir .cache/phase-4-production-openai-v1.artifact \
+  --output .cache/phase-4-production-openai-v1.validation.local \
+  --bootstrap-seed phase4-production-v1-bootstrap --timeout-ms 2000 --confirm-live
+```
+
+Stop the collection proxy, generate the ignored runtime configuration, then restart it.
+Because the workspace script runs from `packages/proxy`, the root `.cache` paths are
+intentionally workspace-relative. The manifest check binds the runtime configuration to
+the recorded artifact, and the route response exposes the loaded digest for the smoke:
+
+```bash
+set -euo pipefail
+umask 077
+
+artifact_dir=".cache/phase-4-production-openai-v1.artifact"
+runtime_artifact_dir="../../.cache/phase-4-production-openai-v1.artifact"
+runtime_config=".cache/phase-4-production-openai-v1.runtime.json"
+expected_artifact_digest="17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1"
+
+jq --arg artifact_dir "$runtime_artifact_dir" '
+  .avengersPro = {
+    enabled: true,
+    artifactDir: $artifact_dir,
+    embedding: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      apiKeyEnv: "AUTO_ROUTER_EMBEDDING_API_KEY",
+      model: "nomic-embed-text"
+    },
+    timeoutMs: 2000,
+    maxInputChars: 6000
+  }
+  | .modelMap = ((.modelMap // {}) + {
+      "paper/cheap": [{ "runtimeId": "openai/gpt-5.6-luna", "source": "bench" }],
+      "paper/frontier": [{ "runtimeId": "openai/gpt-5.6-sol", "source": "bench" }]
+    })
+' auto-router.json > "$runtime_config"
+chmod 600 "$runtime_config"
+jq -e --arg expected "$expected_artifact_digest" '.artifactDigest == $expected' \
+  "$artifact_dir/validation.json" >/dev/null
+jq -e --arg artifact_dir "$runtime_artifact_dir" '
+  .avengersPro.enabled == true
+  and .avengersPro.artifactDir == $artifact_dir
+  and .avengersPro.embedding.baseUrl == "http://127.0.0.1:11434/v1"
+  and .avengersPro.embedding.apiKeyEnv == "AUTO_ROUTER_EMBEDDING_API_KEY"
+  and .avengersPro.embedding.model == "nomic-embed-text"
+  and .avengersPro.timeoutMs == 2000
+  and .avengersPro.maxInputChars == 6000
+  and .modelMap["paper/cheap"] == [{ "runtimeId": "openai/gpt-5.6-luna", "source": "bench" }]
+  and .modelMap["paper/frontier"] == [{ "runtimeId": "openai/gpt-5.6-sol", "source": "bench" }]
+  and .modelMap["openai/gpt-5-medium"] == [{ "runtimeId": "openai/gpt-5.6-sol", "source": "bench" }]
+  and .modelMap["qwen/qwen3"] == [{ "runtimeId": "opencode/muse-spark-1.2-contributor-free", "source": "hand" }]
+' "$runtime_config" >/dev/null
+
+AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
+AUTO_ROUTER_CONFIG=../../.cache/phase-4-production-openai-v1.runtime.json \
+npm start --workspace=@auto-router/proxy
+```
+
+In a second terminal, run the digest-bound smoke:
+
+```bash
+set -euo pipefail
+expected_artifact_digest="17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1"
+curl --fail --silent --show-error http://127.0.0.1:8787/v1/route \
+  -H 'content-type: application/json' \
+  --data '{"model":"auto","messages":[{"role":"user","content":"smoke"}]}' \
+  | jq --exit-status --arg expected "$expected_artifact_digest" \
+      '.via == "avengers-pro" and .artifactDigest == $expected' >/dev/null
+```
+
+Repository verification was:
+
+```bash
+npm run build && npm test && git diff --check
+```
 
 Read the [live attempt and recovery inventory](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#live-attempt-and-recovery-2026-09-07)
-before executing. It lists every local batch/remainder, duplicates, partial and lost
-generations, exact settings, prior checks, and the next-agent recovery sequence.
+when reproducing the workflow. It lists every local batch/remainder, duplicates, partial and
+lost generations, exact settings, prior checks, and the recovery sequence used for this
+completion.
 Collection now records explicit unjudged/judge failures, rejects transport failures from
 curation, binds rows to the frozen dataset and aliases, validates training options before
 embedding calls, and supports opt-in bounded 429/502/503/504 retries using provider delay
@@ -123,18 +330,20 @@ only, not approval to publish, commit, or send unreviewed private content extern
   rubrics, candidate identities, prices, split seed/ratio, and training settings.
 - [x] Compute the exact split before outcomes; require >=30 held-out cases, adequate
   training coverage, and both sources represented in both partitions.
-- [ ] Verify the replacement provider's collection transport and usage/cost provenance,
+- [x] Verify the replacement provider's collection transport and usage/cost provenance,
   embeddings endpoint/model, intended deployment latency, and partial-failure handling.
-  The proxy contract and local embedding endpoint pass checks; live Anthropic transport
-  remains quota-blocked.
+  The OpenAI proxy contract and local embedding endpoint pass checks; Anthropic remains a
+  separate historical snapshot whose live transport is quota-blocked.
 - [x] Present generation/judge/embedding counts and bounded cost/token estimates; confirm
   the concrete live budget and private-data review before collection.
-- [ ] Collect and curate real outcomes without relabeling synthetic fixtures, dropping
+- [x] Collect and curate real outcomes without relabeling synthetic fixtures, dropping
   difficult cases, or automatically retrying ambiguously billed timeouts.
-- [ ] Train reproducibly and validate every activation gate plus source-cohort metrics.
-- [ ] Activate only eligible digest-bound artifacts through authorized local configuration;
-  verify boundary-only inference, stickiness, fail-open behavior, and rollback.
-- [ ] Record actual commands, provenance/split counts, digests, metrics, checks, limitations,
+- [x] Train reproducibly and validate every activation gate plus source-cohort metrics.
+- [x] Verify eligible digest-bound artifact loading and a local smoke ranking through
+  authorized configuration; keep the checked-in default disabled.
+- [ ] Complete an authorized Tier-1 rollout verification covering boundary-only inference,
+  stickiness, fail-open behavior, and rollback before enabling the public default.
+- [x] Record actual commands, provenance/split counts, digests, metrics, checks, limitations,
   and activation state in existing documents. Keep private artifacts ignored.
 
 ### In scope
@@ -545,7 +754,7 @@ gate.
   approved narrow provider-switch exception, not permission for arbitrary per-turn
   model switching.
 - **2026-09-06:** Treat multi-account/login as partially complete until the audit gates
-  pass. Keep live quality claims and Phase 4 activation deferred. Reconfirm native-plugin
+  pass. Keep live quality claims and public Phase 4 rollout deferred. Reconfirm native-plugin
   deployment parity only when that optional integration is changed, not as a prerequisite
   for unrelated public-proxy account work.
 
@@ -620,9 +829,10 @@ gate.
   auth, and request preparation. `chat.params` remains observation-only; no OpenCode
   patch or upstream hook is required for user-message routing.
 - [x] Phase 4 code complete
-- [ ] real observed-outcome corpus collected
-- [ ] production artifact trained
-- [ ] production artifact activation gate passed
+- [x] real observed-outcome corpus collected
+- [x] production artifact trained
+- [x] production artifact activation gates passed and digest-bound local activation verified
+- [ ] Tier-1 rollout, rollback verification, and public default enablement
 
 ## Supporting Documents
 

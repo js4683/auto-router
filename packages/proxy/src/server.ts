@@ -38,6 +38,7 @@ import { connectPage } from "./connect-page.js";
 import { mainLogin } from "./login-cli.js";
 import { loginProviderId } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
+import { DEFAULT_UPSTREAM_TIMEOUT_MS, validateUpstreamTimeout } from "./upstream-timeout.js";
 import {
   googleModelDiscovery,
   ModelDiscoveryManager,
@@ -58,6 +59,8 @@ export interface CreateProxyServerOptions {
   config: RouterConfig;
   sessions: ProxySessionStore;
   backends: Record<string, ProxyBackend>;
+  upstreamTimeoutMs?: number;
+  avengersArtifactDigest?: string;
   rankAvengers?: (text: string) => AvengersProPrediction | Promise<AvengersProPrediction>;
   recorder?: EvalRecorder;
   envPath?: string;
@@ -315,6 +318,12 @@ function qualifyModel(model: string): string {
   if (model.includes("/")) return model;
   const { provider, bareModel } = resolveProvider(model);
   return `${provider}/${bareModel}`;
+}
+
+function configuredUpstreamTimeout(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.AUTO_ROUTER_UPSTREAM_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_UPSTREAM_TIMEOUT_MS;
+  return validateUpstreamTimeout(Number(raw));
 }
 
 function requestedModel(body: any): string | undefined {
@@ -1271,6 +1280,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
   close(): void;
 } {
+  const upstreamTimeoutMs = validateUpstreamTimeout(opts.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS);
   const skippedProviders = new Set<string>();
   const routeLog: Array<{ at: number; via: string; modelId: string; status?: number }> = [];
   const quotas = new Map<string, ProviderQuota>();
@@ -1649,7 +1659,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       console.log(`[auto-router-proxy] ${result.via} ${result.modelId}`);
 
       if (path === "/v1/route") {
-        json(res, 200, { modelId: result.modelId, via: result.via });
+        json(res, 200, {
+          modelId: result.modelId,
+          via: result.via,
+          ...(opts.avengersArtifactDigest ? { artifactDigest: opts.avengersArtifactDigest } : {}),
+        });
         return;
       }
 
@@ -1764,7 +1778,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const upstreamUrl = upstreamRequestPlan.path.startsWith("http") ? upstreamRequestPlan.path : `${backend.baseUrl}${upstreamRequestPlan.path}`;
       const upstream = await fetchImpl(upstreamUrl, {
         method: req.method,
-        signal: AbortSignal.timeout(120_000),
+        signal: AbortSignal.timeout(upstreamTimeoutMs),
         headers,
         body: JSON.stringify(upstreamRequestPlan.body),
       });
@@ -1954,6 +1968,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
   }
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
+  const upstreamTimeoutMs = configuredUpstreamTimeout();
   const authPath = join(homedir(), ".local/share/opencode/auth.json");
   const allowed = new Set(["openai", "anthropic", "xai"]);
   const accountsPath = defaultAccountsPath();
@@ -1977,6 +1992,8 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
     catalog,
     config,
     sessions: memorySessions(),
+    upstreamTimeoutMs,
+    avengersArtifactDigest: runtime?.artifactDigest,
     backends: {
       openai: { baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com", apiKey: process.env.OPENAI_API_KEY },
       opencode: { baseUrl: process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen", apiKey: process.env.OPENCODE_API_KEY },

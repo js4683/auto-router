@@ -1,15 +1,18 @@
 # Phase 4 Tier-1 Embedding Classifier Design
 
 **Status:** Approved in design review on 2026-09-01
-**Implementation status:** Phase 4 code is complete: the shared `router-core` embedding
-boundary, observed-outcome collection, artifact building, held-out validation, and
-opt-in runtime wiring are implemented. The checked-in corpus and artifact remain
-synthetic; production corpus collection, production artifact training, and activation
-remain pending.
+**Implementation status:** Phase 4 code and the OpenAI OAuth production experiment are
+complete: the shared `router-core` embedding boundary, observed-outcome collection,
+artifact building, held-out validation, and opt-in runtime wiring are implemented. The
+80-row production corpus and eligible artifact remain local/ignored; the checked-in
+default stays disabled after local digest-bound activation verification.
 **Scope:** End-to-end observed-outcome training, artifact validation, and opt-in runtime inference
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
 ## Execution Handoff (2026-09-07)
+
+This is the historical execution handoff; the OpenAI completion and current rollout state
+are recorded below.
 
 The user requires **both real coding tasks and a public coding benchmark**, with
 **Luna subagents at maximum reasoning**. Verify the configured model and reasoning
@@ -77,6 +80,7 @@ AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS
 AUTO_ROUTER_EVAL_RETRY_MAX_ATTEMPTS
 AUTO_ROUTER_EVAL_RETRY_BASE_DELAY_MS
 AUTO_ROUTER_EVAL_RETRY_MAX_DELAY_MS
+AUTO_ROUTER_UPSTREAM_TIMEOUT_MS
 AUTO_ROUTER_EMBEDDING_BASE_URL
 AUTO_ROUTER_EMBEDDING_API_KEY
 AUTO_ROUTER_EMBEDDING_MODEL
@@ -97,6 +101,10 @@ thresholds until validation passes; resolve product tradeoffs explicitly.
   metadata; explicit per-day quota exhaustion fails immediately. Library callers retain
   single-attempt behavior unless they opt in. Timeouts are never retried because their
   billing outcome is ambiguous.
+- The loopback proxy's external-request deadline defaults to 120,000 milliseconds and accepts
+  the bounded `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` override from 1 through 600,000 milliseconds
+  (10 minutes). This is useful for slow OAuth-backed model completions but does not change
+  the no-timeout-retry rule.
 - Collection refuses an existing output and has no resume flag. A judge exception can
   abort after billed generation; retain partial results and explicitly reconcile missing
   outcomes without silently repeating calls or cherry-picking successful cases.
@@ -143,7 +151,7 @@ delivery require their own authorization and the required repository gate. Compl
 means reviewed mixed corpus, trained production artifact, passing held-out evidence,
 and verified authorized activation, not just a successful training command.
 
-## Production Freeze And Current Blocker (2026-09-07)
+## Historical Gemini Production Freeze And Blocker (2026-09-07)
 
 ### Frozen experiment
 
@@ -204,19 +212,23 @@ and verified authorized activation, not just a successful training command.
   `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, value 20 for
   `gemini-3.6-flash`. Official rate-limit documentation says RPD resets at midnight
   Pacific. The pricing page marks Batch unavailable on this model's free tier.
-- Completing this fixed experiment therefore requires either a paid-tier Gemini project
+- Completing this fixed Gemini experiment still requires either a paid-tier Gemini project
   with sufficient quota or collection across multiple daily reset windows. Do not change
-  candidates, seed, split, or drop blocked examples. Do not combine partial rows or train
-  until all 80 exact examples have complete, judged, usage-bearing outcomes.
-- Tier 1 remains disabled. No production curation, embedding cache, artifact, held-out
-  validation, source-cohort metrics, or activation exists.
+  its candidates, seed, split, or drop blocked examples. Do not combine its partial rows.
+- The separate OpenAI OAuth experiment completed the same reviewed 80-case task corpus;
+  its production curation, embedding cache, artifact, held-out validation, and local
+  activation evidence are recorded in the OpenAI completion section below. Tier 1 remains
+  disabled in the checked-in configuration.
 
 ## Live Attempt And Recovery (2026-09-07)
+
+This is a historical pilot record. Its pending-state notes describe that attempt; the later
+OpenAI completion below records the completed recovery, validation, and local activation.
 
 This section supersedes earlier conversation claims that the pilot was production-ready,
 that its dollar estimate was verified, or that cooldown proved an RPM-only limit.
 Collection was attempted inline. **Production curation, training, validation, and
-activation are still pending. Do not train on a success-only subset of this attempt.**
+activation were pending for this attempt. Do not train on a success-only subset of it.**
 The prior Luna/max-reasoning delegation requirement above was not verified or exercised;
 confirm the next execution mode rather than claiming it was satisfied.
 
@@ -311,7 +323,7 @@ the generator overwrites the dataset and manifest.
   3 installer tests, all package builds, corpus invariants, permission/ignore checks, and
   rejection of the partial production collection by curation.
 
-## Anthropic Replacement Snapshot (2026-09-08)
+## Deferred Anthropic Replacement Snapshot (2026-09-08)
 
 - `phase-4-production-anthropic-v1.eval-dataset.local.json` is a separate ignored
   provider snapshot derived from the immutable 80-case production task corpus. It keeps
@@ -331,6 +343,8 @@ the generator overwrites the dataset and manifest.
 
 ## OpenAI OAuth Snapshot (2026-09-08)
 
+This section records the initial attempt and is superseded by the completion section below.
+
 - `phase-4-production-openai-v1.eval-dataset.local.json` and its source manifest are
   separate ignored snapshots derived from the immutable 80-case production corpus. They
   retain the 45/35 split and 57 leakage groups and do not reuse provider outcomes.
@@ -344,16 +358,59 @@ the generator overwrites the dataset and manifest.
 - The confirmed collection produced 51 complete judged rows, then stopped at
   `real-client-installer/real-2ad6fe28d89f`: the Luna outcome completed and the Sol
   request timed out at the shared 120-second eval/proxy boundary. The partial collection
-  is rejected evidence. Do not retry the timed-out request or train from this partial
-  matrix without explicit recovery approval because its billing outcome is ambiguous.
+  is rejected evidence. The timed-out request was not retried; its row is preserved
+  separately in the completed recovery record because its billing outcome was ambiguous.
 - The user chose to skip further expensive frontier calls for now. The synthetic fixture
   pipeline was exercised instead with local Ollama embeddings: three training embeddings,
   three held-out embeddings, a 62.54 ms p95 at a two-second timeout, and mode-0600 artifact
   files. Validation correctly remained ineligible because the fixture is synthetic, has
   fewer than 30 held-out cases, and misses the cost-savings gate. This is mechanics-only
-  evidence; no production artifact or Tier 1 activation exists.
+  evidence; it did not establish production-artifact eligibility or activation.
 
-### Next-agent execution sequence
+## OpenAI OAuth Production Completion (2026-09-09)
+
+The initial OpenAI collection stopped at the first real task because the loopback proxy's
+120,000-millisecond upstream deadline was shorter than the Sol completion. The proxy now
+accepts `AUTO_ROUTER_UPSTREAM_TIMEOUT_MS` from 1 through 600,000 milliseconds (10 minutes);
+timeouts remain single-attempt because their billing outcome is ambiguous. Recovery was run with a 600-second proxy
+deadline, a 660-second eval deadline, the frozen two candidates and Terra judge, and a
+fresh output path. The initial 51 rows and fresh 29 rows were reconciled by immutable ID.
+
+- Complete matrix: 80 unique rows, 160 completed candidate outcomes, 80 blinded judgments,
+  provider usage on every candidate outcome, zero collection errors, and mode-0600 local
+  output.
+- Dataset/split: 57 leakage groups; 45 train (25 public, 20 real) and 35 held-out (26
+  public, 9 real), seed `phase4-production-v1`, held-out ratio `0.5`.
+- Candidate totals: cheap `43,872` input and `82,526` output tokens, estimated `$0.107806`;
+  frontier `43,872` input and `116,711` output tokens, estimated `$2.509708`. These are
+  API-equivalent comparison prices, not subscription invoices, and exclude judge/embedding
+  overhead from the candidate totals.
+- Artifact: local Ollama `nomic-embed-text`, 768 dimensions, 6,000-character bound, two
+  clusters, top-K `2`, beta `9`, minimum observations `3`; artifact digest
+  `17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1`; corpus digest
+  `4ff03aa311b305e5d9eca62a03e077d77320b3d5a7195fc2c00e968c2383aeac`.
+- Validation: endpoint digest
+  `9b514b1a65f6ebfaa4da53a116ea003831b044dc32a989733eace74554ef5b0c`, 35 fresh held-out
+  single-item requests, p95 `239.83 ms` at a 2,000 ms timeout, quality retention `1.1097`,
+  candidate-generation cost savings `0.9537`, and all gates passed. The seeded interval is
+  `[0.9462, 1.3413]`; the current uncertainty gate checks presence only.
+- Cohorts: public Tier 1 quality/cost `0.9585`/`$0.000302` versus frontier
+  `0.8046`/`$0.003864`; real-task Tier 1 quality/cost `0.2556`/`$0.003014` versus
+  frontier `0.4011`/`$0.072664`. Tier 1, Tier 0, and always-cheap selected identically on
+  every held-out case, so the artifact passes the formal gate without demonstrating a
+  Tier-0 quality improvement.
+- Local authorized runtime activation loaded the exact eligible digest and ranked a smoke
+  task successfully. The checked-in configuration remains `enabled: false`; private corpus,
+  responses, embeddings, artifact, and validation outputs are ignored and unpublished.
+
+The sanitized recovery, reconciliation, curation, training, validation, runtime-smoke,
+and repository-check commands are recorded in the [canonical execution record](../../PLAN.md#sanitized-openai-production-execution-record).
+
+### Deferred Anthropic replacement sequence
+
+The OpenAI completion above satisfies the current Phase 4 delivery. The following
+Anthropic snapshot remains an optional provider comparison, not a prerequisite for the
+OpenAI artifact or local activation:
 
 1. Restart the local proxy from the rebuilt `packages/proxy/dist` and wait for the
    subscription quota reset. Run one forced Haiku smoke and require a Chat Completions
@@ -397,11 +454,12 @@ Phase 4 now spans these implemented Tier-1 pieces:
   training, and held-out validation.
 - The proxy can pass the resulting canonical model ranking into `selectModel`.
 
-The runtime classifier path is implemented but not production-ready. The checked-in
-corpus and artifact are synthetic, their validation is ineligible for activation, and
-`auto-router.json` keeps Tier 1 disabled by default. Production corpus collection,
-production artifact training, and activation remain pending. The implementation
-preserves the existing task-policy, Tier-0, context-fit, and stickiness contracts.
+The runtime classifier path is implemented and has an eligible local OpenAI artifact. The
+checked-in corpus and artifact remain synthetic, their validation is intentionally
+ineligible for activation, and `auto-router.json` keeps Tier 1 disabled by default.
+Production corpus, artifact, and validation outputs remain private local evidence; local
+digest-bound activation was verified separately. The implementation preserves the
+existing task-policy, Tier-0, context-fit, and stickiness contracts.
 
 ## Goals
 
@@ -438,8 +496,9 @@ preserves the existing task-policy, Tier-0, context-fit, and stickiness contract
    strategy at selection time.
 4. Use deterministic seeded k-means over L2-normalized embeddings.
 5. Require a leakage-free held-out validation manifest bound to the exact artifact.
-6. Consider Phase 4 code complete with deterministic fixtures and mock integrations, but
-   keep production activation unchecked until a real artifact passes the live-data gate.
+6. Keep the checked-in Tier-1 default disabled and require a separately authorized rollout,
+   rollback verification, and public-default decision after a real artifact passes the
+   live-data gate.
 
 ## Ownership Boundaries
 
@@ -610,8 +669,8 @@ retraining.
 ## Artifact Contract
 
 The existing unversioned fixture format is replaced by a strict versioned format. Old
-fixture artifacts intentionally fail validation; Phase 4 has not shipped a production
-artifact requiring backward compatibility.
+fixture artifacts intentionally fail validation; the eligible OpenAI artifact remains
+private and ignored, so it is not a checked-in compatibility surface.
 
 The artifact directory contains:
 
@@ -820,9 +879,11 @@ Implementation updates must keep `README.md`, `PLAN.md`, `roadmap.md`, configura
 examples, and the verification record aligned. Status must distinguish:
 
 - Phase 4 code complete.
-- Real observed-outcome corpus collected.
-- Production artifact trained.
-- Production artifact activation gate passed.
+- Real observed-outcome corpus collected for the OpenAI snapshot.
+- Production artifact trained and retained as private local evidence.
+- Production artifact activation gate passed and local digest-bound activation verified.
+- Public Tier-1 rollout, rollback verification, and default enablement remain pending.
 
-Until the final state is proven, no documentation may claim production quality or cost
-improvement from Tier 1.
+The OpenAI artifact passed the formal gates, but its cohort metrics must not be generalized
+as product-wide quality or cost improvement. Public rollout and default enablement remain
+separately gated.
