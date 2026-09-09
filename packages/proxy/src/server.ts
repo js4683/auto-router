@@ -38,6 +38,7 @@ import { connectPage } from "./connect-page.js";
 import { mainLogin } from "./login-cli.js";
 import { loginProviderId } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
+import { DEFAULT_UPSTREAM_TIMEOUT_MS, validateUpstreamTimeout } from "./upstream-timeout.js";
 import {
   googleModelDiscovery,
   ModelDiscoveryManager,
@@ -59,6 +60,7 @@ export interface CreateProxyServerOptions {
   sessions: ProxySessionStore;
   backends: Record<string, ProxyBackend>;
   upstreamTimeoutMs?: number;
+  avengersArtifactDigest?: string;
   rankAvengers?: (text: string) => AvengersProPrediction | Promise<AvengersProPrediction>;
   recorder?: EvalRecorder;
   envPath?: string;
@@ -172,8 +174,6 @@ function pickAccount(
 }
 
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 120_000;
-const MAX_UPSTREAM_TIMEOUT_MS = 600_000;
 const TEXT_MESSAGE_ROLES = new Set(["system", "developer", "user", "assistant"]);
 const CODEX_AUTO_MODEL = {
   slug: "auto",
@@ -318,13 +318,6 @@ function qualifyModel(model: string): string {
   if (model.includes("/")) return model;
   const { provider, bareModel } = resolveProvider(model);
   return `${provider}/${bareModel}`;
-}
-
-function validateUpstreamTimeout(value: number): number {
-  if (!Number.isInteger(value) || value < 1 || value > MAX_UPSTREAM_TIMEOUT_MS) {
-    throw new Error(`upstream timeout must be an integer from 1 through ${MAX_UPSTREAM_TIMEOUT_MS} milliseconds`);
-  }
-  return value;
 }
 
 function configuredUpstreamTimeout(env: NodeJS.ProcessEnv = process.env): number {
@@ -1666,7 +1659,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       console.log(`[auto-router-proxy] ${result.via} ${result.modelId}`);
 
       if (path === "/v1/route") {
-        json(res, 200, { modelId: result.modelId, via: result.via });
+        json(res, 200, {
+          modelId: result.modelId,
+          via: result.via,
+          ...(opts.avengersArtifactDigest ? { artifactDigest: opts.avengersArtifactDigest } : {}),
+        });
         return;
       }
 
@@ -1996,6 +1993,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
     config,
     sessions: memorySessions(),
     upstreamTimeoutMs,
+    avengersArtifactDigest: runtime?.artifactDigest,
     backends: {
       openai: { baseUrl: process.env.OPENAI_BASE_URL ?? "https://api.openai.com", apiKey: process.env.OPENAI_API_KEY },
       opencode: { baseUrl: process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen", apiKey: process.env.OPENCODE_API_KEY },

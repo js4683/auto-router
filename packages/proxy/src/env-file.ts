@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { validateUpstreamTimeout } from "./upstream-timeout.js";
 
 export const ENV_KEYS = [
   "OPENAI_API_KEY",
@@ -48,6 +49,8 @@ export function writeEnvFile(path: string, updates: Record<string, string>): voi
     if (value === undefined || value === "") continue;
     merged[key] = value;
   }
+  const timeout = merged.AUTO_ROUTER_UPSTREAM_TIMEOUT_MS;
+  if (timeout !== undefined) merged.AUTO_ROUTER_UPSTREAM_TIMEOUT_MS = String(validateUpstreamTimeout(Number(timeout)));
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const body = ENV_KEYS.filter((key) => merged[key]).map((key) => `${key}=${merged[key]}`).join("\n") + (Object.keys(merged).length ? "\n" : "");
   writeFileSync(path, body, { mode: 0o600 });

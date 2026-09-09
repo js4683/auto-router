@@ -235,19 +235,61 @@ npm run eval -- validate-avengers \
   --bootstrap-seed phase4-production-v1-bootstrap --timeout-ms 2000 --confirm-live
 ```
 
-Stop the collection proxy, then restart it with the runtime configuration. Because the
-workspace script runs from `packages/proxy`, the root `.cache` path is intentionally
-workspace-relative. The route assertion proves the digest-bound Tier-1 path was loaded:
+Stop the collection proxy, generate the ignored runtime configuration, then restart it.
+Because the workspace script runs from `packages/proxy`, the root `.cache` paths are
+intentionally workspace-relative. The manifest check binds the runtime configuration to
+the recorded artifact, and the route response exposes the loaded digest for the smoke:
 
 ```bash
+set -euo pipefail
+umask 077
+
+artifact_dir=".cache/phase-4-production-openai-v1.artifact"
+runtime_artifact_dir="../../.cache/phase-4-production-openai-v1.artifact"
+runtime_config=".cache/phase-4-production-openai-v1.runtime.json"
+expected_artifact_digest="17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1"
+
+jq --arg artifact_dir "$runtime_artifact_dir" '
+  .avengersPro = {
+    enabled: true,
+    artifactDir: $artifact_dir,
+    embedding: {
+      baseUrl: "http://127.0.0.1:11434/v1",
+      apiKeyEnv: "AUTO_ROUTER_EMBEDDING_API_KEY",
+      model: "nomic-embed-text"
+    },
+    timeoutMs: 2000,
+    maxInputChars: 6000
+  }
+' auto-router.json > "$runtime_config"
+chmod 600 "$runtime_config"
+jq -e --arg expected "$expected_artifact_digest" '.artifactDigest == $expected' \
+  "$artifact_dir/validation.json" >/dev/null
+jq -e --arg artifact_dir "$runtime_artifact_dir" '
+  .avengersPro.enabled == true
+  and .avengersPro.artifactDir == $artifact_dir
+  and .avengersPro.embedding.baseUrl == "http://127.0.0.1:11434/v1"
+  and .avengersPro.embedding.apiKeyEnv == "AUTO_ROUTER_EMBEDDING_API_KEY"
+  and .avengersPro.embedding.model == "nomic-embed-text"
+  and .avengersPro.timeoutMs == 2000
+  and .avengersPro.maxInputChars == 6000
+' "$runtime_config" >/dev/null
+
 AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \
 AUTO_ROUTER_CONFIG=../../.cache/phase-4-production-openai-v1.runtime.json \
 npm start --workspace=@auto-router/proxy
+```
 
+In a second terminal, run the digest-bound smoke:
+
+```bash
+set -euo pipefail
+expected_artifact_digest="17241130c16044b638c529ee63454ae0fd732e3704707290ac3c7191f491cbd1"
 curl --fail --silent --show-error http://127.0.0.1:8787/v1/route \
   -H 'content-type: application/json' \
   --data '{"model":"auto","messages":[{"role":"user","content":"smoke"}]}' \
-  | jq --exit-status '.via == "avengers-pro"' >/dev/null
+  | jq --exit-status --arg expected "$expected_artifact_digest" \
+      '.via == "avengers-pro" and .artifactDigest == $expected' >/dev/null
 ```
 
 Repository verification was:

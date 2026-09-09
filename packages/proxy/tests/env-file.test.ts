@@ -23,4 +23,14 @@ describe("env-file", () => {
 
     expect(readEnvFile(path)).toMatchObject({ AUTO_ROUTER_UPSTREAM_TIMEOUT_MS: "600000" });
   });
+
+  it("rejects an out-of-range upstream timeout without replacing the valid value", () => {
+    const dir = mkdtempSync(join(tmpdir(), "auto-router-env-"));
+    const path = join(dir, ".env");
+
+    writeEnvFile(path, { AUTO_ROUTER_UPSTREAM_TIMEOUT_MS: "120000" });
+
+    expect(() => writeEnvFile(path, { AUTO_ROUTER_UPSTREAM_TIMEOUT_MS: "600001" })).toThrow(/upstream timeout/);
+    expect(readEnvFile(path)).toMatchObject({ AUTO_ROUTER_UPSTREAM_TIMEOUT_MS: "120000" });
+  });
 });

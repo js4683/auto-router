@@ -1198,6 +1198,35 @@ describe("proxy", () => {
     }
   });
 
+  it("reports the active Avengers artifact digest in route responses", async () => {
+    const artifactDigest = "a".repeat(64);
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      avengersArtifactDigest: artifactDigest,
+      rankAvengers: () => avengersPrediction,
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "avengers-pro",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(fakeReq("/v1/route", { model: "auto", messages: [{ role: "user", content: "smoke" }] }), res as never);
+
+    expect(JSON.parse(res.body)).toMatchObject({ via: "avengers-pro", artifactDigest });
+  });
+
   it("lets an injected async prediction drive avengers-pro selection", async () => {
     const server = createProxyServer({
       catalog,
