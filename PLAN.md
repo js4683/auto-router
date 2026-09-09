@@ -261,6 +261,10 @@ jq --arg artifact_dir "$runtime_artifact_dir" '
     timeoutMs: 2000,
     maxInputChars: 6000
   }
+  | .modelMap = ((.modelMap // {}) + {
+      "paper/cheap": [{ "runtimeId": "openai/gpt-5.6-luna", "source": "bench" }],
+      "paper/frontier": [{ "runtimeId": "openai/gpt-5.6-sol", "source": "bench" }]
+    })
 ' auto-router.json > "$runtime_config"
 chmod 600 "$runtime_config"
 jq -e --arg expected "$expected_artifact_digest" '.artifactDigest == $expected' \
@@ -273,6 +277,10 @@ jq -e --arg artifact_dir "$runtime_artifact_dir" '
   and .avengersPro.embedding.model == "nomic-embed-text"
   and .avengersPro.timeoutMs == 2000
   and .avengersPro.maxInputChars == 6000
+  and .modelMap["paper/cheap"] == [{ "runtimeId": "openai/gpt-5.6-luna", "source": "bench" }]
+  and .modelMap["paper/frontier"] == [{ "runtimeId": "openai/gpt-5.6-sol", "source": "bench" }]
+  and .modelMap["openai/gpt-5-medium"] == [{ "runtimeId": "openai/gpt-5.6-sol", "source": "bench" }]
+  and .modelMap["qwen/qwen3"] == [{ "runtimeId": "opencode/muse-spark-1.2-contributor-free", "source": "hand" }]
 ' "$runtime_config" >/dev/null
 
 AUTO_ROUTER_UPSTREAM_TIMEOUT_MS=600000 \

@@ -102,10 +102,11 @@ The original Gemini production attempt remains historical rejected evidence: its
 20-request free-tier daily limit prevented the frozen run from completing. See the
 [production freeze and current blocker](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#production-freeze-and-current-blocker-2026-09-07).
 
-The current replacement path is the separate Anthropic/Ollama snapshot documented in the
+The deferred Anthropic/Ollama snapshot is a historical alternative documented in the
 [Phase 4 replacement handoff](docs/plans/2026-09-01-phase-4-embedding-classifier-design.md#anthropic-replacement-snapshot-2026-09-08).
 Its proxy usage translation and local embedding smoke pass, but Claude subscription quota
-blocked the first live smoke; no replacement outcomes or production artifact exist.
+blocked the first live smoke; no Anthropic outcomes or production artifact exist. It is not
+the current Phase 4 replacement path.
 
 The OpenAI OAuth replacement completed the frozen 80-case experiment. The reconciled
 corpus has 80 complete judged rows, the fixed split has 45 training and 35 held-out
