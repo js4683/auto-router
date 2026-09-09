@@ -45,7 +45,7 @@ function readJson(path: string): unknown {
 function fromAuthEntry(entry: unknown, provider?: string): string | undefined {
   if (!entry || typeof entry !== "object") return undefined;
   const record = entry as Record<string, unknown>;
-  if (provider === "google" && record.type === "oauth") return stringField(record.key);
+  if (provider === "google" && record.type === "oauth") return stringField(record.access);
   return stringField(record.key) ?? stringField(record.token) ?? stringField(record.access);
 }
 

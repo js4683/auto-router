@@ -84,17 +84,17 @@ Fix: explicit source (`keychain`, auth file, extra file, environment) and source
 persist through that source regardless of ordering. Test extra-only, keychain-plus-auth,
 and keychain-plus-auth-plus-extra configurations without accessing the real keychain.
 
-### A4. High: Extra Google OAuth bypasses the API-key-only restriction
+### A4. Resolved: Google OAuth uses a dedicated inference transport
 
-`packages/proxy/src/accounts.ts:136-146,194-209` excludes primary Google OAuth access
-tokens but accepts them from extras. `server.ts:80-84` selects the extra token ahead of
-environment fallback and forces Google OAuth false. `server.ts:637-640` consequently
-sends that OAuth token as a Gemini `?key=` credential. This directly violates the
-recorded Gemini contract and can replace a valid AI Studio key with an unusable token.
+Google OAuth access tokens are not Gemini API keys. They are valid for the separate
+Antigravity Cloud Code Assist transport, while AI Studio keys remain valid for the
+Gemini API. The current account resolver excludes Google OAuth accounts whenever a
+Gemini/Google API key is selected, and the proxy routes OAuth accounts only through
+Cloud Code Assist. OAuth therefore cannot become a Gemini `?key=` credential.
 
-Fix: apply the same provider/credential eligibility rules to every source. Test primary
-and extra Google OAuth alongside a valid environment key; OAuth must never become a
-Gemini API key. Do not present Google OAuth login success as inference readiness.
+The focused primary/extra account, refresh, Cloud Code Assist, discovery, and API-key
+isolation coverage now protects this split. A Google OAuth login still does not provide
+an AI Studio API key.
 
 ### A5. High: Headerless clients do not have stable task identity
 
@@ -130,12 +130,14 @@ is supplied. A Claude/Google authorization code obtained from an earlier URL bel
 that URL's verifier, not the newly generated verifier (`oauth.ts:39,92-123`). The mocked
 test at `tests/login-cli.test.ts:72-95` accepts any code/session pairing and cannot expose
 this. `readStdinCode` rejects piped input, and device polling has no overall deadline.
-Uncaught network failures escape the structured error path. Gemini CLI currently offers
-OAuth rather than the AI Studio key needed for inference.
+Uncaught network failures escape the structured error path. Gemini/Antigravity CLI login
+now provides Google OAuth for Cloud Code Assist, but it still does not provision the AI
+Studio key required for Gemini API-key inference.
 
 `package.json:12` wraps the login script with a build and another npm command but no
-explicit inner `--`; option forwarding is not subprocess-tested. Neither root nor proxy
-declares a bin, so the approved `npx auto-router login` interface is not delivered.
+explicit inner `--`; option forwarding is not subprocess-tested. Root and proxy now
+declare local `auto-router` bins, but the package remains private, so the approved
+published `npx auto-router login` interface is not delivered.
 
 Fix: keep interactive completion in one process or explicitly persist/reuse bounded
 sessions for non-interactive completion; do not claim a fresh `--code` command works.
@@ -174,15 +176,16 @@ two independent account quotas, and opaque-token extras. Verify layout in a brow
 
 ### A10. Medium: Newly connected providers can remain unroutable
 
-`server.ts:1592-1602` filters a single bootstrap catalog using primary/environment
-credentials only. Adding the first Google/Zen credential through UI or CLI does not
-restore excluded models; extra-only credentials are not considered. Conversely,
-OpenAI/Anthropic/xAI are admitted unconditionally even when unusable. The design's
-missing-key fallback to a usable inbound model is not implemented by this filter.
+Google OAuth now has account-scoped model discovery at a new task boundary, with
+capability filtering and a cached fallback when discovery fails; Google API-key routing
+bypasses OAuth discovery. The remaining bootstrap-only behavior is for Zen and providers
+without a discovery adapter: adding a first credential can still leave excluded models
+stale, while OpenAI/Anthropic/xAI are admitted unconditionally even when unusable. The
+design's missing-key fallback to a usable inbound model is not implemented by this filter.
 
-Fix: reconcile eligibility from the current usable-account inventory at a safe boundary,
-without disturbing existing task locks. Test first login after startup, extra-only
-availability, missing-key selection, and recovery after Zen billing exclusion.
+Fix: extend the same safe-boundary reconciliation to Zen and other providers without
+disturbing existing task locks. Test first login after startup, extra-only availability,
+missing-key selection, and recovery after Zen billing exclusion.
 
 ### A11. Medium: Installer does not fully meet activation/uninstall promises
 
@@ -241,17 +244,18 @@ both operator diagnosis and trustworthiness of future evaluation data.
   primary/extra/environment logic.
 - Add explicit account labels and eventually disable/remove controls. Treat removal of
   extras separately from modifying credentials owned by Claude Code or OpenCode.
-- Remove obsolete login-launch and unreachable Google OAuth inference branches only
-  after references/public usage are verified; no cleanup was performed in this audit.
+- Keep the Google OAuth inference branch tied to Cloud Code Assist; remove it only after
+  references/public usage are verified.
 - Keep observed usage, estimated catalog cost, and subscription entitlements distinct.
   Do not promote a passing mock suite or a login success into a live quality claim.
 
 ## Next Delivery Slices
 
-1. A1-A4: secure management, terminating retries, source-aware refresh, Gemini eligibility.
+1. A1-A3: secure management, terminating retries, and source-aware refresh.
 2. A5-A8: session/account identity, persistence/concurrency, CLI lifecycle, cooldowns.
 3. A9-A14: trustworthy quota/evidence, dynamic eligibility, installer safety, bounded IO,
    and protocol completion. Add browser and controlled live acceptance afterwards.
 
 No new provider, classifier training, or broad UI redesign is needed before these
-gates. All fixes remain proposed and unimplemented under the documentation-only request.
+gates. Findings marked resolved above are implemented; remaining fixes are proposed and
+this audit is not release approval.

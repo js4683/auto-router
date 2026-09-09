@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const ALLOWED = new Set(["openai", "anthropic", "google", "xai", "opencode"]);
+const ALLOWED = new Set(["openai", "anthropic", "google", "antigravity", "xai", "opencode"]);
 
 export function loginProviderId(id: string): string | undefined {
   if (!ALLOWED.has(id)) return undefined;

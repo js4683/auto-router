@@ -22,11 +22,12 @@ Two adapters deliver "opencode **or any harness**":
 - **opencode plugin** — session signals and native apply. On OpenCode 1.18.27 it writes
   the connected task target to `chat.message.output.message.model` and confirms the
   resolved model through observational `chat.params`.
-- **OpenAI/Anthropic proxy** — the apply path for harnesses that cannot load the plugin.
-  Point Claude Code, Codex, or Cursor at `http://127.0.0.1:8787`. It accepts OpenAI Chat
-  Completions, Anthropic Messages, and OpenAI Responses requests, selects the target
-  `model`, and translates text and function calls across Zen's Responses API and Gemini's
-  `generateContent` API, forwarding with each provider's backend key.
+- **Local proxy** — the apply path for harnesses that cannot load the plugin. Point Claude
+  Code, Codex, or Cursor at `http://127.0.0.1:8787`. It accepts OpenAI Chat Completions,
+  Anthropic Messages, and OpenAI Responses requests, selects the target `model`, and
+  translates text and function calls across provider transports using the selected
+  provider credential. See the [universal proxy design](./docs/plans/2026-09-04-universal-proxy-installer-design.md)
+  for the current provider-specific transport and credential contract.
 
 `router-core` has zero harness dependencies. Both adapters call the same
 `classify()` + policy engine.
@@ -115,10 +116,11 @@ clear the bar:
 | Gap | Why it matters | Source |
 |-----|----------------|--------|
 | No context-window sizes | Context-fit guard needs them | models.dev / provider registry |
-| "Free" is not `price == 0` | AA reports list price, not what's free *to you* | provider config (local, OpenRouter `:free`) joined to AA quality |
+| "Free" needs entitlement evidence | AA reports list price, not what's free *to you* | explicit provider configuration or authoritative zero pricing joined to AA quality |
 
-So "free" is a **registry join**: `providerFreeSet` INTERSECT `AA quality data`, not a
-price filter.
+So "free" is true only when the configured `providerFreeSet` names the model or the
+source reports authoritative zero input/output/blended pricing. Missing, inferred, or
+non-zero pricing is not enough; provider identity alone never makes a model free.
 
 ---
 

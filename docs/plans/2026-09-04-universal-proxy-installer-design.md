@@ -1,9 +1,10 @@
 # Universal Proxy + Installer Design
 
 **Status:** Approved in design review on 2026-09-04
-**Implementation status (2026-09-06):** Env helper, settings UI, installer, UI/CLI login,
-extra-account storage, retry, and on-use refresh have implemented happy paths. Reliability
-and security acceptance remain open; see [the audit](2026-09-06-proxy-account-audit.md).
+**Implementation status (2026-09-08):** Env helper, settings UI, installer, UI/CLI login,
+extra-account storage, retry, on-use refresh, and Google OAuth/Antigravity model discovery
+have implemented happy paths. Reliability and security acceptance remain open; see [the
+audit](2026-09-06-proxy-account-audit.md).
 **Scope:** Public v1 is a local TypeScript proxy plus an installer and a local settings UI. The OpenCode plugin remains private and is not shipped.
 **Canonical project plan:** [PLAN.md](../../PLAN.md)
 
@@ -18,8 +19,9 @@ Match Workweave’s “one local endpoint, wire the clients” shape while keepi
    logins use `~/.config/auto-router/accounts.json`. Settings keys use a local `.env`;
    connect-page keys use the account store. Credential files should remain mode `0600`.
 3. Claude Code and OpenCode speak Anthropic Messages. Codex uses OpenAI Responses;
-   Cursor uses OpenAI Chat Completions. Gemini inference requires an AI Studio API key,
-   not Google OAuth; the extra-account eligibility bug is an open audit finding.
+   Cursor uses OpenAI Chat Completions. Gemini API-key inference uses an AI Studio API
+   key; Antigravity OAuth uses the separate Cloud Code Assist transport and must not be
+   sent to the Gemini API as a key.
 4. The existing OpenCode `/connect` plugin is local-only and not part of the installer.
 5. No Postgres, no `rk_` router keys, no hosted cloud, no analytics warehouse.
 
@@ -40,9 +42,11 @@ npm test --workspace=@auto-router/proxy
 
 The installer workspace is `@auto-router/install`. Terminal login currently lives in
 `@auto-router/proxy`; after building it, the explicit workspace form is
-`npm run login --workspace=@auto-router/proxy -- claude` (also codex/grok/zen/gemini).
-There is no published `auto-router` binary or package `bin` entry. Root npm forwarding
-and non-interactive PKCE completion are open acceptance items, not verified interfaces.
+`npm run login --workspace=@auto-router/proxy -- claude` (also codex/grok/zen/gemini/antigravity).
+The root package and `@auto-router/proxy` expose a local `auto-router` bin after building.
+The package remains private, so no published `npx auto-router` package is delivered. Root
+npm forwarding and non-interactive PKCE completion are open acceptance items, not verified
+interfaces.
 
 ## Architecture
 

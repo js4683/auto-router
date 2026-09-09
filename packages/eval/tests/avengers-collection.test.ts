@@ -72,10 +72,10 @@ describe("collectAvengersOutcomes", () => {
   it("does not retry a timed-out candidate call", async () => {
     let calls = 0;
     const oneTurn = fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "timeout" }] })]);
-    await collectAvengersOutcomes(oneTurn, aliases(), config, async (_url, init) => {
+    await expect(collectAvengersOutcomes(oneTurn, aliases(), config, async (_url, init) => {
       calls += 1;
       return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }));
-    });
+    })).rejects.toThrow("generation failed");
     expect(calls).toBe(aliases().size * oneTurn.sessions[0].turns.length);
   });
 
@@ -107,6 +107,24 @@ describe("collectAvengersOutcomes", () => {
       return completion("ok");
     });
     expect(models).not.toContain("judge/model");
+  });
+
+  it("persists generation records and stops after a judge HTTP failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avengers-judge-fail-"));
+    tempDirs.push(dir);
+    const output = join(dir, "collection.jsonl");
+    const source = fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "first" }] })]);
+    await expect(collectAvengersOutcomes(source, aliases(), config, async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "judge/model") return new Response("unavailable", { status: 503 });
+      return completion("ok");
+    }, output)).rejects.toThrow("judge failed: provider returned HTTP 503");
+
+    const rows = readFileSync(output, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].collectionError).toBe("judge failed: provider returned HTTP 503");
+    expect(rows[0].outcomes.every((outcome: { qualitySource: string }) => outcome.qualitySource === "unjudged")).toBe(true);
+    expect(() => curateAvengersCollection(output, source, aliases())).toThrow("example session-1/turn-1 is unjudged");
   });
 
   it("preflights user text before making generation calls", async () => {
@@ -206,6 +224,34 @@ describe("curateAvengersCollection", () => {
     expect(JSON.stringify(corpus)).not.toContain("sk-secret");
     expect(corpus.examples[0].outcomes[0]).toMatchObject({ usageSource: "provider", costSource: "provider-usage" });
     expect(corpus.routingSnapshot.catalog).toEqual(source.catalog);
+  });
+
+  it("rejects a collection that omits a dataset turn", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avengers-missing-turn-"));
+    tempDirs.push(dir);
+    const output = join(dir, "collection.jsonl");
+    const first = fixtureTurn({ id: "turn-1", checks: [{ type: "exact-text", expected: "ok" }] });
+    const second = fixtureTurn({ id: "turn-2", checks: [{ type: "exact-text", expected: "ok" }] });
+    await collectAvengersOutcomes(fixtureDataset([first]), aliases(), config, async () => completion("ok"), output);
+
+    expect(() => curateAvengersCollection(output, fixtureDataset([first, second]), aliases())).toThrow(
+      "collection is missing example session-1/turn-2"
+    );
+  });
+
+  it("rejects outcomes whose runtime does not match the frozen alias", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avengers-runtime-mismatch-"));
+    tempDirs.push(dir);
+    const output = join(dir, "collection.jsonl");
+    const source = fixtureDataset([fixtureTurn({ checks: [{ type: "exact-text", expected: "ok" }] })]);
+    await collectAvengersOutcomes(source, aliases(), config, async () => completion("ok"), output);
+    const record = JSON.parse(readFileSync(output, "utf8"));
+    record.outcomes[0].runtimeModelId = "provider/substituted";
+    writeFileSync(output, `${JSON.stringify(record)}\n`);
+
+    expect(() => curateAvengersCollection(output, source, aliases())).toThrow(
+      "example session-1/turn-1 candidate paper/a used unexpected runtime provider/substituted"
+    );
   });
 });
 

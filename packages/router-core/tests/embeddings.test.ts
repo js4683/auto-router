@@ -250,6 +250,23 @@ describe("embedding client boundary", () => {
     );
   });
 
+  it("treats an omitted index as position 0 (proto3 JSON default-value omission)", async () => {
+    const vectors = await requestEmbeddings(["one", "two", "three"], config, async () =>
+      embeddingResponse([{ embedding: [1, 0] }, { index: 1, embedding: [0, 1] }, { index: 2, embedding: [1, 1] }])
+    );
+    expect(vectors).toEqual([
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ]);
+  });
+
+  it("still rejects a duplicate index 0 when one item omits it and another states it explicitly", async () => {
+    await expect(
+      requestEmbeddings(["one", "two"], config, async () => embeddingResponse([{ embedding: [1, 0] }, validItem(0, [0, 1])]))
+    ).rejects.toThrow("embedding response indices are invalid");
+  });
+
   it.each([
     ["out-of-range", [validItem(0), validItem(2)]],
     ["duplicate", [validItem(0), validItem(0)]],

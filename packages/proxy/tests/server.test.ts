@@ -140,6 +140,228 @@ function recordingServer(recorder: EvalRecorder, output = "Hello") {
 }
 
 describe("proxy", () => {
+  it("uses an advertised Google OAuth model during normal no-force routing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-discovery-route-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({ google: { type: "oauth", access: "google-token", projectId: "google-project", expires: Date.now() + 3_600_000 } }),
+    );
+    let discoveryCalls = 0;
+    const server = createProxyServer({
+      catalog: { ...catalog, models: [catalog.models[1]] },
+      config,
+      sessions: memorySessions(),
+      authPath,
+      backends: { google: { baseUrl: "https://daily-cloudcode-pa.googleapis.com" } },
+      modelDiscovery: [
+        {
+          provider: "google",
+          async discover(account) {
+            discoveryCalls += 1;
+            expect(account.token).toBe("google-token");
+            return [{ id: "gemini-3.6-flash-high", capabilities: ["text", "tools"] }];
+          },
+        },
+      ],
+      select: selectModel,
+    });
+
+    for (const sessionId of ["discovery-one", "discovery-two"]) {
+      const req = fakeReq("/v1/route", { messages: [{ role: "user", content: "hello" }] }, { "x-session-id": sessionId });
+      const res = collectRes();
+      await server.handle(req, res as never);
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).modelId).toBe("google/gemini-3.6-flash-high");
+    }
+
+    expect(discoveryCalls).toBe(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("uses the Google account that advertised the selected model", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-discovery-account-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({ google: { type: "oauth", access: "primary-token", projectId: "google-project", expires: Date.now() + 3_600_000 } }),
+    );
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({
+        accounts: [{ id: "google-extra", provider: "google", type: "oauth", access: "extra-token", expires: Date.now() + 3_600_000 }],
+      }),
+    );
+    const requests: Array<{ url: string; authorization: string | null; body: any }> = [];
+    const server = createProxyServer({
+      catalog: { ...catalog, models: [catalog.models[1]] },
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {
+        google: {
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          fetchImpl: async (input, init) => {
+            requests.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization"), body: JSON.parse(String(init?.body)) });
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), {
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      modelDiscovery: [
+        {
+          provider: "google",
+          async discover(account) {
+            if (account.id === "google-extra") {
+              account.projectId = "extra-project";
+              return [{ id: "gemini-extra", capabilities: ["text", "tools"] }];
+            }
+            return [{ id: "gemini-primary", capabilities: ["text", "tools"] }];
+          },
+        },
+      ],
+      select: () =>
+        ({
+          modelId: "google/gemini-extra",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const req = fakeReq("/v1/chat/completions", { messages: [{ role: "user", content: "hello" }] }, { "x-session-id": "account-match" });
+    const res = collectRes();
+    await server.handle(req, res as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(requests).toEqual([
+      {
+        url: "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent",
+        authorization: "Bearer extra-token",
+        body: expect.objectContaining({ model: "gemini-extra", project: "extra-project" }),
+      },
+    ]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not fall back to an unadvertised Google account after cooldown", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-discovery-cooldown-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({ google: { type: "oauth", access: "primary-token", expires: Date.now() + 3_600_000 } }),
+    );
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({
+        accounts: [{ id: "google-extra", provider: "google", type: "oauth", access: "extra-token", expires: Date.now() + 3_600_000 }],
+      }),
+    );
+    const previousGeminiKey = process.env.GEMINI_API_KEY;
+    const previousGoogleKey = process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    const authorizations: string[] = [];
+    try {
+      const server = createProxyServer({
+        catalog: { ...catalog, models: [catalog.models[1]] },
+        config,
+        sessions: memorySessions(),
+        authPath,
+        accountsPath,
+        backends: {
+          google: {
+            baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+            fetchImpl: async (input, init) => {
+              authorizations.push(new Headers(init?.headers).get("authorization") ?? "");
+              expect(String(input)).toContain("v1internal:generateContent");
+              return new Response(JSON.stringify({ error: { status: "RESOURCE_EXHAUSTED" } }), { status: 429 });
+            },
+          },
+        },
+        modelDiscovery: [
+          {
+            provider: "google",
+            async discover(account) {
+              return [{ id: account.id === "google-extra" ? "gemini-extra" : "gemini-primary", capabilities: ["text", "tools"] }];
+            },
+          },
+        ],
+        select: () =>
+          ({
+            modelId: "google/gemini-extra",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+          }) as never,
+      });
+      const res = collectRes();
+      await server.handle(fakeReq("/v1/chat/completions", { messages: [{ role: "user", content: "hello" }] }), res as never);
+
+      expect(res.statusCode).toBe(429);
+      expect(authorizations).toEqual(["Bearer extra-token"]);
+    } finally {
+      if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previousGeminiKey;
+      if (previousGoogleKey === undefined) delete process.env.GOOGLE_API_KEY;
+      else process.env.GOOGLE_API_KEY = previousGoogleKey;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not run OAuth discovery when Gemini API-key routing is active", async () => {
+    const previousKey = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = "api-key";
+    const dir = mkdtempSync(join(tmpdir(), "ar-discovery-api-key-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(authPath, JSON.stringify({ google: { type: "oauth", access: "oauth-token" } }));
+    let discoveryCalls = 0;
+    try {
+      const server = createProxyServer({
+        catalog: { ...catalog, models: [catalog.models[1]] },
+        config,
+        sessions: memorySessions(),
+        authPath,
+        backends: { google: { baseUrl: "https://generativelanguage.googleapis.com/v1beta" } },
+        modelDiscovery: [
+          {
+            provider: "google",
+            async discover() {
+              discoveryCalls += 1;
+              return [{ id: "gemini-discovered", capabilities: ["text"] }];
+            },
+          },
+        ],
+        select: selectModel,
+      });
+      const req = fakeReq("/v1/route", { messages: [{ role: "user", content: "hello" }] }, { "x-session-id": "api-key-route" });
+      const res = collectRes();
+      await server.handle(req, res as never);
+
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).modelId).toBe("openai/gpt-5.6-sol");
+      expect(discoveryCalls).toBe(0);
+    } finally {
+      if (previousKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previousKey;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("handles the Claude Code preflight without calling a backend", async () => {
     let backendCalls = 0;
     const server = createProxyServer({
@@ -744,6 +966,172 @@ describe("proxy", () => {
       object: "chat.completion",
       choices: [{ message: { role: "assistant", content: "OK" }, finish_reason: "length" }],
     });
+  });
+
+  it("sends Google OAuth targets to Antigravity Cloud Code Assist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-gemini-oauth-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        google: {
+          type: "oauth",
+          access: "ya29.antigravity",
+          refresh: "refresh-antigravity",
+          expires: Date.now() + 3_600_000,
+          projectId: "antigravity-project",
+        },
+      }),
+    );
+    const previousGeminiKey = process.env.GEMINI_API_KEY;
+    const previousGoogleKey = process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    let url = "";
+    let authorization = "";
+    let userAgent = "";
+    let requestBody: any;
+    try {
+      const server = createProxyServer({
+        catalog,
+        config,
+        sessions: memorySessions(),
+        authPath,
+        backends: {
+          google: {
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            fetchImpl: async (target, init) => {
+              url = String(target);
+              authorization = new Headers(init?.headers).get("authorization") ?? "";
+              userAgent = new Headers(init?.headers).get("user-agent") ?? "";
+              requestBody = JSON.parse(String(init?.body));
+              return new Response(JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "OK" }] } }] } }), {
+                headers: { "content-type": "application/json" },
+              });
+            },
+          },
+        },
+        select: () =>
+          ({
+            modelId: "google/gemini-3.6-flash",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+          }) as never,
+      });
+      const res = collectRes();
+      await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+
+      expect(url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent");
+      expect(authorization).toBe("Bearer ya29.antigravity");
+      expect(userAgent).toBe(`antigravity/hub/2.9.1 ${process.platform}/${process.arch === "x64" ? "amd64" : process.arch}`);
+      expect(requestBody).toMatchObject({
+        model: "gemini-3.6-flash-high",
+        project: "antigravity-project",
+        userAgent: "antigravity",
+        requestType: "agent",
+        requestId: expect.stringMatching(/^agent-/),
+        request: { sessionId: expect.stringMatching(/^-/) },
+      });
+      expect(JSON.parse(res.body)).toMatchObject({ choices: [{ message: { content: "OK" } }] });
+    } finally {
+      if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previousGeminiKey;
+      if (previousGoogleKey === undefined) delete process.env.GOOGLE_API_KEY;
+      else process.env.GOOGLE_API_KEY = previousGoogleKey;
+    }
+  });
+
+  it("refreshes a stale Google OAuth token after Cloud Code Assist rejects it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-gemini-oauth-refresh-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({
+        google: {
+          type: "oauth",
+          access: "stale-google-access",
+          refresh: "google-refresh-token",
+          expires: Date.now() + 3_600_000,
+          projectId: "antigravity-project",
+        },
+      }),
+    );
+    const previousGeminiKey = process.env.GEMINI_API_KEY;
+    const previousGoogleKey = process.env.GOOGLE_API_KEY;
+    const previousGoogleClientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
+    const previousGoogleClientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    process.env.GOOGLE_OAUTH_CLIENT_ID = "test-google-client-id";
+    delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+    const authorizationHeaders: string[] = [];
+    try {
+      const server = createProxyServer({
+        catalog,
+        config,
+        sessions: memorySessions(),
+        authPath,
+        backends: {
+          google: {
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            fetchImpl: async (target, init) => {
+              const url = String(target);
+              if (url === "https://oauth2.googleapis.com/token") {
+                return new Response(JSON.stringify({ access_token: "fresh-google-access", refresh_token: "fresh-google-refresh", expires_in: 3600 }));
+              }
+              if (url === "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent") {
+                const authorization = new Headers(init?.headers).get("authorization") ?? "";
+                authorizationHeaders.push(authorization);
+                if (authorization === "Bearer stale-google-access") {
+                  return new Response(JSON.stringify({ error: { status: "UNAUTHENTICATED" } }), { status: 401 });
+                }
+                return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "OK" }] } }] }), {
+                  headers: { "content-type": "application/json" },
+                });
+              }
+              throw new Error(`unexpected request: ${url}`);
+            },
+          },
+        },
+        select: () =>
+          ({
+            modelId: "google/gemini-3.6-flash",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+          }) as never,
+      });
+      const res = collectRes();
+      await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+
+      expect(res.statusCode).toBe(200);
+      expect(authorizationHeaders).toEqual(["Bearer stale-google-access", "Bearer fresh-google-access"]);
+      expect(JSON.parse(res.body)).toMatchObject({ choices: [{ message: { content: "OK" } }] });
+      expect(JSON.parse(readFileSync(authPath, "utf8")).google).toMatchObject({
+        access: "fresh-google-access",
+        refresh: "fresh-google-refresh",
+      });
+    } finally {
+      if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previousGeminiKey;
+      if (previousGoogleKey === undefined) delete process.env.GOOGLE_API_KEY;
+      else process.env.GOOGLE_API_KEY = previousGoogleKey;
+      if (previousGoogleClientId === undefined) delete process.env.GOOGLE_OAUTH_CLIENT_ID;
+      else process.env.GOOGLE_OAUTH_CLIENT_ID = previousGoogleClientId;
+      if (previousGoogleClientSecret === undefined) delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+      else process.env.GOOGLE_OAUTH_CLIENT_SECRET = previousGoogleClientSecret;
+    }
   });
 
   it("rejects the synthetic fixture through production bootstrap", async () => {
@@ -1380,6 +1768,12 @@ describe("proxy", () => {
                 role: "assistant",
                 content: [{ type: "text", text: "OK" }],
                 stop_reason: "end_turn",
+                usage: {
+                  input_tokens: 9,
+                  output_tokens: 4,
+                  cache_read_input_tokens: 2,
+                  cache_creation_input_tokens: 1,
+                },
               })
             );
           },
@@ -1415,7 +1809,15 @@ describe("proxy", () => {
       body: { model: "claude-sonnet-4-5", system: "Be brief.", max_tokens: 32, messages: [{ role: "user", content: "hello" }] },
     });
     expect(outbound[0].headers.authorization).toBeUndefined();
-    expect(JSON.parse(res.body)).toMatchObject({ choices: [{ message: { content: "OK" }, finish_reason: "stop" }] });
+    expect(JSON.parse(res.body)).toMatchObject({
+      choices: [{ message: { content: "OK" }, finish_reason: "stop" }],
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 4,
+        total_tokens: 16,
+        prompt_tokens_details: { cached_tokens: 2, cache_creation_tokens: 1 },
+      },
+    });
   });
 
   it("pins Claude Code subscription models to Anthropic", async () => {
@@ -2027,8 +2429,8 @@ describe("proxy", () => {
     const secondChunkReady = new Promise<void>((r) => (resolveSecondChunk = r));
     // Gemini streamGenerateContent SSE chunks: each data: {...} with candidates delta
     const sseChunks = [
-      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "Hello " }] } }] })}\n\n`,
-      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "World" }] } }] })}\n\n`,
+      `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "Hello " }] } }] } })}\r\n\r\n`,
+      `data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "World" }] } }] } })}\r\n\r\n`,
     ];
     function streamingGeminiResponse() {
       let idx = 0;
@@ -2526,6 +2928,41 @@ describe("proxy", () => {
     expect(readFileSync(authPath, "utf8")).toContain("sk-test-connect");
   });
 
+  it("rejects OAuth management requests from non-loopback hosts", async () => {
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    for (const [method, url] of [
+      ["POST", "/connect/google/oauth/start"],
+      ["POST", "/connect/google/oauth/code"],
+      ["GET", "/connect/google/oauth/callback?state=test&code=test"],
+      ["GET", "/connect/google/oauth/poll?id=test"],
+    ] as const) {
+      const req = new IncomingMessage(new Socket());
+      req.method = method;
+      req.url = url;
+      req.headers = { host: "10.0.0.8:8787" };
+      const res = collectRes();
+      await server.handle(req, res as never);
+      expect(res.statusCode).toBe(403);
+    }
+  });
+
   it("does not crash on GET /favicon.ico", async () => {
     const server = createProxyServer({
       catalog,
@@ -2606,6 +3043,57 @@ describe("proxy", () => {
     expect(res.statusCode).toBe(200);
     expect(openaiCalls).toBe(1);
     expect(res.body).toContain("ok");
+  });
+
+  it("fails over when Zen rejects a request outside the OpenCode client", async () => {
+    const googleModel = {
+      id: "gemini-3.6-flash-high",
+      runtimeId: "google/gemini-3.6-flash-high",
+      codingIndex: 80,
+      blendedPrice: 1,
+      value: 80,
+      windowTokens: 128000,
+      isFree: false,
+    };
+    const server = createProxyServer({
+      catalog: { ...catalog, models: [...catalog.models, googleModel] },
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ type: "error", error: { type: "MissingSessionID", message: "OpenCode's free tier can only be used in OpenCode" } }), { status: 400 }),
+        },
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          fetchImpl: async () =>
+            new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "google fallback" }] } }] }), {
+              headers: { "content-type": "application/json" },
+            }),
+        },
+      },
+      select: (_state, cat) => {
+        const zen = cat.models.find((model) => (model.runtimeId ?? model.id).startsWith("opencode/"));
+        const google = cat.models.find((model) => (model.runtimeId ?? model.id).startsWith("google/"));
+        return {
+          modelId: zen?.runtimeId ?? google?.runtimeId ?? "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        } as never;
+      },
+    });
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("google fallback");
   });
 
   it("shows the last routed model on the dashboard", async () => {
@@ -2990,6 +3478,7 @@ describe("proxy", () => {
     const dir = mkdtempSync(join(tmpdir(), "ar-gemini-extra-"));
     const authPath = join(dir, "auth.json");
     const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ google: { type: "oauth", access: "ya29.primary" } }));
     writeFileSync(accountsPath, JSON.stringify({ accounts: [{ id: "g-extra", provider: "google", type: "oauth", access: "ya29.extra" }] }));
     const previous = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = "AIza-test";

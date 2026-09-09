@@ -48,11 +48,13 @@ describe("listProviderAccounts", () => {
     expect(readFileSync(accountsPath, "utf8")).toBe("{not-json");
   });
 
-  it("does not treat extra Google OAuth access tokens as Gemini keys", () => {
+  it("lists extra Google OAuth access tokens for Antigravity", () => {
     const dir = tmpDir();
     const accountsPath = join(dir, "accounts.json");
-    addExtraAccount(accountsPath, { provider: "google", type: "oauth", access: "ya29.extra" });
-    expect(listProviderAccounts("google", { env: {}, accountsPath })).toEqual([]);
+    addExtraAccount(accountsPath, { provider: "google", type: "oauth", access: "ya29.extra", projectId: "extra-project" });
+    expect(listProviderAccounts("google", { env: {}, accountsPath })).toEqual([
+      expect.objectContaining({ provider: "google", type: "oauth", token: "ya29.extra", projectId: "extra-project" }),
+    ]);
   });
 });
 

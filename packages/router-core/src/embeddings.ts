@@ -117,11 +117,12 @@ async function responseBody(response: Response, signal: AbortSignal): Promise<st
 function embeddingItem(value: unknown, inputCount: number): { index: number; embedding: unknown[] } {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("embedding response is invalid");
   const item = value as Record<string, unknown>;
-  if (!Number.isInteger(item.index) || (item.index as number) < 0 || (item.index as number) >= inputCount) {
+  const index = item.index === undefined ? 0 : item.index;
+  if (!Number.isInteger(index) || (index as number) < 0 || (index as number) >= inputCount) {
     throw new Error("embedding response indices are invalid");
   }
   if (!Array.isArray(item.embedding)) throw new Error("embedding response dimensions are invalid");
-  return { index: item.index as number, embedding: item.embedding };
+  return { index: index as number, embedding: item.embedding };
 }
 
 function orderedEmbeddings(data: unknown[], inputCount: number): unknown[][] {

@@ -21,6 +21,8 @@ export interface AvengersTrainingOptions {
   minObservations: number;
 }
 
+export type AvengersTrainingPlanOptions = Omit<AvengersTrainingOptions, "embeddingDimensions">;
+
 export function canonicalJson(value: unknown): string {
   return `${stableStringify(value)}\n`;
 }
@@ -56,10 +58,9 @@ function positiveInteger(value: number, label: string): void {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
 }
 
-function validateTrainingOptions(options: AvengersTrainingOptions): void {
+function validatePlanOptions(options: AvengersTrainingPlanOptions): void {
   if (!options.embeddingModel) throw new Error("embeddingModel must be non-empty");
   if (!options.splitSeed) throw new Error("splitSeed must be non-empty");
-  positiveInteger(options.embeddingDimensions, "embeddingDimensions");
   positiveInteger(options.maxInputChars, "maxInputChars");
   if (!Number.isFinite(options.heldOutRatio) || options.heldOutRatio <= 0 || options.heldOutRatio >= 1) {
     throw new Error("heldOutRatio must be within the open interval (0, 1)");
@@ -69,6 +70,17 @@ function validateTrainingOptions(options: AvengersTrainingOptions): void {
   if (options.topK > options.clusters) throw new Error("topK must not exceed clusters");
   if (!Number.isFinite(options.beta) || options.beta <= 0) throw new Error("beta must be positive and finite");
   positiveInteger(options.minObservations, "minObservations");
+}
+
+export function validateAvengersTrainingPlan(corpus: AvengersCorpusV1, options: AvengersTrainingPlanOptions): void {
+  validatePlanOptions(options);
+  const split = splitAvengersCorpus(corpus, options.splitSeed, options.heldOutRatio);
+  if (options.clusters > split.train.length) throw new Error("cluster count is greater than train examples");
+}
+
+function validateTrainingOptions(corpus: AvengersCorpusV1, options: AvengersTrainingOptions): void {
+  validateAvengersTrainingPlan(corpus, options);
+  positiveInteger(options.embeddingDimensions, "embeddingDimensions");
 }
 
 function squaredDistance(left: number[], right: number[]): number {
@@ -176,10 +188,9 @@ export function trainAvengersArtifact(
   vectors: Map<string, number[]>,
   options: AvengersTrainingOptions
 ): AvengersProArtifactFiles {
-  validateTrainingOptions(options);
+  validateTrainingOptions(corpus, options);
   const split = splitAvengersCorpus(corpus, options.splitSeed, options.heldOutRatio);
   const train = [...split.train].sort((a, b) => (a.id < b.id ? -1 : 1));
-  if (options.clusters > train.length) throw new Error("cluster count is greater than train examples");
   const trainIds = train.map((example) => example.id);
   const vectorIds = [...vectors.keys()].sort();
   if (trainIds.join("\0") !== vectorIds.join("\0")) throw new Error("vector IDs must equal the derived train partition");

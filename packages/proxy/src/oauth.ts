@@ -16,18 +16,18 @@ const XAI_SCOPE = "openid profile email offline_access grok-cli:access api:acces
 const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_REDIRECT = "https://console.anthropic.com/oauth/code/callback";
 function googleClientId(): string {
-  return process.env.GOOGLE_OAUTH_CLIENT_ID ?? "";
+  return process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() || "";
 }
 
 function googleClientSecrets(): string[] {
-  const secret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
+  const secret = process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim();
   return secret ? [secret] : [];
 }
 const GOOGLE_AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN = "https://oauth2.googleapis.com/token";
 const GOOGLE_REDIRECT = "https://antigravity.google/oauth-callback";
 const GOOGLE_SCOPE =
-  "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/aicode";
+  "openid https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
 
 type Pending =
   | { provider: "openai"; deviceAuthId: string; userCode: string }
@@ -119,9 +119,9 @@ export async function startOAuth(provider: string): Promise<OAuthStart> {
     url.searchParams.set("state", verifier);
     return { id, url: url.toString(), method: "code" };
   }
-  if (provider === "google") {
+  if (provider === "google" || provider === "antigravity") {
     const clientId = googleClientId();
-    if (!clientId) return { error: "Set GOOGLE_OAUTH_CLIENT_ID to enable Gemini login" };
+    if (!clientId) return { error: "Google OAuth requires GOOGLE_OAUTH_CLIENT_ID" };
     const { verifier, challenge } = pkce();
     const id = randomUUID();
     setPending(id, { provider: "google", redirectUri: GOOGLE_REDIRECT, verifier });
@@ -145,37 +145,88 @@ export async function startOAuth(provider: string): Promise<OAuthStart> {
   return { error: "oauth not available for this provider" };
 }
 
-const GEMINI_META = { ideType: "IDE_UNSPECIFIED", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" };
+const ANTIGRAVITY_LOAD_METADATA = { ideType: "ANTIGRAVITY" };
+const ANTIGRAVITY_ONBOARD_METADATA = { ide_type: "ANTIGRAVITY", ide_version: "2.9.1", ide_name: "antigravity" };
+const ANTIGRAVITY_LOAD_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const ANTIGRAVITY_ONBOARD_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser";
 
-async function googleProject(access: string): Promise<string | undefined> {
-  const response = await fetch("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", {
-    method: "POST",
-    headers: { authorization: `Bearer ${access}`, "content-type": "application/json" },
-    body: JSON.stringify({ metadata: GEMINI_META }),
-  });
-  if (!response.ok) return undefined;
-  const data = (await response.json()) as { cloudaicompanionProject?: string };
-  return data.cloudaicompanionProject;
+type GoogleProjectResponse = Record<string, unknown>;
+
+export function antigravityUserAgent(withNodeClient = false): string {
+  const arch = process.arch === "x64" ? "amd64" : process.arch;
+  return `antigravity/hub/2.9.1 ${process.platform}/${arch}${withNodeClient ? " google-api-nodejs-client/10.3.0" : ""}`;
 }
 
-export async function ensureGoogleProject(access: string): Promise<string | undefined> {
-  const existing = await googleProject(access);
-  if (existing) return existing;
-  const onboard = await fetch("https://cloudcode-pa.googleapis.com/v1internal:onboardUser", {
-    method: "POST",
-    headers: { authorization: `Bearer ${access}`, "content-type": "application/json" },
-    body: JSON.stringify({ tierId: "FREE", metadata: GEMINI_META }),
-  });
-  if (!onboard.ok) return undefined;
-  let data = (await onboard.json()) as { done?: boolean; name?: string; response?: { cloudaicompanionProject?: { id?: string } }; cloudaicompanionProject?: string };
-  for (let i = 0; i < 12 && data && !data.done && data.name; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    const op = await fetch(`https://cloudcode-pa.googleapis.com/v1internal/${data.name}`, {
-      headers: { authorization: `Bearer ${access}` },
-    });
-    data = (await op.json()) as typeof data;
+function projectId(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    const id = (value as Record<string, unknown>).id;
+    if (typeof id === "string" && id.trim()) return id.trim();
   }
-  return data.response?.cloudaicompanionProject?.id ?? data.cloudaicompanionProject;
+  return undefined;
+}
+
+function responseProject(data: GoogleProjectResponse | undefined): string | undefined {
+  if (!data) return undefined;
+  for (const key of ["cloudaicompanionProject", "projectId", "project"]) {
+    const found = projectId(data[key]);
+    if (found) return found;
+  }
+  const nested = data.response;
+  return nested && typeof nested === "object" ? responseProject(nested as GoogleProjectResponse) : undefined;
+}
+
+function defaultAntigravityTier(data: GoogleProjectResponse): string {
+  const tiers = Array.isArray(data.allowedTiers) ? data.allowedTiers : [];
+  const defaultTier = tiers.find(
+    (tier) => tier && typeof tier === "object" && (tier as Record<string, unknown>).isDefault === true,
+  );
+  return projectId(defaultTier && typeof defaultTier === "object" ? (defaultTier as Record<string, unknown>).id : undefined)
+    ?? projectId(data.currentTier && typeof data.currentTier === "object" ? (data.currentTier as Record<string, unknown>).id : undefined)
+    ?? "free-tier";
+}
+
+async function googleProject(access: string, fetchImpl: typeof fetch = fetch): Promise<GoogleProjectResponse | undefined> {
+  const response = await fetchImpl(ANTIGRAVITY_LOAD_URL, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${access}`,
+      accept: "*/*",
+      "content-type": "application/json",
+      "user-agent": antigravityUserAgent(),
+    },
+    body: JSON.stringify({ metadata: ANTIGRAVITY_LOAD_METADATA }),
+  });
+  if (!response.ok) return undefined;
+  return (await response.json()) as GoogleProjectResponse;
+}
+
+export async function ensureGoogleProject(access: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+  const loaded = await googleProject(access, fetchImpl);
+  const existing = responseProject(loaded);
+  if (existing) return existing;
+  if (!loaded) return undefined;
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const onboard = await fetchImpl(ANTIGRAVITY_ONBOARD_URL, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${access}`,
+        accept: "*/*",
+        "content-type": "application/json",
+        "user-agent": antigravityUserAgent(true),
+        "x-goog-api-client": "gl-node/22.21.1",
+      },
+      body: JSON.stringify({ tier_id: defaultAntigravityTier(loaded), metadata: ANTIGRAVITY_ONBOARD_METADATA }),
+    });
+    if (!onboard.ok) return undefined;
+    const data = (await onboard.json()) as GoogleProjectResponse;
+    const project = responseProject(data);
+    if (project) return project;
+    if (data.done === true || attempt === 4) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return undefined;
 }
 
 async function exchangeGoogleToken(code: string, redirectUri: string, verifier?: string): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | { error: string }> {
@@ -186,7 +237,7 @@ async function exchangeGoogleToken(code: string, redirectUri: string, verifier?:
     redirect_uri: redirectUri,
     ...(verifier ? { code_verifier: verifier } : {}),
   };
-  for (const secret of ["", ...googleClientSecrets()]) {
+  for (const secret of [...googleClientSecrets(), ""]) {
     const body = new URLSearchParams(secret ? { ...params, client_secret: secret } : params);
     const response = await fetch(GOOGLE_TOKEN, {
       method: "POST",
@@ -194,7 +245,13 @@ async function exchangeGoogleToken(code: string, redirectUri: string, verifier?:
       body: body.toString(),
     });
     if (!response.ok) continue;
-    return (await response.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
+    const data = (await response.json()) as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
+    if (typeof data.access_token !== "string" || !data.access_token) continue;
+    return {
+      access_token: data.access_token,
+      ...(typeof data.refresh_token === "string" ? { refresh_token: data.refresh_token } : {}),
+      ...(typeof data.expires_in === "number" ? { expires_in: data.expires_in } : {}),
+    };
   }
   return { error: "Gemini login failed" };
 }
@@ -374,10 +431,30 @@ async function requestRefresh(
     if (!data.access_token) return undefined;
     return { access: data.access_token, refresh: data.refresh_token, expiresIn: data.expires_in };
   }
+  if (provider === "google") {
+    const clientId = googleClientId();
+    if (!clientId) return undefined;
+    const params = { client_id: clientId, grant_type: "refresh_token", refresh_token: refresh };
+    for (const secret of [...googleClientSecrets(), ""]) {
+      const response = await fetchImpl(GOOGLE_TOKEN, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams(secret ? { ...params, client_secret: secret } : params).toString(),
+      });
+      if (!response.ok) continue;
+      const data = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
+      if (data.access_token) return { access: data.access_token, refresh: data.refresh_token, expiresIn: data.expires_in };
+    }
+  }
   return undefined;
 }
 
-export async function refreshOAuthToken(provider: string, authPath: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
+export async function refreshOAuthToken(
+  provider: string,
+  authPath: string,
+  fetchImpl: typeof fetch = fetch,
+  force = false,
+): Promise<string | undefined> {
   if (provider === "anthropic") {
     const code = readClaudeCodeOauth();
     if (code?.access) {
@@ -400,7 +477,7 @@ export async function refreshOAuthToken(provider: string, authPath: string, fetc
   const access = oauthString(entry, "access");
   const refresh = oauthString(entry, "refresh");
   const expires = typeof entry.expires === "number" ? entry.expires : 0;
-  if (access && expires && Date.now() < expires - REFRESH_SKEW_MS) return access;
+  if (!force && access && expires && Date.now() < expires - REFRESH_SKEW_MS) return access;
   if (!refresh) return access;
   const tokens = await requestRefresh(provider, refresh, fetchImpl).catch(() => undefined);
   if (!tokens) return access;
@@ -415,13 +492,13 @@ export async function refreshOAuthToken(provider: string, authPath: string, fetc
 
 export async function refreshAccountToken(
   account: ResolvedAccount,
-  opts: { authPath: string; accountsPath?: string; fetchImpl?: typeof fetch },
+  opts: { authPath: string; accountsPath?: string; fetchImpl?: typeof fetch; force?: boolean },
 ): Promise<string | undefined> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   if (account.type !== "oauth") return account.token;
-  if (account.source !== "extra") return (await refreshOAuthToken(account.provider, opts.authPath, fetchImpl)) ?? account.token;
+  if (account.source !== "extra") return (await refreshOAuthToken(account.provider, opts.authPath, fetchImpl, opts.force)) ?? account.token;
   if (!opts.accountsPath || !account.refresh) return account.token;
-  if (account.expires && Date.now() < account.expires - REFRESH_SKEW_MS) return account.token;
+  if (!opts.force && account.expires && Date.now() < account.expires - REFRESH_SKEW_MS) return account.token;
   const tokens = await requestRefresh(account.provider, account.refresh, fetchImpl).catch(() => undefined);
   if (!tokens) return account.token;
   const expires = Date.now() + (tokens.expiresIn ?? 3600) * 1000;
@@ -437,6 +514,7 @@ export const CONNECT_PROVIDERS: Record<string, { label: string; consoleUrl: stri
   openai: { label: "OpenAI", consoleUrl: "https://platform.openai.com/api-keys", oauth: true, authId: "openai" },
   anthropic: { label: "Claude", consoleUrl: "https://console.anthropic.com/settings/keys", oauth: true, authId: "anthropic" },
   google: { label: "Gemini / Antigravity", consoleUrl: "https://aistudio.google.com/apikey", oauth: true, authId: "google" },
+  antigravity: { label: "Antigravity", consoleUrl: "https://antigravity.google", oauth: true, authId: "google" },
   xai: { label: "Grok", consoleUrl: "https://console.x.ai", oauth: true, authId: "xai" },
   opencode: { label: "OpenCode Zen", consoleUrl: "https://opencode.ai/auth", oauth: true, authId: "opencode" },
 };

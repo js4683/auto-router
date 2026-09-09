@@ -53,6 +53,13 @@ function blendedPriceOf(raw: RawAAModel): number {
   return 0;
 }
 
+function hasExplicitZeroPrice(raw: RawAAModel): boolean {
+  const pricing = raw.pricing;
+  if (!pricing) return false;
+  if (typeof pricing.price_1m_blended_3_to_1 === "number") return pricing.price_1m_blended_3_to_1 === 0;
+  return pricing.price_1m_input_tokens === 0 && pricing.price_1m_output_tokens === 0;
+}
+
 export function buildCatalog(
   rawModels: RawAAModel[],
   config: RouterConfig,
@@ -77,12 +84,12 @@ export function buildCatalog(
     const strippedLower = stripProvider(rawLower);
     const runtimeId = providerID ? `${providerID}/${rawId}` : rawId.includes("/") ? rawId : undefined;
     const isFree =
+      hasExplicitZeroPrice(raw) ||
       freeSet.has(lower) ||
       freeSet.has(rawLower) ||
       freeSet.has(strippedLower) ||
       freeSet.has((raw.name as string)?.toLowerCase() ?? "") ||
-      [...freeSet].some((f) => lower.endsWith("/" + f) || strippedLower === f.toLowerCase()) ||
-      providerID?.toLowerCase() === "opencode";
+      [...freeSet].some((f) => lower.endsWith("/" + f) || strippedLower === f.toLowerCase());
 
     // window from registry; fallback to 128k if unknown (fail-open moderate) — try stripped
     const windowTokens =

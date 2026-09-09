@@ -19,6 +19,12 @@ export type AvengersAliasMap = Map<string, string>;
 
 const MAX_RECORD_BYTES = 4 * 1024 * 1024;
 
+class CollectionTurnError extends Error {
+  constructor(message: string, readonly record: Record<string, unknown>) {
+    super(message);
+  }
+}
+
 export function parseAvengersAliases(raw: string): AvengersAliasMap {
   const aliases = new Map<string, string>();
   for (const item of raw.split(",").map((entry) => entry.trim()).filter(Boolean)) {
@@ -89,14 +95,23 @@ async function collectTurn(
 
   const completed = generations.every((item) => item.output?.terminalState === "completed");
   let judged: Record<string, number> = {};
-  if (completed && turn.judgeRubric) {
-    judged = await judgeLabeledOutputs(
-      `${sessionId}/${turn.id}`,
-      turn.judgeRubric,
-      generations.map((item) => ({ id: item.paper, output: item.output! })),
-      config,
-      fetchImpl
-    );
+  const generationErrors = generations.filter((item) => item.error);
+  let collectionError = generationErrors.length
+    ? `generation failed: ${generationErrors.map((item) => `${item.paper}: ${item.error}`).join("; ")}`
+    : undefined;
+  if (!collectionError && completed && turn.judgeRubric) {
+    try {
+      judged = await judgeLabeledOutputs(
+        `${sessionId}/${turn.id}`,
+        turn.judgeRubric,
+        generations.map((item) => ({ id: item.paper, output: item.output! })),
+        config,
+        fetchImpl
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "judge request failed";
+      collectionError = `judge failed: ${message}`;
+    }
   }
 
   const outcomes = generations.map((item) => {
@@ -105,6 +120,7 @@ async function collectTurn(
     const contentTruncated = output ? outputTruncated(output) : false;
     const deterministic = output ? runChecks(output, usableDeterministicChecks(turn)) : null;
     const judge = judged[item.paper];
+    const unjudged = terminalState === "completed" && Boolean(turn.judgeRubric?.trim()) && judge === undefined && deterministic === null;
     const quality = terminalState === "completed" ? (judge === undefined ? deterministic ?? 0 : compositeQuality(deterministic, judge)) : 0;
     const usage = output?.usage;
     const price = dataset.prices[item.runtime];
@@ -115,14 +131,14 @@ async function collectTurn(
       terminalState,
       contentTruncated,
       quality,
-      qualitySource: judge === undefined ? "deterministic" : deterministic === null ? "judge" : "composite",
+      qualitySource: unjudged ? "unjudged" : judge === undefined ? "deterministic" : deterministic === null ? "judge" : "composite",
       ...(usage ? { usage, usageSource: "provider" as const } : {}),
       ...(costUsd !== undefined ? { costUsd, costSource: "provider-usage" as const } : {}),
       ...(output ? { response: { text: output.text, toolCalls: output.toolCalls } } : { error: item.error }),
     };
   });
 
-  return redactContent({
+  const record = redactContent({
     id: `${sessionId}/${turn.id}`,
     sessionGroupId: sessionId,
     sequence,
@@ -132,7 +148,10 @@ async function collectTurn(
     sessionState: turn.sessionState,
     requiredCapabilities: turn.requiredCapabilities,
     outcomes,
+    ...(collectionError ? { collectionError } : {}),
   }) as Record<string, unknown>;
+  if (collectionError) throw new CollectionTurnError(collectionError, record);
+  return record;
 }
 
 export async function collectAvengersOutcomes(
@@ -147,7 +166,15 @@ export async function collectAvengersOutcomes(
   const records: Record<string, unknown>[] = [];
   for (const session of dataset.sessions) {
     for (const [sequence, turn] of session.turns.entries()) {
-      const record = await collectTurn(session.id, sequence, turn, aliases, dataset, config, fetchImpl);
+      let record: Record<string, unknown>;
+      let collectionError: Error | undefined;
+      try {
+        record = await collectTurn(session.id, sequence, turn, aliases, dataset, config, fetchImpl);
+      } catch (error) {
+        if (!(error instanceof CollectionTurnError)) throw error;
+        record = error.record;
+        collectionError = error;
+      }
       const serialized = `${JSON.stringify(record)}\n`;
       if (Buffer.byteLength(serialized) > MAX_RECORD_BYTES) throw new Error(`collection record exceeds ${MAX_RECORD_BYTES} bytes`);
       records.push(record);
@@ -155,6 +182,7 @@ export async function collectAvengersOutcomes(
         appendFileSync(outputPath, serialized, { mode: 0o600 });
         chmodSync(outputPath, 0o600);
       }
+      if (collectionError) throw collectionError;
     }
   }
   return records;
@@ -171,9 +199,38 @@ function parseCollectionLine(raw: string, index: number): Record<string, unknown
   return value as Record<string, unknown>;
 }
 
+function expectedCollectionRecords(dataset: EvalDatasetV1): Map<string, Record<string, unknown>> {
+  const expected = new Map<string, Record<string, unknown>>();
+  for (const session of dataset.sessions) {
+    for (const [sequence, turn] of session.turns.entries()) {
+      const id = `${session.id}/${turn.id}`;
+      expected.set(id, redactContent({
+        id,
+        sessionGroupId: session.id,
+        sequence,
+        weight: turn.weight ?? 1,
+        text: lastUserText(turn),
+        taskType: turn.sessionState.userTag,
+        sessionState: turn.sessionState,
+        requiredCapabilities: turn.requiredCapabilities,
+      }) as Record<string, unknown>);
+    }
+  }
+  return expected;
+}
+
+function validateRecordBinding(record: Record<string, unknown>, expected: Record<string, unknown>, id: string): void {
+  for (const field of ["sessionGroupId", "sequence", "weight", "text", "taskType", "sessionState", "requiredCapabilities"] as const) {
+    if (JSON.stringify(record[field]) !== JSON.stringify(expected[field])) {
+      throw new Error(`example ${id} does not match dataset field ${field}`);
+    }
+  }
+}
+
 export function curateAvengersCollection(inputPath: string, baseDataset: EvalDatasetV1, aliases: AvengersAliasMap): AvengersCorpusV1 {
   if (aliases.size < 2 || aliases.size > 26) throw new Error("candidate list must contain between 2 and 26 aliases");
   const lines = readFileSync(inputPath, "utf8").split("\n").filter((line) => line.trim());
+  const expected = expectedCollectionRecords(baseDataset);
   const examples: AvengersCorpusExampleV1[] = [];
   const seenIds = new Set<string>();
   const byGroup = new Map<string, number[]>();
@@ -184,6 +241,12 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
     if (!id) throw new Error(`collection line ${index + 1} is missing id`);
     if (seenIds.has(id)) throw new Error(`duplicate example id ${id}`);
     seenIds.add(id);
+    const expectedRecord = expected.get(id);
+    if (!expectedRecord) throw new Error(`collection contains unknown example ${id}`);
+    validateRecordBinding(record, expectedRecord, id);
+    if (record.collectionError || (record.outcomes as Array<Record<string, unknown>> | undefined)?.some((outcome) => outcome.qualitySource === "unjudged")) {
+      throw new Error(`example ${id} is unjudged`);
+    }
     const sessionGroupId = String(record.sessionGroupId ?? "");
     const sequence = Number(record.sequence);
     const group = byGroup.get(sessionGroupId) ?? [];
@@ -196,6 +259,12 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
       const paperModelId = String(outcome.paperModelId ?? "");
       if (seenModels.has(paperModelId)) throw new Error(`duplicate model outcome ${paperModelId} in ${id}`);
       seenModels.add(paperModelId);
+      const expectedRuntime = aliases.get(paperModelId);
+      if (!expectedRuntime) throw new Error(`example ${id} contains unknown candidate ${paperModelId}`);
+      const runtimeModelId = String(outcome.runtimeModelId ?? "");
+      if (runtimeModelId !== expectedRuntime) {
+        throw new Error(`example ${id} candidate ${paperModelId} used unexpected runtime ${runtimeModelId}`);
+      }
       const { response: _response, error: _error, ...rest } = outcome;
       return rest as unknown as AvengersOutcomeV1;
     });
@@ -213,6 +282,10 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
       requiredCapabilities: (record.requiredCapabilities as string[]) ?? [],
       outcomes: curatedOutcomes,
     });
+  }
+
+  for (const id of expected.keys()) {
+    if (!seenIds.has(id)) throw new Error(`collection is missing example ${id}`);
   }
 
   for (const [group, sequences] of byGroup) {

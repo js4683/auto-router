@@ -38,7 +38,7 @@ describe("runLogin", () => {
     });
     expect(code).toBe(2);
     expect(io.out).toContain("error: unknown provider cursor");
-    expect(io.out).toContain("login <claude|codex|grok|zen|gemini>");
+    expect(io.out).toContain("login <claude|codex|grok|zen|gemini|antigravity>");
   });
 
   it("polls a device login until connected", async () => {
@@ -67,6 +67,30 @@ describe("runLogin", () => {
     expect(io.err).toContain("https://auth.openai.com/codex/device");
     expect(io.out).toContain("status: connected");
     expect(io.out).toContain("provider: openai");
+  });
+
+  it("accepts antigravity as the Gemini subscription login alias", async () => {
+    const io = capture();
+    const code = await runLogin(["antigravity"], {
+      startOAuth: async (provider) => {
+        expect(provider).toBe("google");
+        return { id: "agy-session", url: "https://accounts.google.com/auth", method: "code" };
+      },
+      pollOAuth: async () => ({ error: "should not poll" }),
+      completeOAuthCode: async (id, pasted) => {
+        expect(id).toBe("agy-session");
+        expect(pasted).toBe("callback-code");
+        return { done: true };
+      },
+      authPath: "/tmp/auth.json",
+      accountsPath: "/tmp/accounts.json",
+      stdout: io.stdout,
+      stderr: io.stderr,
+      readCode: async () => "callback-code",
+    });
+    expect(code).toBe(0);
+    expect(io.out).toContain("provider: google");
+    expect(io.out).toContain("status: connected");
   });
 
   it("completes a code login with --code and --id without starting a new session", async () => {

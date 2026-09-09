@@ -10,13 +10,17 @@
 
 **Spec:** `docs/plans/2026-09-04-subscription-credentials-design.md`
 
+> Historical Slice 1 implementation plan. Shared UI/CLI OAuth and Google Antigravity
+> behavior were added later; use the [universal proxy design](./2026-09-04-universal-proxy-installer-design.md)
+> and [PLAN.md](../../PLAN.md) for the current contract.
+
 ## Global Constraints
 
 - Multi-provider; not tied to one vendor.
 - Env key wins over stored subscription tokens.
 - Never log tokens or put them in error messages.
 - Cursor Pro quota is unused.
-- In-UI OAuth is out of scope.
+- Current UI/CLI OAuth is specified outside this historical Slice 1 plan.
 
 ---
 
