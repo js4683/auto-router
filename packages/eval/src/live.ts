@@ -578,6 +578,26 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "live evaluation failed";
 }
 
+function bareModelId(modelId: string): string {
+  const slash = modelId.indexOf("/");
+  return slash >= 0 ? modelId.slice(slash + 1) : modelId;
+}
+
+function providerPart(modelId: string): string | undefined {
+  const slash = modelId.indexOf("/");
+  return slash > 0 ? modelId.slice(0, slash) : undefined;
+}
+
+function runtimeIdentityMatches(selectedModelId: string, requestedModel: string, returnedModel: string): boolean {
+  if (requestedModel === returnedModel) return true;
+  if (bareModelId(requestedModel) !== bareModelId(returnedModel)) return false;
+  const selectedProvider = providerPart(selectedModelId);
+  const requestedProvider = providerPart(requestedModel);
+  const returnedProvider = providerPart(returnedModel);
+  const expectedProviders = [selectedProvider, requestedProvider].filter((provider): provider is string => provider !== undefined);
+  return expectedProviders.length > 0 && (returnedProvider === undefined || expectedProviders.includes(returnedProvider));
+}
+
 function costLedger(
   candidateGeneration: EvalUsage,
   judge: EvalUsage,
@@ -617,7 +637,7 @@ async function generateCase(
         liveTransportFor(dataset, selections[strategy].modelId)
       );
       const requestedModel = dataset.liveModelAliases![selections[strategy].modelId];
-      if (output.runtimeModelId && output.runtimeModelId !== requestedModel) {
+      if (output.runtimeModelId && !runtimeIdentityMatches(selections[strategy].modelId, requestedModel, output.runtimeModelId)) {
         throw new LiveRequestError(
           `runtime identity mismatch: requested ${requestedModel}, provider returned ${output.runtimeModelId}`,
           undefined,

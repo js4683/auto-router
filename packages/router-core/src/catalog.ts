@@ -77,6 +77,10 @@ function defaultTransports(provider: string, providerQualified: boolean): Routin
   return providerQualified ? ["chat", "responses"] : ["chat"];
 }
 
+function transportsForRuntimeId(runtimeId: string): RoutingTransport[] {
+  return defaultTransports(providerName(runtimeId), runtimeId.includes("/"));
+}
+
 function routingCapabilities(raw: RawAAModel): readonly RoutingCapability[] {
   return raw.capabilities === undefined ? ["text"] : [...new Set(raw.capabilities)];
 }
@@ -95,7 +99,7 @@ function normalizeCachedCatalog(catalog: Catalog): Catalog {
       const runtimeId = model.runtimeId ?? model.id;
       return {
         ...model,
-        transports: defaultTransports(providerName(runtimeId), runtimeId.includes("/")),
+        transports: transportsForRuntimeId(runtimeId),
       };
     }),
   };
@@ -254,7 +258,11 @@ function fallbackCatalog(config: RouterConfig): Catalog {
   cat.models.forEach((m) => {
     m.isFree = freeSet.has(m.id.toLowerCase());
     if (!m.runtimeId) {
-      m.runtimeId = mappedRuntimeIds.find((runtimeId) => runtimeId === m.id || runtimeId.endsWith(`/${m.id}`));
+      const runtimeId = mappedRuntimeIds.find((candidate) => candidate === m.id || candidate.endsWith(`/${m.id}`));
+      if (runtimeId) {
+        m.runtimeId = runtimeId;
+        m.transports = transportsForRuntimeId(runtimeId);
+      }
     }
   });
   return cat;

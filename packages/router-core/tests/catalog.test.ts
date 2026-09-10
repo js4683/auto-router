@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
+import { checkModelEligibility } from "../src/eligibility.js";
 import { buildCatalog, buildCatalogFromProviders, loadCatalogSync } from "../src/catalog.js";
 import type { RouterConfig } from "../src/types.js";
 
@@ -110,6 +111,28 @@ describe("catalog build", () => {
       const loaded = loadCatalogSync({ ...cfg, catalog: { ...cfg.catalog, cachePath: path } });
       expect(loaded.source).toBe("cache");
       expect(loaded.models[0].transports).toEqual(["chat", "responses"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("derives fallback transports after applying a mapped runtime ID", () => {
+    const root = mkdtempSync(join(tmpdir(), "ar-catalog-fallback-"));
+    try {
+      const loaded = loadCatalogSync(
+        {
+          ...cfg,
+          modelMap: { "paper/model-a": [{ runtimeId: "openai/model-a", source: "hand" }] },
+        },
+        join(root, "missing.json"),
+      );
+      const model = loaded.models.find((entry) => entry.id === "model-a");
+      expect(model?.runtimeId).toBe("openai/model-a");
+      expect(checkModelEligibility(model!, {
+        lifetimeTokens: 1_000,
+        requiredCapabilities: ["text"],
+        transport: "responses",
+      }, cfg)).toMatchObject({ pass: true });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

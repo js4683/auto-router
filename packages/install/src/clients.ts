@@ -165,10 +165,10 @@ function validateToml(text: string, path: string): void {
       if (valueDepth < 0) throw new Error(`${path} contains invalid TOML`);
       continue;
     }
-    if (line.startsWith("[") || line.endsWith("]")) {
-      if (!/^\[\[?[^\[\]]+\]\]?$/.test(line)) throw new Error(`${path} contains invalid TOML table syntax`);
+    if (/^(?:\[[^\[\]]+\]|\[\[[^\[\]]+\]\])$/.test(line)) {
       continue;
     }
+    if (line.startsWith("[")) throw new Error(`${path} contains invalid TOML table syntax`);
     const equals = line.indexOf("=");
     if (equals <= 0 || !line.slice(0, equals).trim() || !line.slice(equals + 1).trim()) {
       throw new Error(`${path} contains invalid TOML assignment`);

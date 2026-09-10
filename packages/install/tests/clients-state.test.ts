@@ -81,4 +81,15 @@ describe("installer state", () => {
     expect(() => runInstall({ home: root, baseUrl: "http://127.0.0.1:8787", clients: ["claude", "codex"] })).toThrow(/TOML/i);
     expect(existsSync(join(root, ".claude/settings.json"))).toBe(false);
   });
+
+  it("accepts root array assignments in an existing Codex config", () => {
+    const root = home();
+    const codexPath = join(root, ".codex/config.toml");
+    mkdirSync(join(root, ".codex"), { recursive: true });
+    writeFileSync(codexPath, 'trusted_projects = ["repo-a"]\n');
+
+    runInstall({ home: root, baseUrl: "http://127.0.0.1:8787", clients: ["codex"] });
+
+    expect(readFileSync(codexPath, "utf8")).toContain('trusted_projects = ["repo-a"]');
+  });
 });

@@ -1517,7 +1517,14 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       return { result, state };
     }
     if (stored.taskTarget && !boundary.isBoundary && !skippedProviders.has(lockedProvider)) {
-      const current = opts.catalog.models.find((model) => model.id === stored.taskTarget || (model.runtimeId ?? model.id) === stored.taskTarget);
+      let stickyCatalog = opts.catalog;
+      let current = stickyCatalog.models.find((model) => model.id === stored.taskTarget || (model.runtimeId ?? model.id) === stored.taskTarget);
+      const stickyDiscovery = !current && (opts.modelDiscovery?.some((adapter) => adapter.provider === lockedProvider) ?? false);
+      if (stickyDiscovery) {
+        stickyCatalog = await discoveryCatalog(capabilityBody, signal);
+        current = stickyCatalog.models.find((model) => model.id === stored.taskTarget || (model.runtimeId ?? model.id) === stored.taskTarget);
+        if (!current) throw new Error(`sticky model ${stored.taskTarget} is unavailable`);
+      }
       if (current) {
         const eligibility = checkModelEligibility(current, requirements, opts.config);
         if (!eligibility.pass) throw new SelectionConstraintError(eligibility.code, eligibility.reason);
@@ -1531,7 +1538,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
             confidence: 1,
             reason: "task lock",
             via: "stay-sticky",
-            catalogSource: opts.catalog.source,
+            catalogSource: stickyCatalog.source,
             score: 0,
             boundary,
           },

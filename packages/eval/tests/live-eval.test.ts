@@ -173,6 +173,33 @@ describe("live evaluation orchestration", () => {
     expect(result.cases[0].errors.join("\n")).toContain("runtime identity mismatch");
   });
 
+  it("accepts a provider response that omits the selected provider prefix", async () => {
+    const dataset = liveFixture();
+    const frontier = dataset.catalog.models.find((model) => model.runtimeId === "provider/frontier")!;
+    frontier.runtimeId = "openai/frontier";
+    dataset.prices["openai/frontier"] = dataset.prices["provider/frontier"];
+    delete dataset.prices["provider/frontier"];
+    dataset.liveModelAliases = {
+      "provider/cheap": "live/cheap",
+      "openai/frontier": "openai/frontier",
+    };
+    const replay = replayDataset(dataset);
+    let judgeCalls = 0;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === config.judgeModel) {
+        judgeCalls += 1;
+        return response(JSON.stringify({ scores: { A: 90, B: 90, C: 90 } }));
+      }
+      return body.model === "openai/frontier" ? responseWithModel("ok", "frontier") : response(`${body.model}-answer`);
+    };
+
+    const result = await runLiveEvaluation(dataset, replay, config, fetchImpl);
+
+    expect(judgeCalls).toBe(1);
+    expect(result.cases[0]).toMatchObject({ complete: true });
+  });
+
   it("does not count a generated incomplete terminal state as a complete case", async () => {
     const dataset = liveFixture();
     const replay = replayDataset(dataset);

@@ -207,6 +207,67 @@ describe("proxy", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("revalidates a dynamically discovered sticky model against follow-up requirements", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-discovery-sticky-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({ google: { type: "oauth", access: "google-token", projectId: "google-project", expires: Date.now() + 3_600_000 } }),
+    );
+    let discoveryCalls = 0;
+    try {
+      const server = createProxyServer({
+        catalog: { ...catalog, models: [catalog.models[1]] },
+        config,
+        sessions: memorySessions(),
+        authPath,
+        backends: { google: { baseUrl: "https://daily-cloudcode-pa.googleapis.com" } },
+        modelDiscovery: [
+          {
+            provider: "google",
+            async discover() {
+              discoveryCalls += 1;
+              return [{ id: "gemini-text-only", capabilities: ["text"] }];
+            },
+          },
+        ],
+        select: () =>
+          ({
+            modelId: "google/gemini-text-only",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["new session"], reason: "new session" },
+          }) as never,
+      });
+
+      const first = collectRes();
+      await server.handle(
+        fakeReq("/v1/route", { messages: [{ role: "user", content: "hello" }] }, { "x-session-id": "dynamic-sticky" }),
+        first as never,
+      );
+      expect(JSON.parse(first.body).modelId).toBe("google/gemini-text-only");
+
+      await expect(
+        server.handle(
+          fakeReq(
+            "/v1/route",
+            { messages: [{ role: "user", content: "continue" }], tools: [{ type: "function", function: { name: "read" } }] },
+            { "x-session-id": "dynamic-sticky" },
+          ),
+          collectRes() as never,
+        ),
+      ).rejects.toThrow("sticky model google/gemini-text-only is unavailable");
+      expect(discoveryCalls).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses the Google account that advertised the selected model", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ar-discovery-account-"));
     const authPath = join(dir, "auth.json");
