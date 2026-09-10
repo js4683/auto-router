@@ -197,6 +197,13 @@ function decodeBefore(value: string | null): string | undefined {
   return value === null ? undefined : Buffer.from(value, "base64").toString("utf8");
 }
 
+function restoreSnapshot(before: string | undefined, previous: InstallStateTarget | undefined): { restored: boolean; after?: string } {
+  if (!previous || before === undefined || digestText(before) !== previous.installedDigest) return { restored: false };
+  const after = decodeBefore(previous.beforeBase64);
+  const digest = after === undefined ? null : digestText(after);
+  return digest === previous.beforeDigest ? { restored: true, after } : { restored: false };
+}
+
 function rememberTarget(before: string | undefined, after: string, previous: InstallStateTarget | undefined, ownedKeys: string[], ownedValues: Record<string, string>): InstallStateTarget {
   return {
     beforeBase64: previous?.beforeBase64 ?? encodeBefore(before),
@@ -214,10 +221,12 @@ function formatJson(value: JsonRecord): string {
 function planClaude(path: string, baseUrl: string, previous: InstallStateTarget | undefined, uninstall: boolean): FilePlan {
   const before = readOptional(path);
   if (uninstall && before === undefined) return { client: "claude", path, before, after: undefined };
+  const restored = uninstall ? restoreSnapshot(before, previous) : { restored: false };
+  if (restored.restored) return { client: "claude", path, before, after: restored.after };
   const json = parseRecord(before, path);
   const env = objectValue(json.env, `${path}.env`);
   const ownedValues: Record<string, string> = {
-    baseUrl: previous?.ownedValues?.baseUrl ?? baseUrl,
+    baseUrl: uninstall ? previous?.ownedValues?.baseUrl ?? baseUrl : baseUrl,
     apiKey: "auto-router",
   };
   if (uninstall) {
@@ -236,6 +245,8 @@ function planClaude(path: string, baseUrl: string, previous: InstallStateTarget 
 function planCodex(path: string, baseUrl: string, previous: InstallStateTarget | undefined, uninstall: boolean): FilePlan {
   const before = readOptional(path);
   if (uninstall && before === undefined) return { client: "codex", path, before, after: undefined };
+  const restored = uninstall ? restoreSnapshot(before, previous) : { restored: false };
+  if (restored.restored) return { client: "codex", path, before, after: restored.after };
   validateToml(before ?? "", path);
   const after = uninstall
     ? (previous ? removeCodexProvider(before ?? "", previous, baseUrl) : before ?? "")
@@ -247,6 +258,8 @@ function planCodex(path: string, baseUrl: string, previous: InstallStateTarget |
 function planOpenCode(path: string, jsoncPath: string, baseUrl: string, previous: InstallStateTarget | undefined, uninstall: boolean, notes: string[]): FilePlan {
   const before = readOptional(path);
   if (uninstall && before === undefined) return { client: "opencode", path, before, after: undefined };
+  const restored = uninstall ? restoreSnapshot(before, previous) : { restored: false };
+  if (restored.restored) return { client: "opencode", path, before, after: restored.after };
   const jsonc = readOptional(jsoncPath);
   parseJsoncRecord(jsonc, jsoncPath);
   const json = parseRecord(before, path);
@@ -304,7 +317,15 @@ function restoreState(path: string, previous: InstallState | undefined): void {
 }
 
 function applyPlan(plan: FilePlan): void {
-  if (plan.after === undefined || sameText(plan.before, plan.after)) return;
+  if (plan.after === undefined) {
+    try {
+      unlinkSync(plan.path);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    return;
+  }
+  if (sameText(plan.before, plan.after)) return;
   atomicWriteText(plan.path, plan.after);
 }
 

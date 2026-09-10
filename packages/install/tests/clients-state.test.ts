@@ -31,6 +31,36 @@ describe("installer state", () => {
     expect(statSync(statePath).mode & 0o777).toBe(0o600);
   });
 
+  it("restores the previous Codex configuration when the install is unchanged", () => {
+    const root = home();
+    const codexPath = join(root, ".codex/config.toml");
+    const original = 'model_provider = "user"\ntheme = "dark"\n';
+    mkdirSync(join(root, ".codex"), { recursive: true });
+    writeFileSync(codexPath, original);
+
+    runInstall({ home: root, baseUrl: "http://127.0.0.1:8787", clients: ["codex"] });
+    runInstall({ home: root, baseUrl: "http://127.0.0.1:8787", clients: ["codex"], uninstall: true });
+
+    expect(readFileSync(codexPath, "utf8")).toBe(original);
+  });
+
+  it("removes the latest Claude endpoint after a URL change while preserving edits", () => {
+    const root = home();
+    const claudePath = join(root, ".claude/settings.json");
+    mkdirSync(join(root, ".claude"), { recursive: true });
+    writeFileSync(claudePath, JSON.stringify({ settings: { theme: "dark" } }));
+
+    runInstall({ home: root, baseUrl: "http://127.0.0.1:8787", clients: ["claude"] });
+    runInstall({ home: root, baseUrl: "https://router.example", clients: ["claude"] });
+    const edited = JSON.parse(readFileSync(claudePath, "utf8"));
+    edited.settings.theme = "light";
+    writeFileSync(claudePath, `${JSON.stringify(edited, null, 2)}\n`);
+
+    runInstall({ home: root, baseUrl: "https://router.example", clients: ["claude"], uninstall: true });
+
+    expect(JSON.parse(readFileSync(claudePath, "utf8"))).toEqual({ settings: { theme: "light" } });
+  });
+
   it("validates all selected files before writing any target", () => {
     const root = home();
     const claudePath = join(root, ".claude/settings.json");

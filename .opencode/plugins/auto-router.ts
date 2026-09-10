@@ -3,7 +3,7 @@
  * Grill contract: two-window SessionState, gated heuristics, context-fit, stickiness, 2-axis selection.
  * Wires: filesTouched / diffHunks / toolDepth / priorErrors / lifetimeTokens via opencode events + tool hooks.
  */
-import { selectModel, loadConfig, loadCatalogSync, resolveTaskType, buildCatalogFromProviders, detectBoundary } from "../../packages/router-core/src/index.js";
+import { checkModelEligibility, selectModel, loadConfig, loadCatalogSync, resolveTaskType, buildCatalogFromProviders, detectBoundary } from "../../packages/router-core/src/index.js";
 import type { Catalog, RoutingCapability, RoutingTransport, SelectionRequirements, SessionState, Tier } from "../../packages/router-core/src/index.js";
 
 // Keep plugin typechecking independent from an optional host package.
@@ -116,6 +116,11 @@ function hasToolContent(value: unknown): boolean {
   return value.some((item) => item?.type === "tool_use" || item?.type === "tool_result" || item?.type === "function_call");
 }
 
+function hasImageContent(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((item: any) => item?.type === "image" || item?.type === "image_url" || item?.type === "input_image");
+}
+
 function pluginRequirements(output: any, sessionState: SessionState): SelectionRequirements {
   const message = output?.message ?? output;
   const parts = Array.isArray(output?.parts) ? output.parts : [];
@@ -124,7 +129,7 @@ function pluginRequirements(output: any, sessionState: SessionState): SelectionR
   if (Array.isArray(message?.tools) || Array.isArray(output?.tools) || hasToolContent(parts) || hasToolContent(content)) {
     capabilities.push("tools");
   }
-  if (content.some((item: any) => item?.type === "image" || item?.type === "image_url") || parts.some((item: any) => item?.type === "image")) {
+  if (hasImageContent(content) || hasImageContent(parts)) {
     capabilities.push("vision");
   }
   const transport = [output?.transport, message?.transport, output?.protocol, message?.protocol].find(isRoutingTransport) ?? "responses";
@@ -390,7 +395,13 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       s.prevMessage = msgText;
       const requestSnapshot = currentLiveSnapshot;
       const requestTarget = s.taskTarget;
-      const shouldSelect = !requestTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(requestTarget);
+      const stickyModel = requestSnapshot.catalog.models.find(
+        (model) => model.id === requestTarget || model.runtimeId === requestTarget,
+      );
+      const stickyEligible = stickyModel
+        ? checkModelEligibility(stickyModel, requirements, config).pass
+        : false;
+      const shouldSelect = !requestTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(requestTarget) || !stickyEligible;
 
       if (shouldSelect) {
         const selection = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage, requirements);

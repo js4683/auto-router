@@ -1061,6 +1061,159 @@ describe("proxy", () => {
     expect(res.body).toContain("data: [DONE]");
   });
 
+  it("preserves a root Responses input image through Zen translation", async () => {
+    const outbound: any[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://opencode.ai/zen",
+          fetchImpl: async (_url, init) => {
+            outbound.push(JSON.parse(String(init?.body)));
+            return new Response(JSON.stringify({ id: "resp_image", status: "completed", output: [] }));
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "opencode/muse-spark-1.2-contributor-free",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    await server.handle(
+      fakeReq("/v1/responses", {
+        model: "auto",
+        input: [
+          { type: "input_text", text: "Describe this image." },
+          { type: "input_image", image_url: "data:image/png;base64,AA==", detail: "high" },
+        ],
+      }),
+      collectRes() as never,
+    );
+
+    expect(outbound[0].input).toEqual([
+      { role: "user", content: "Describe this image." },
+      { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==", detail: "high" }] },
+    ]);
+  });
+
+  it("translates Chat image data for Google and Anthropic", async () => {
+    const image = "data:image/png;base64,AA==";
+    const googleBodies: any[] = [];
+    const anthropicBodies: any[] = [];
+    const selection = (modelId: string) =>
+      ({
+        modelId,
+        tier: "simple",
+        taskType: null,
+        confidence: 1,
+        reason: "fixture",
+        via: "force",
+        catalogSource: "live",
+        score: 0,
+        boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+      }) as never;
+    const google = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "google-test-key",
+          fetchImpl: async (_url, init) => {
+            googleBodies.push(JSON.parse(String(init?.body)));
+            return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }));
+          },
+        },
+      },
+      select: () => selection("google/gemini-3.6-flash"),
+    });
+    const anthropic = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "anthropic-test-key",
+          fetchImpl: async (_url, init) => {
+            anthropicBodies.push(JSON.parse(String(init?.body)));
+            return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }));
+          },
+        },
+      },
+      select: () => selection("anthropic/claude-sonnet-4-5"),
+    });
+    const body = { model: "auto", messages: [{ role: "user", content: [{ type: "text", text: "Describe it." }, { type: "image_url", image_url: { url: image } }] }] };
+
+    await google.handle(fakeReq("/v1/chat/completions", body, { "x-session-id": "google-image" }), collectRes() as never);
+    await anthropic.handle(fakeReq("/v1/chat/completions", body, { "x-session-id": "anthropic-image" }), collectRes() as never);
+
+    expect(googleBodies[0].contents[0].parts).toEqual([
+      { text: "Describe it." },
+      { inlineData: { mimeType: "image/png", data: "AA==" } },
+    ]);
+    expect(anthropicBodies[0].messages[0].content).toEqual([
+      { type: "text", text: "Describe it." },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } },
+    ]);
+  });
+
+  it("rejects a remote Google image without falling back to text", async () => {
+    let calls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          apiKey: "google-test-key",
+          fetchImpl: async () => {
+            calls += 1;
+            return new Response("unexpected");
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "google/gemini-3.6-flash",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const res = collectRes();
+
+    await server.handle(
+      fakeReq("/v1/chat/completions", {
+        model: "auto",
+        messages: [{ role: "user", content: [{ type: "text", text: "Describe it." }, { type: "image_url", image_url: { url: "https://example.test/image.png" } }] }],
+      }),
+      res as never,
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/base64/i);
+    expect(calls).toBe(0);
+  });
+
   it("preserves Zen refusals as content-filtered Chat Completions", async () => {
     const server = createProxyServer({
       catalog,

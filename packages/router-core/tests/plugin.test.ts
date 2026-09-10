@@ -163,6 +163,34 @@ describe("auto-router provider discovery", () => {
     expect(fixture.logs.filter((entry) => entry.includes("TASK SELECT"))).toHaveLength(1);
   });
 
+  it("reselects a sticky target when a follow-up adds tools or vision", async () => {
+    const data = {
+      ...providerData,
+      all: providerData.all.map((provider) => provider.id === "openai"
+        ? {
+            ...provider,
+            models: {
+              ...provider.models,
+              "fable-latest": { ...provider.models["fable-latest"], capabilities: ["text", "tools", "vision"] },
+            },
+          }
+        : provider),
+    };
+    const fixture = testClient(async () => ({ data }));
+    const hooks = await plugin(fixture.client);
+    const first = message("fix typo", { sessionID: "sticky-tools", messageID: "message-1" });
+    const followUp = message("apply the requested patch", { sessionID: "sticky-tools", messageID: "message-2" });
+    (followUp.message as any).tools = [{ type: "function", function: { name: "apply_patch" } }];
+    followUp.parts.push({ type: "image", source: { type: "url", url: "https://example.test/patch.png" } });
+
+    await hooks["chat.message"]!({ sessionID: "sticky-tools", agent: "build" } as any, first as any);
+    await hooks["chat.message"]!({ sessionID: "sticky-tools", agent: "build" } as any, followUp as any);
+
+    expect(first.message.model).toEqual({ providerID: "opencode", modelID: "muse-spark-1.2-contributor-free" });
+    expect(followUp.message.model).toEqual({ providerID: "openai", modelID: "fable-latest" });
+    expect(fixture.logs.filter((entry) => entry.includes("TASK SELECT"))).toHaveLength(2);
+  });
+
   it("preserves a variant when the selected provider and model already match", async () => {
     const fixture = testClient();
     const hooks = await plugin(fixture.client);

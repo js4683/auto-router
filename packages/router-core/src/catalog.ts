@@ -65,7 +65,9 @@ function hasExplicitZeroPrice(raw: RawAAModel): boolean {
 }
 
 function providerName(rawId: string, providerID?: string): string {
-  return (providerID ?? rawId.slice(0, rawId.indexOf("/"))).toLowerCase();
+  if (providerID) return providerID.toLowerCase();
+  const slash = rawId.indexOf("/");
+  return slash > 0 ? rawId.slice(0, slash).toLowerCase() : "";
 }
 
 function defaultTransports(provider: string, providerQualified: boolean): RoutingTransport[] {
@@ -83,6 +85,24 @@ function routingTransports(raw: RawAAModel, rawId: string, providerID?: string):
   return raw.transports === undefined
     ? defaultTransports(providerName(rawId, providerID), providerID !== undefined || rawId.includes("/"))
     : [...new Set(raw.transports)];
+}
+
+function normalizeCachedCatalog(catalog: Catalog): Catalog {
+  return {
+    ...catalog,
+    models: catalog.models.map((model) => {
+      if (model.transports !== undefined) return model;
+      const runtimeId = model.runtimeId ?? model.id;
+      return {
+        ...model,
+        transports: defaultTransports(providerName(runtimeId), runtimeId.includes("/")),
+      };
+    }),
+  };
+}
+
+function cachedCatalog(catalog: Catalog): Catalog {
+  return { ...normalizeCachedCatalog(catalog), source: "cache" };
 }
 
 export function buildCatalog(
@@ -253,7 +273,7 @@ export async function fetchAACatalog(config: RouterConfig, cachePathOverride?: s
       const cached = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog & { fetchedAt: string };
       const age = Date.now() - new Date(cached.fetchedAt).getTime();
       if (age < intervalMs && cached.models?.length) {
-        return { ...cached, source: "cache" };
+        return cachedCatalog(cached);
       }
     } catch {
       // ignore corrupt cache
@@ -266,7 +286,7 @@ export async function fetchAACatalog(config: RouterConfig, cachePathOverride?: s
     if (existsSync(cachePath)) {
       try {
         const stale = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog;
-        if (stale.models?.length) return { ...stale, source: "cache" };
+        if (stale.models?.length) return cachedCatalog(stale);
       } catch {}
     }
     return fallbackCatalog(config);
@@ -292,7 +312,7 @@ export async function fetchAACatalog(config: RouterConfig, cachePathOverride?: s
     if (existsSync(cachePath)) {
       try {
         const stale = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog;
-        if (stale.models?.length) return { ...stale, source: "cache" };
+        if (stale.models?.length) return cachedCatalog(stale);
       } catch {}
     }
     return fallbackCatalog(config);
@@ -304,7 +324,7 @@ export function loadCatalogSync(config: RouterConfig, cachePathOverride?: string
   if (existsSync(cachePath)) {
     try {
       const c = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog;
-      if (c.models?.length) return { ...c, source: "cache" };
+      if (c.models?.length) return cachedCatalog(c);
     } catch {}
   }
   return fallbackCatalog(config);

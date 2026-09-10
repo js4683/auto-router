@@ -137,6 +137,13 @@ const ANTIGRAVITY_MODEL_ALIASES: Record<string, string> = {
   "gemini-3.6-flash": "gemini-3.6-flash-high",
 };
 
+class UnsupportedImageContentError extends Error {
+  constructor(message = "unsupported image content") {
+    super(message);
+    this.name = "UnsupportedImageContentError";
+  }
+}
+
 function upstreamSignal(context: ProxyRequestContext, timeoutMs: number): AbortSignal {
   if (context.remainingMs() <= 0) throw new Error("request timed out");
   const timeout = AbortSignal.timeout(timeoutMs);
@@ -439,14 +446,75 @@ function messageText(content: any): string | undefined {
   return text || undefined;
 }
 
+type CanonicalContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: string } };
+
+function imageDataUrl(url: string): { mediaType: string; data: string } | undefined {
+  const match = /^data:(image\/[A-Za-z0-9.+-]+);base64,(.+)$/is.exec(url);
+  return match ? { mediaType: match[1], data: match[2] } : undefined;
+}
+
+function isImagePart(part: any): boolean {
+  return ["image", "image_url", "input_image"].includes(part?.type)
+    || (typeof part?.source?.media_type === "string" && part.source.media_type.toLowerCase().startsWith("image/"));
+}
+
+function isSupportedImageUrl(url: string): boolean {
+  return Boolean(imageDataUrl(url)) || /^https?:\/\//i.test(url);
+}
+
+function imageUrlPart(part: any): { url: string; detail?: string } | undefined {
+  if (!part || typeof part !== "object") return undefined;
+  const detail = typeof part.detail === "string" ? part.detail : typeof part.image_url?.detail === "string" ? part.image_url.detail : undefined;
+  if (part.type === "image_url" || part.type === "input_image") {
+    const image = part.image_url;
+    const url = typeof image === "string" ? image : image?.url;
+    if (typeof url === "string" && url) return { url, ...(detail ? { detail } : {}) };
+  }
+  if (part.type !== "image") return undefined;
+  const source = part.source;
+  if (source?.type === "base64" && typeof source.data === "string" && typeof source.media_type === "string") {
+    return { url: `data:${source.media_type};base64,${source.data}`, ...(detail ? { detail } : {}) };
+  }
+  if (source?.type === "url" && typeof source.url === "string" && source.url) {
+    return { url: source.url, ...(detail ? { detail } : {}) };
+  }
+  return undefined;
+}
+
+function canonicalContentParts(value: unknown): CanonicalContentPart[] {
+  if (typeof value === "string") return [{ type: "text", text: value }];
+  const items = Array.isArray(value) ? value : [value];
+  return items.flatMap((part: any): CanonicalContentPart[] => {
+    if (["text", "input_text", "output_text"].includes(part?.type) && typeof part.text === "string") {
+      return [{ type: "text", text: part.text }];
+    }
+    if (isImagePart(part)) {
+      const image = imageUrlPart(part);
+      if (!image || !isSupportedImageUrl(image.url)) throw new UnsupportedImageContentError();
+      return [{ type: "image_url", image_url: image }];
+    }
+    return [];
+  });
+}
+
+function canonicalMessageContent(value: unknown): string | CanonicalContentPart[] | undefined {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return undefined;
+  const parts = canonicalContentParts(value);
+  if (!parts.length) return undefined;
+  return parts.length === 1 && parts[0].type === "text" ? parts[0].text : parts;
+}
+
 function anthropicMessages(body: any): any[] {
   const system = messageText(body?.system);
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const normalized = messages.flatMap((message: any) => {
     if (!Array.isArray(message?.content)) return [{ role: message.role, content: message.content }];
     const items: any[] = [];
-    const text = messageText(message.content);
-    if (text) items.push({ role: message.role, content: text });
+    const content = canonicalMessageContent(message.content);
+    if (content !== undefined) items.push({ role: message.role, content });
     for (const part of message.content) {
       if (part?.type === "tool_use") {
         items.push({
@@ -477,8 +545,12 @@ function responsesMessages(body: any): any[] {
     if (item?.type === "function_call_output") {
       return [{ role: "tool", tool_call_id: item.call_id, content: messageText(item.output) ?? String(item.output ?? "") }];
     }
+    if (item?.type === "input_image" || item?.type === "input_text") {
+      const content = canonicalMessageContent([item]);
+      return content === undefined ? [] : [{ role: "user", content }];
+    }
     if (TEXT_MESSAGE_ROLES.has(item?.role)) {
-      const content = messageText(item.content);
+      const content = canonicalMessageContent(item.content);
       return content === undefined ? [] : [{ role: item.role, content }];
     }
     return [];
@@ -544,14 +616,27 @@ function zenTools(body: any): unknown[] {
     }));
 }
 
+function responseInputContent(value: unknown): string | unknown[] | undefined {
+  const content = canonicalMessageContent(value);
+  if (content === undefined || typeof content === "string") return content;
+  if (content.every((part) => part.type === "text")) {
+    return content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+  }
+  return content.map((part) =>
+    part.type === "text"
+      ? { type: "input_text", text: part.text }
+      : { type: "input_image", image_url: part.image_url.url, ...(part.image_url.detail ? { detail: part.image_url.detail } : {}) },
+  );
+}
+
 function zenInput(body: any): unknown[] {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   return messages.flatMap((message: any) => {
     if (message?.role === "tool") {
       return [{ type: "function_call_output", call_id: message.tool_call_id, output: messageText(message.content) ?? "" }];
     }
-    const content = messageText(message?.content);
-    const text = TEXT_MESSAGE_ROLES.has(message?.role) && content !== undefined ? [{ role: message.role, content }] : [];
+    const content = TEXT_MESSAGE_ROLES.has(message?.role) ? responseInputContent(message?.content) : undefined;
+    const text = content !== undefined ? [{ role: message.role, content }] : [];
     const calls = Array.isArray(message?.tool_calls)
       ? message.tool_calls
           .filter((call: any) => call?.function?.name)
@@ -597,6 +682,16 @@ function parseToolArguments(raw: string | undefined): Record<string, unknown> {
   }
 }
 
+function anthropicContentBlocks(content: unknown): unknown[] {
+  return canonicalContentParts(content).map((part) => {
+    if (part.type === "text") return part;
+    const data = imageDataUrl(part.image_url.url);
+    return data
+      ? { type: "image", source: { type: "base64", media_type: data.mediaType, data: data.data } }
+      : { type: "image", source: { type: "url", url: part.image_url.url } };
+  });
+}
+
 function anthropicRequestMessages(body: any): unknown[] {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   return messages.flatMap((message: any) => {
@@ -605,8 +700,7 @@ function anthropicRequestMessages(body: any): unknown[] {
       return [{ role: "user", content: [{ type: "tool_result", tool_use_id: message.tool_call_id, content: messageText(message.content) ?? "" }] }];
     }
     if (message?.role !== "user" && message?.role !== "assistant") return [];
-    const content = messageText(message.content);
-    const textBlock = content === undefined ? [] : [{ type: "text", text: content }];
+    const contentBlocks = anthropicContentBlocks(message.content);
     const toolBlocks = Array.isArray(message?.tool_calls)
       ? message.tool_calls
           .filter((call: any) => call?.function?.name)
@@ -617,9 +711,9 @@ function anthropicRequestMessages(body: any): unknown[] {
             input: parseToolArguments(call.function.arguments),
           }))
       : [];
-    const blocks = [...textBlock, ...toolBlocks];
+    const blocks = [...contentBlocks, ...toolBlocks];
     if (!blocks.length) return [];
-    return [{ role: message.role, content: blocks.length === 1 && blocks[0].type === "text" ? content : blocks }];
+    return [{ role: message.role, content: blocks.length === 1 && blocks[0].type === "text" ? blocks[0].text : blocks }];
   });
 }
 
@@ -710,6 +804,15 @@ function geminiTools(body: any): unknown[] {
   return declarations.length ? [{ functionDeclarations: declarations }] : [];
 }
 
+function geminiContentParts(content: unknown): unknown[] {
+  return canonicalContentParts(content).map((part) => {
+    if (part.type === "text") return { text: part.text };
+    const data = imageDataUrl(part.image_url.url);
+    if (!data) throw new UnsupportedImageContentError("Google image translation requires base64 image data");
+    return { inlineData: { mimeType: data.mediaType, data: data.data } };
+  });
+}
+
 const geminiThoughtSignatures = new Map<string, string>();
 
 function antigravitySessionId(sessionKey: string): string {
@@ -760,9 +863,8 @@ function geminiRequest(body: any, sessionKey = "global"): Record<string, unknown
       });
       continue;
     }
-    const content = messageText(message?.content);
     if (message?.role !== "user" && message?.role !== "assistant") continue;
-    const text = content === undefined ? [] : [{ text: content }];
+    const text = geminiContentParts(message?.content);
     const calls = Array.isArray(message?.tool_calls)
       ? message.tool_calls
           .filter((call: any) => call?.function?.name)
@@ -910,7 +1012,7 @@ function routingCapabilities(body: any): RoutingCapability[] {
   const inputToolMessages = input.some((item: any) => ["function_call", "function_call_output"].includes(item?.type));
   const capabilities: RoutingCapability[] = ["text"];
   if (declaredTools || toolMessages || inputToolMessages) capabilities.push("tools");
-  if (messages.some((message: any) => hasImageContent(message?.content)) || input.some((item: any) => hasImageContent(item?.content))) {
+  if (messages.some((message: any) => hasImageContent(message?.content)) || input.some((item: any) => hasImageContent(item) || hasImageContent(item?.content))) {
     capabilities.push("vision");
   }
   const formats = [body?.response_format, body?.text?.format, body?.output_config?.format, body?.outputConfig?.format];
@@ -1771,7 +1873,15 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
          return;
        }
       const protocol = ingressProtocol(req.url);
-      const normalizedBody = normalizeIngress(body, protocol);
+      let normalizedBody: any;
+      try {
+        normalizedBody = normalizeIngress(body, protocol);
+      } catch (error) {
+        if (!(error instanceof UnsupportedImageContentError)) throw error;
+        requestContext.finalize({ terminalState: "failed", status: 400 });
+        json(res, 400, { error: error.message });
+        return;
+      }
       const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
        const identity = resolveSessionIdentity(req, normalizedBody);
@@ -1895,19 +2005,27 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           });
         }
       }
-      const upstreamRequestPlan = upstreamRequest(
-        protocol,
-        body,
-        normalizedBody,
-        provider,
-        bareModel,
-        token,
-        googleProject,
-        id,
-        oauth && provider === "google",
-        oauth && provider === "openai",
-        oauth && provider === "anthropic",
-      );
+      let upstreamRequestPlan: UpstreamRequest;
+      try {
+        upstreamRequestPlan = upstreamRequest(
+          protocol,
+          body,
+          normalizedBody,
+          provider,
+          bareModel,
+          token,
+          googleProject,
+          id,
+          oauth && provider === "google",
+          oauth && provider === "openai",
+          oauth && provider === "anthropic",
+        );
+      } catch (error) {
+        if (!(error instanceof UnsupportedImageContentError)) throw error;
+        finalize("failed", 400);
+        json(res, 400, { error: error.message });
+        return;
+      }
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (provider === "anthropic") {
         headers["anthropic-version"] = "2023-06-01";
