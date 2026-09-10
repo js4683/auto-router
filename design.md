@@ -25,8 +25,8 @@ Two adapters deliver "opencode **or any harness**":
 - **Local proxy** — the apply path for harnesses that cannot load the plugin. Point Claude
   Code, Codex, or Cursor at `http://127.0.0.1:8787`. It accepts OpenAI Chat Completions,
   Anthropic Messages, and OpenAI Responses requests, selects the target `model`, and
-  translates text and function calls across provider transports using the selected
-  provider credential. See the [universal proxy design](./docs/plans/2026-09-04-universal-proxy-installer-design.md)
+  translates text, image, and function-call content across provider transports using the
+  selected provider credential, rejecting image content a transport cannot represent. See the [universal proxy design](./docs/plans/2026-09-04-universal-proxy-installer-design.md)
   for the current provider-specific transport and credential contract.
 
 `router-core` has zero harness dependencies. Both adapters call the same
