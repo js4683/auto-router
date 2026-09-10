@@ -12,7 +12,7 @@ describe("parseQuota", () => {
       200,
     );
     expect(quota.limited).toBe(false);
-    expect(quota.meters[0]).toMatchObject({ label: "Requests", percent: 35, remaining: 65, limit: 100 });
+    expect(quota.meters[0]).toMatchObject({ label: "Requests", percent: 35, remaining: 65, limit: 100, unit: "requests", state: "observed" });
   });
 
   it("marks 429 as limited", () => {
@@ -44,6 +44,10 @@ describe("parseQuota", () => {
       rate_limit: { primary_window: { used_percent: 1 } },
     });
     expect(meters[0]).toMatchObject({ label: "5-hour limit", percent: 1 });
+  });
+
+  it("does not create a Claude meter when utilization is unknown", () => {
+    expect(parseClaudeUsage({ five_hour: { utilization: null } })).toEqual([]);
   });
 
   it("parses xAI grok billing config", () => {
@@ -82,7 +86,7 @@ describe("settingsPage", () => {
             limited: false,
             status: 200,
             at: 1,
-            meters: [{ label: "5-hour limit", used: 35, limit: 100, remaining: 65, percent: 35 }],
+            meters: [{ label: "5-hour limit", used: 35, limit: 100, remaining: 65, percent: 35, unit: "percent", state: "observed" }],
           },
         },
       ],
@@ -140,5 +144,26 @@ describe("settingsPage", () => {
       true,
     );
     expect(html).toContain("claude-extra-abcdef12");
+  });
+
+  it("labels an unobserved quota without fabricating zero usage", () => {
+    const html = settingsPage(
+      [{
+        id: "openai",
+        label: "Codex",
+        envKey: "OPENAI_API_KEY",
+        login: true,
+        envSet: false,
+        quota: {
+          limited: false,
+          status: 200,
+          at: 1,
+          meters: [{ label: "5-hour limit", used: 0, limit: 100, remaining: 100, percent: 0, unit: "percent", state: "unknown" }],
+        },
+      }],
+      true,
+    );
+    expect(html).toContain("Unknown");
+    expect(html).not.toContain("0 / 100 remaining");
   });
 });

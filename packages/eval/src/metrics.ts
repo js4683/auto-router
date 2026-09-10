@@ -2,10 +2,13 @@ import type {
   ConfidenceInterval,
   EvalPrice,
   EvalUsage,
+  GroupedQualityCaseScore,
   QualityCaseScore,
   QualityGateResult,
   StrategyMetrics,
   StrategyReplayResult,
+  VersionedQualityGate,
+  VersionedQualityInput,
 } from "./types.js";
 
 export function calculateCost(usage: EvalUsage, price: EvalPrice): number {
@@ -112,13 +115,30 @@ function caseRetention(cases: QualityCaseScore[]): number | null {
   return qualityRetained(router, frontier);
 }
 
+function groupQualityCases(cases: QualityCaseScore[]): QualityCaseScore[] {
+  const groups = new Map<string, QualityCaseScore[]>();
+  for (const [index, item] of cases.entries()) {
+    const group = groups.get(item.groupId ?? `case-${index}`) ?? [];
+    group.push(item);
+    groups.set(item.groupId ?? `case-${index}`, group);
+  }
+  return [...groups.values()].flatMap((group) => {
+    const routerScore = weightedMean(group.map((item) => ({ score: item.routerScore, weight: item.weight })));
+    const frontierScore = weightedMean(group.map((item) => ({ score: item.frontierScore, weight: item.weight })));
+    if (routerScore === null || frontierScore === null) return [];
+    return [{ routerScore, frontierScore, weight: group.reduce((total, item) => total + item.weight, 0) }];
+  });
+}
+
 export function bootstrapRetentionInterval(cases: QualityCaseScore[], seed: string, samples = 10_000): ConfidenceInterval {
   if (!cases.length) throw new Error("bootstrap requires quality cases");
   if (!Number.isInteger(samples) || samples <= 0) throw new Error("bootstrap samples must be a positive integer");
+  const groups = groupQualityCases(cases);
+  if (!groups.length) throw new Error("bootstrap has no valid quality groups");
   const random = seededRandom(seed);
   const retained: number[] = [];
   for (let sample = 0; sample < samples; sample += 1) {
-    const selected = Array.from({ length: cases.length }, () => cases[Math.floor(random() * cases.length)]);
+    const selected = Array.from({ length: groups.length }, () => groups[Math.floor(random() * groups.length)]);
     const value = caseRetention(selected);
     if (value !== null) retained.push(value);
   }
@@ -130,6 +150,82 @@ export function bootstrapRetentionInterval(cases: QualityCaseScore[], seed: stri
     samples,
     seed,
   };
+}
+
+function groupCount(cases: GroupedQualityCaseScore[]): number {
+  return new Set(cases.map((item) => item.groupId)).size;
+}
+
+function validateVersionedInput(input: VersionedQualityInput): string | undefined {
+  const overallGroups = new Set(input.overall.map((item) => item.groupId));
+  const assigned = new Map<string, string>();
+  for (const [cohort, cases] of Object.entries(input.cohorts)) {
+    for (const item of cases) {
+      if (item.cohort !== cohort) return `group ${item.groupId} cohort field does not match ${cohort}`;
+      const previous = assigned.get(item.groupId);
+      if (previous && previous !== cohort) return `group ${item.groupId} is assigned to multiple cohorts`;
+      assigned.set(item.groupId, cohort);
+    }
+  }
+  if ([...overallGroups].some((groupId) => !assigned.has(groupId))) return "overall evidence is missing cohort assignments";
+  if ([...assigned.keys()].some((groupId) => !overallGroups.has(groupId))) return "cohort evidence is not present in overall evidence";
+  return undefined;
+}
+
+function versionedCohortResult(cases: GroupedQualityCaseScore[], seed: string, minGroups: number, minRetention: number): VersionedQualityGate["cohortResults"][string] {
+  const independentGroups = groupCount(cases);
+  if (independentGroups < minGroups) {
+    return { passed: false, lowerBound: null, independentGroups, reason: `requires at least ${minGroups} independent groups` };
+  }
+  const interval = bootstrapRetentionInterval(cases, seed);
+  if (interval.lower < minRetention) {
+    return { passed: false, lowerBound: interval.lower, independentGroups, reason: `quality retention lower bound is below ${minRetention}` };
+  }
+  return { passed: true, lowerBound: interval.lower, independentGroups, reason: "quality retention lower bound meets threshold" };
+}
+
+export function evaluateVersionedQualityGate(
+  input: VersionedQualityInput,
+  options: { seed?: string; minIndependentGroups?: number; minCohortGroups?: number; minRetention?: number } = {},
+): VersionedQualityGate {
+  const seed = options.seed ?? "auto-router-quality-v2";
+  const minIndependentGroups = options.minIndependentGroups ?? 200;
+  const minCohortGroups = options.minCohortGroups ?? 100;
+  const minRetention = options.minRetention ?? 0.95;
+  const invalidInput = validateVersionedInput(input);
+  if (invalidInput) {
+    return { passed: false, reason: invalidInput, lowerBound: null, independentGroups: groupCount(input.overall), cohortResults: {} };
+  }
+  if ((input.incompleteCases ?? 0) > 0) {
+    return {
+      passed: false,
+      reason: `${input.incompleteCases} incomplete cases prevent activation evidence`,
+      lowerBound: null,
+      independentGroups: groupCount(input.overall),
+      cohortResults: {},
+    };
+  }
+  const independentGroups = groupCount(input.overall);
+  if (independentGroups < minIndependentGroups) {
+    return { passed: false, reason: `requires at least ${minIndependentGroups} independent groups`, lowerBound: null, independentGroups, cohortResults: {} };
+  }
+  const overallInterval = bootstrapRetentionInterval(input.overall, seed);
+  if (overallInterval.lower < minRetention) {
+    return { passed: false, reason: `overall quality retention lower bound is below ${minRetention}`, lowerBound: overallInterval.lower, independentGroups, cohortResults: {} };
+  }
+  const requiredCohorts = input.criticalCohorts ?? Object.keys(input.cohorts);
+  const cohortResults = Object.fromEntries(requiredCohorts.map((cohort) => {
+    const cases = input.cohorts[cohort];
+    return [
+      cohort,
+      cases
+        ? versionedCohortResult(cases, `${seed}:${cohort}`, minCohortGroups, minRetention)
+        : { passed: false, lowerBound: null, independentGroups: 0, reason: "cohort is missing" },
+    ];
+  }));
+  const failed = Object.entries(cohortResults).find(([, result]) => !result.passed);
+  if (failed) return { passed: false, reason: `cohort ${failed[0]} failed: ${failed[1].reason}`, lowerBound: overallInterval.lower, independentGroups, cohortResults };
+  return { passed: true, reason: "overall and cohort quality retention lower bounds meet threshold", lowerBound: overallInterval.lower, independentGroups, cohortResults };
 }
 
 export function evaluateQualityGate(cases: QualityCaseScore[]): QualityGateResult {

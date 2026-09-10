@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { Catalog, ModelEntry, RouterConfig } from "./types.js";
+import type { Catalog, ModelEntry, RouterConfig, RoutingCapability, RoutingTransport } from "./types.js";
 
 export interface RawAAModel {
   id: string;
@@ -16,6 +16,8 @@ export interface RawAAModel {
   median_output_tokens_per_second?: number;
   median_time_to_first_token_seconds?: number;
   limit?: { context?: number; output?: number };
+  capabilities?: readonly RoutingCapability[];
+  transports?: readonly RoutingTransport[];
   // sometimes AA uses different casing
   [k: string]: unknown;
 }
@@ -26,6 +28,8 @@ export interface OpenCodeProviderModel {
   cost?: { input?: number; output?: number; cache?: { read?: number; write?: number } };
   limit?: { context?: number; output?: number };
   status?: string;
+  capabilities?: readonly RoutingCapability[];
+  transports?: readonly RoutingTransport[];
 }
 
 export interface OpenCodeProvider {
@@ -58,6 +62,27 @@ function hasExplicitZeroPrice(raw: RawAAModel): boolean {
   if (!pricing) return false;
   if (typeof pricing.price_1m_blended_3_to_1 === "number") return pricing.price_1m_blended_3_to_1 === 0;
   return pricing.price_1m_input_tokens === 0 && pricing.price_1m_output_tokens === 0;
+}
+
+function providerName(rawId: string, providerID?: string): string {
+  return (providerID ?? rawId.slice(0, rawId.indexOf("/"))).toLowerCase();
+}
+
+function defaultTransports(provider: string, providerQualified: boolean): RoutingTransport[] {
+  if (provider === "anthropic") return ["anthropic"];
+  if (provider === "opencode") return ["responses"];
+  if (provider === "openai") return ["chat", "responses"];
+  return providerQualified ? ["chat", "responses"] : ["chat"];
+}
+
+function routingCapabilities(raw: RawAAModel): readonly RoutingCapability[] {
+  return raw.capabilities === undefined ? ["text"] : [...new Set(raw.capabilities)];
+}
+
+function routingTransports(raw: RawAAModel, rawId: string, providerID?: string): readonly RoutingTransport[] {
+  return raw.transports === undefined
+    ? defaultTransports(providerName(rawId, providerID), providerID !== undefined || rawId.includes("/"))
+    : [...new Set(raw.transports)];
 }
 
 export function buildCatalog(
@@ -109,6 +134,8 @@ export function buildCatalog(
       value: valueScore(codingIndex, blended),
       windowTokens,
       isFree,
+      capabilities: routingCapabilities(raw),
+      transports: routingTransports(raw, rawId, providerID),
       medianOutputTokensPerSec: raw.median_output_tokens_per_second,
       medianTimeToFirstTokenSec: raw.median_time_to_first_token_seconds,
     };
@@ -172,6 +199,8 @@ export function buildCatalogFromProviders(providerList: OpenCodeProviderList, co
         evaluations: { artificial_analysis_coding_index: inferred.codingIndex },
         pricing,
         limit: context && context > 0 ? { context, output: model.limit?.output } : undefined,
+        capabilities: model.capabilities,
+        transports: model.transports,
       });
     }
   }

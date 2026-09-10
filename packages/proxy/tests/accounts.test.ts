@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -38,6 +38,7 @@ describe("listProviderAccounts", () => {
     expect(listed[0]?.primary).toBe(true);
     expect(listed[1]?.primary).toBe(false);
     expect(listed.map((account) => account.token)).toEqual(["tok-primary", "sk-extra"]);
+    expect(listed.map((account) => account.sourceKey)).toEqual(["auth:openai", expect.stringMatching(/^extra:/)]);
   });
 
   it("does not overwrite a malformed accounts file", () => {
@@ -55,6 +56,26 @@ describe("listProviderAccounts", () => {
     expect(listProviderAccounts("google", { env: {}, accountsPath })).toEqual([
       expect.objectContaining({ provider: "google", type: "oauth", token: "ya29.extra", projectId: "extra-project" }),
     ]);
+  });
+
+  it("rejects an invalid account entry without replacing the file", () => {
+    const dir = tmpDir();
+    const accountsPath = join(dir, "accounts.json");
+    const original = JSON.stringify({ accounts: [{ id: "kept", provider: "openai", type: "api", key: "sk-kept" }, { id: "bad" }] });
+    writeFileSync(accountsPath, original, { mode: 0o600 });
+
+    expect(() => addExtraAccount(accountsPath, { provider: "openai", type: "api", key: "sk-new" })).toThrow(/invalid account/i);
+    expect(readFileSync(accountsPath, "utf8")).toBe(original);
+  });
+
+  it("tightens permissions on existing account stores", () => {
+    const dir = tmpDir();
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(accountsPath, JSON.stringify({ accounts: [] }), { mode: 0o644 });
+
+    addExtraAccount(accountsPath, { provider: "openai", type: "api", key: "sk-new" });
+
+    expect(statSync(accountsPath).mode & 0o777).toBe(0o600);
   });
 });
 

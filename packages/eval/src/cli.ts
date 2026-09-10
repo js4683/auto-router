@@ -5,7 +5,7 @@ import { planLiveEvaluation, runLiveEvaluation, type JudgeClientConfig } from ".
 import { replayDataset } from "./replay.js";
 import { buildLiveReport, buildReplayReport, renderMarkdown, stableJson } from "./report.js";
 import { runAvengersCommand } from "./avengers-cli.js";
-import { readDataset } from "./schema.js";
+import { readDataset, validateLiveProvenance } from "./schema.js";
 import type { EvalReportV1 } from "./types.js";
 
 export interface CliIo {
@@ -104,6 +104,7 @@ async function runLive(parsed: ParsedArgs, io: CliIo): Promise<number> {
     timeoutMs: positiveEnv(io, "AUTO_ROUTER_EVAL_TIMEOUT_MS", 60_000),
     maxOutputTokens: positiveEnv(io, "AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS", 1024),
   };
+  validateLiveProvenance(dataset);
   const plan = planLiveEvaluation(dataset, replay);
   io.stdout(`planned calls: ${plan.generationCalls} generation, ${plan.judgeCalls} judge`);
   const live = await runLiveEvaluation(dataset, replay, config, io.fetch ?? fetch);

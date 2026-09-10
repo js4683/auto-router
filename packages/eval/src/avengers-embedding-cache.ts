@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { normalizeEmbeddingText, requestEmbeddings, type EmbeddingClientConfig } from "@auto-router/router-core";
+import { embeddingEndpointDigest, normalizeEmbeddingText, requestEmbeddings, type EmbeddingClientConfig } from "@auto-router/router-core";
 import type { AvengersCorpusExampleV1 } from "./avengers-corpus.js";
 
 export interface EmbedCorpusOptions {
@@ -8,12 +8,30 @@ export interface EmbedCorpusOptions {
   maxInputChars: number;
   cachePath: string;
   fetchImpl?: typeof fetch;
+  modelRevision?: string;
+  normalizationVersion?: string;
+  corpusDigest?: string;
+  sourceManifestDigest?: string;
+  provenanceBound?: boolean;
 }
 
 interface EmbeddingCacheV1 {
   schemaVersion: 1;
   model: string;
   dimensions: number;
+  entries: Record<string, { inputDigest: string; vector: number[] }>;
+}
+
+interface EmbeddingCacheV2 {
+  schemaVersion: 2;
+  cacheKey: string;
+  endpointDigest: string;
+  model: string;
+  modelRevision: string;
+  dimensions: number;
+  normalizationVersion: string;
+  corpusDigest: string;
+  sourceManifestDigest: string;
   entries: Record<string, { inputDigest: string; vector: number[] }>;
 }
 
@@ -28,39 +46,76 @@ function emptyCache(model: string): EmbeddingCacheV1 {
   return { schemaVersion: 1, model, dimensions: 0, entries: {} };
 }
 
-function readCache(path: string, model: string): EmbeddingCacheV1 {
-  if (!existsSync(path)) return emptyCache(model);
+export function cacheKey(input: { endpoint: string; model: string; revision: string; normalization: string }): string {
+  return createHash("sha256").update(JSON.stringify({
+    endpoint: input.endpoint.replace(/\/+$/, ""),
+    model: input.model,
+    revision: input.revision,
+    normalization: input.normalization,
+  })).digest("hex");
+}
+
+function cacheBinding(options: EmbedCorpusOptions): Omit<EmbeddingCacheV2, "dimensions" | "entries"> {
+  const modelRevision = options.modelRevision ?? options.client.revision ?? "unknown";
+  const normalizationVersion = options.normalizationVersion ?? "phase4-text-v1";
+  const corpusDigest = options.corpusDigest ?? "unknown";
+  const sourceManifestDigest = options.sourceManifestDigest ?? "unknown";
+  return {
+    schemaVersion: 2,
+    cacheKey: cacheKey({
+      endpoint: options.client.baseUrl,
+      model: options.client.model,
+      revision: modelRevision,
+      normalization: `${normalizationVersion}:${options.maxInputChars}`,
+    }),
+    endpointDigest: embeddingEndpointDigest(options.client.baseUrl),
+    model: options.client.model,
+    modelRevision,
+    normalizationVersion,
+    corpusDigest,
+    sourceManifestDigest,
+  };
+}
+
+function validateEntries(entries: unknown, dimensions: number): Record<string, { inputDigest: string; vector: number[] }> {
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) throw new Error("embedding cache entries are invalid");
+  for (const [id, entry] of Object.entries(entries as Record<string, any>)) {
+    const candidate = entry as { inputDigest?: unknown; vector?: unknown };
+    if (!entry || typeof candidate.inputDigest !== "string" || !Array.isArray(candidate.vector) || candidate.vector.some((value: unknown) => !Number.isFinite(value))) {
+      throw new Error(`embedding cache entry ${id} is invalid`);
+    }
+    if (dimensions > 0 && candidate.vector.length !== dimensions) throw new Error(`embedding cache entry ${id} has inconsistent dimensions`);
+  }
+  return entries as Record<string, { inputDigest: string; vector: number[] }>;
+}
+
+function readCache(path: string, options: EmbedCorpusOptions): EmbeddingCacheV1 | EmbeddingCacheV2 {
+  if (!existsSync(path)) return emptyCache(options.client.model);
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    return emptyCache(model);
+    return emptyCache(options.client.model);
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptyCache(model);
-  const cache = parsed as EmbeddingCacheV1;
-  if (cache.schemaVersion !== 1 || cache.model !== model || typeof cache.entries !== "object" || !cache.entries) {
-    return emptyCache(model);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptyCache(options.client.model);
+  const cache = parsed as Record<string, any>;
+  if (cache.schemaVersion === 1) {
+    if (options.provenanceBound || cache.model !== options.client.model) return emptyCache(options.client.model);
+    return { ...cache, entries: validateEntries(cache.entries, cache.dimensions ?? 0) } as EmbeddingCacheV1;
   }
-  for (const [id, entry] of Object.entries(cache.entries)) {
-    if (!entry || typeof entry.inputDigest !== "string" || !Array.isArray(entry.vector) || entry.vector.some((value) => !Number.isFinite(value))) {
-      throw new Error(`embedding cache entry ${id} is invalid`);
-    }
-    if (cache.dimensions > 0 && entry.vector.length !== cache.dimensions) {
-      throw new Error(`embedding cache entry ${id} has inconsistent dimensions`);
-    }
+  const binding = cacheBinding(options);
+  if (cache.schemaVersion !== 2 || cache.cacheKey !== binding.cacheKey || cache.endpointDigest !== binding.endpointDigest || cache.model !== binding.model
+      || cache.modelRevision !== binding.modelRevision || cache.normalizationVersion !== binding.normalizationVersion
+      || cache.corpusDigest !== binding.corpusDigest || cache.sourceManifestDigest !== binding.sourceManifestDigest) {
+    return { ...binding, dimensions: 0, entries: {} };
   }
-  return cache;
+  return { ...cache, entries: validateEntries(cache.entries, cache.dimensions ?? 0) } as EmbeddingCacheV2;
 }
 
-function writeCache(path: string, cache: EmbeddingCacheV1): void {
+function writeCache(path: string, cache: EmbeddingCacheV1 | EmbeddingCacheV2): void {
   const temporary = `${path}.${process.pid}.tmp`;
   const keys = Object.keys(cache.entries).sort();
-  const ordered: EmbeddingCacheV1 = {
-    schemaVersion: 1,
-    model: cache.model,
-    dimensions: cache.dimensions,
-    entries: Object.fromEntries(keys.map((key) => [key, cache.entries[key]])),
-  };
+  const ordered = { ...cache, entries: Object.fromEntries(keys.map((key) => [key, cache.entries[key]])) };
   try {
     writeFileSync(temporary, `${JSON.stringify(ordered, null, 2)}\n`, { mode: 0o600 });
     chmodSync(temporary, 0o600);
@@ -84,7 +139,7 @@ export async function embedCorpusExamples(
     ids.add(example.id);
   }
   const ordered = [...examples].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const cache = readCache(options.cachePath, options.client.model);
+  const cache = readCache(options.cachePath, options);
   const result = new Map<string, number[]>();
   const misses: AvengersCorpusExampleV1[] = [];
 
@@ -127,6 +182,11 @@ export async function embedCorpusExamples(
     }
   }
 
-  writeCache(options.cachePath, cache);
+  const outputCache: EmbeddingCacheV1 | EmbeddingCacheV2 = options.provenanceBound
+    ? { ...cacheBinding(options), dimensions: cache.dimensions, entries: cache.entries }
+    : cache.schemaVersion === 2
+      ? cache
+      : { ...cacheBinding(options), dimensions: cache.dimensions, entries: cache.entries };
+  writeCache(options.cachePath, outputCache);
   return result;
 }

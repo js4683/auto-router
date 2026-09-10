@@ -182,6 +182,7 @@ export function buildLiveReport(dataset: EvalDatasetV1, replay: ReplayResult, li
     gates: {
       ...report.gates,
       liveQuality: { passed: live.qualityGate.passed, reason: live.qualityGate.reason },
+      ...(live.versionedQualityGate ? { versionedQuality: live.versionedQualityGate } : {}),
     },
   };
 }
@@ -256,6 +257,11 @@ export function renderMarkdown(report: EvalReportV1): string {
     `- Completeness: ${report.gates.completeness.passed ? "passed" : "not passed"} (${markdownCell(report.gates.completeness.reason)})`,
     `- Live quality: ${report.gates.liveQuality.passed ? "passed" : "not passed"} (${markdownCell(report.gates.liveQuality.reason)})`
   );
+  if (report.gates.versionedQuality) {
+    lines.push(
+      `- Versioned quality: ${report.gates.versionedQuality.passed ? "passed" : "not passed"} (${markdownCell(report.gates.versionedQuality.reason)})`
+    );
+  }
   lines.push(`- Estimated cost: ${report.gates.estimatedCost.passed ? "passed" : "not passed"} (${markdownCell(report.gates.estimatedCost.reason)})`, "");
   return lines.join("\n");
 }

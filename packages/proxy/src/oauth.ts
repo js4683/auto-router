@@ -1,7 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { saveProviderCredential, updateExtraAccount, type ResolvedAccount } from "./accounts.js";
 import { readAuthFile, writeAuthEntry } from "./auth-store.js";
 import { readClaudeCodeOauth, writeClaudeCodeOauth } from "./claude-code-auth.js";
+import { readJsonStore, updateJsonStore } from "./secure-json-store.js";
 
 function persistOauth(authPath: string, provider: string, entry: Record<string, unknown>, accountsPath?: string): void {
   saveProviderCredential({ provider, entry, authPath, accountsPath });
@@ -36,18 +39,77 @@ type Pending =
   | { provider: "google"; redirectUri: string; verifier: string }
   | { provider: "opencode" };
 
+export interface OAuthOptions {
+  statePath?: string;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}
+
+export function defaultOAuthStatePath(): string {
+  return join(homedir(), ".config/auto-router/oauth-state.json");
+}
+
 const PENDING_TTL_MS = 15 * 60_000;
 const pending = new Map<string, { at: number; session: Pending }>();
 
-function setPending(id: string, session: Pending): void {
-  pending.set(id, { at: Date.now(), session });
+interface PendingFile {
+  sessions: Record<string, { at: number; session: Pending }>;
 }
 
-function getPending(id: string): Pending | undefined {
-  const entry = pending.get(id);
+function isPending(value: unknown): value is Pending {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const provider = (value as { provider?: unknown }).provider;
+  if (provider === "opencode") return true;
+  if (provider === "anthropic") return typeof (value as { verifier?: unknown }).verifier === "string";
+  if (provider === "google") return typeof (value as { redirectUri?: unknown }).redirectUri === "string" && typeof (value as { verifier?: unknown }).verifier === "string";
+  if (provider === "openai") return typeof (value as { deviceAuthId?: unknown }).deviceAuthId === "string" && typeof (value as { userCode?: unknown }).userCode === "string";
+  return provider === "xai" && typeof (value as { deviceCode?: unknown }).deviceCode === "string";
+}
+
+function parsePendingFile(value: unknown): PendingFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("oauth state file is malformed");
+  const sessions = (value as { sessions?: unknown }).sessions;
+  if (!sessions || typeof sessions !== "object" || Array.isArray(sessions)) throw new Error("oauth state file is malformed");
+  const parsed: PendingFile["sessions"] = {};
+  for (const [id, item] of Object.entries(sessions)) {
+    if (!item || typeof item !== "object" || !Number.isFinite((item as { at?: unknown }).at) || !isPending((item as { session?: unknown }).session)) {
+      throw new Error("oauth state file contains an invalid session");
+    }
+    parsed[id] = item as PendingFile["sessions"][string];
+  }
+  return { sessions: parsed };
+}
+
+function setPending(id: string, session: Pending, statePath?: string): void {
+  if (!statePath) {
+    pending.set(id, { at: Date.now(), session });
+    return;
+  }
+  updateJsonStore(statePath, { sessions: {} }, parsePendingFile, (current) => ({
+    sessions: { ...current.sessions, [id]: { at: Date.now(), session } },
+  }));
+}
+
+function deletePending(id: string, statePath?: string): void {
+  if (!statePath) {
+    pending.delete(id);
+    return;
+  }
+  const current = readJsonStore(statePath, parsePendingFile);
+  if (!current || !current.sessions[id]) return;
+  updateJsonStore(statePath, { sessions: {} }, parsePendingFile, (value) => {
+    const sessions = { ...value.sessions };
+    delete sessions[id];
+    return { sessions };
+  });
+}
+
+function getPending(id: string, statePath?: string): Pending | undefined {
+  const file = statePath ? readJsonStore(statePath, parsePendingFile) : undefined;
+  const entry = statePath ? file?.sessions[id] : pending.get(id);
   if (!entry) return undefined;
   if (Date.now() - entry.at > PENDING_TTL_MS) {
-    pending.delete(id);
+    deletePending(id, statePath);
     return undefined;
   }
   return entry.session;
@@ -69,24 +131,27 @@ export type OAuthStart =
   | { id: string; url: string; method: "redirect" }
   | { error: string };
 
-export async function startOAuth(provider: string): Promise<OAuthStart> {
+export async function startOAuth(provider: string, options: OAuthOptions = {}): Promise<OAuthStart> {
+  const fetchImpl = options.fetchImpl ?? fetch;
   if (provider === "openai") {
-    const response = await fetch(`${OPENAI_ISSUER}/api/accounts/deviceauth/usercode`, {
+    const response = await fetchImpl(`${OPENAI_ISSUER}/api/accounts/deviceauth/usercode`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ client_id: OPENAI_CLIENT_ID }),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) return { error: `OpenAI login start failed (${response.status})` };
     const data = (await response.json()) as { device_auth_id: string; user_code: string };
     const id = randomUUID();
-    setPending(id, { provider: "openai", deviceAuthId: data.device_auth_id, userCode: data.user_code });
+    setPending(id, { provider: "openai", deviceAuthId: data.device_auth_id, userCode: data.user_code }, options.statePath);
     return { id, url: `${OPENAI_ISSUER}/codex/device`, method: "device", user_code: data.user_code };
   }
   if (provider === "xai") {
-    const response = await fetch(XAI_DEVICE, {
+    const response = await fetchImpl(XAI_DEVICE, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
       body: new URLSearchParams({ client_id: XAI_CLIENT_ID, scope: XAI_SCOPE }).toString(),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) return { error: `Grok login start failed (${response.status})` };
     const data = (await response.json()) as {
@@ -96,7 +161,7 @@ export async function startOAuth(provider: string): Promise<OAuthStart> {
       verification_uri_complete?: string;
     };
     const id = randomUUID();
-    setPending(id, { provider: "xai", deviceCode: data.device_code });
+    setPending(id, { provider: "xai", deviceCode: data.device_code }, options.statePath);
     return {
       id,
       url: data.verification_uri_complete ?? data.verification_uri ?? "https://auth.x.ai/device",
@@ -107,7 +172,7 @@ export async function startOAuth(provider: string): Promise<OAuthStart> {
   if (provider === "anthropic") {
     const { verifier, challenge } = pkce();
     const id = randomUUID();
-    setPending(id, { provider: "anthropic", verifier });
+    setPending(id, { provider: "anthropic", verifier }, options.statePath);
     const url = new URL("https://claude.ai/oauth/authorize");
     url.searchParams.set("code", "true");
     url.searchParams.set("client_id", CLAUDE_CLIENT_ID);
@@ -124,7 +189,7 @@ export async function startOAuth(provider: string): Promise<OAuthStart> {
     if (!clientId) return { error: "Google OAuth requires GOOGLE_OAUTH_CLIENT_ID" };
     const { verifier, challenge } = pkce();
     const id = randomUUID();
-    setPending(id, { provider: "google", redirectUri: GOOGLE_REDIRECT, verifier });
+    setPending(id, { provider: "google", redirectUri: GOOGLE_REDIRECT, verifier }, options.statePath);
     const url = new URL(GOOGLE_AUTH);
     url.searchParams.set("client_id", clientId);
     url.searchParams.set("redirect_uri", GOOGLE_REDIRECT);
@@ -139,7 +204,7 @@ export async function startOAuth(provider: string): Promise<OAuthStart> {
   }
   if (provider === "opencode") {
     const id = randomUUID();
-    setPending(id, { provider: "opencode" });
+    setPending(id, { provider: "opencode" }, options.statePath);
     return { id, url: "https://opencode.ai/auth", method: "code" };
   }
   return { error: "oauth not available for this provider" };
@@ -186,7 +251,7 @@ function defaultAntigravityTier(data: GoogleProjectResponse): string {
     ?? "free-tier";
 }
 
-async function googleProject(access: string, fetchImpl: typeof fetch = fetch): Promise<GoogleProjectResponse | undefined> {
+async function googleProject(access: string, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<GoogleProjectResponse | undefined> {
   const response = await fetchImpl(ANTIGRAVITY_LOAD_URL, {
     method: "POST",
     headers: {
@@ -196,13 +261,14 @@ async function googleProject(access: string, fetchImpl: typeof fetch = fetch): P
       "user-agent": antigravityUserAgent(),
     },
     body: JSON.stringify({ metadata: ANTIGRAVITY_LOAD_METADATA }),
+    ...(signal ? { signal } : {}),
   });
   if (!response.ok) return undefined;
   return (await response.json()) as GoogleProjectResponse;
 }
 
-export async function ensureGoogleProject(access: string, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
-  const loaded = await googleProject(access, fetchImpl);
+export async function ensureGoogleProject(access: string, fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<string | undefined> {
+  const loaded = await googleProject(access, fetchImpl, signal);
   const existing = responseProject(loaded);
   if (existing) return existing;
   if (!loaded) return undefined;
@@ -218,6 +284,7 @@ export async function ensureGoogleProject(access: string, fetchImpl: typeof fetc
         "x-goog-api-client": "gl-node/22.21.1",
       },
       body: JSON.stringify({ tier_id: defaultAntigravityTier(loaded), metadata: ANTIGRAVITY_ONBOARD_METADATA }),
+      ...(signal ? { signal } : {}),
     });
     if (!onboard.ok) return undefined;
     const data = (await onboard.json()) as GoogleProjectResponse;
@@ -229,7 +296,13 @@ export async function ensureGoogleProject(access: string, fetchImpl: typeof fetc
   return undefined;
 }
 
-async function exchangeGoogleToken(code: string, redirectUri: string, verifier?: string): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | { error: string }> {
+async function exchangeGoogleToken(
+  code: string,
+  redirectUri: string,
+  verifier?: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | { error: string }> {
   const params = {
     client_id: googleClientId(),
     code: code.trim(),
@@ -239,10 +312,11 @@ async function exchangeGoogleToken(code: string, redirectUri: string, verifier?:
   };
   for (const secret of [...googleClientSecrets(), ""]) {
     const body = new URLSearchParams(secret ? { ...params, client_secret: secret } : params);
-    const response = await fetch(GOOGLE_TOKEN, {
+    const response = await fetchImpl(GOOGLE_TOKEN, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) continue;
     const data = (await response.json()) as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
@@ -261,8 +335,12 @@ async function saveGoogleTokens(
   tokens: { access_token: string; refresh_token?: string; expires_in?: number },
   id: string,
   accountsPath?: string,
+  options: OAuthOptions = {},
 ): Promise<{ done: true }> {
-  const projectId = await ensureGoogleProject(tokens.access_token).catch(() => undefined);
+  const projectId = await ensureGoogleProject(tokens.access_token, options.fetchImpl ?? fetch, options.signal).catch((error) => {
+    if (options.signal?.aborted) throw error;
+    return undefined;
+  });
   persistOauth(
     authPath,
     "google",
@@ -275,28 +353,34 @@ async function saveGoogleTokens(
     },
     accountsPath,
   );
-  pending.delete(id);
+  deletePending(id, options.statePath);
   return { done: true };
 }
 
-export async function completeOAuthCode(id: string, code: string, authPath: string, accountsPath?: string): Promise<{ done?: boolean; error?: string }> {
-  const session = getPending(id);
+export async function completeOAuthCode(
+  id: string,
+  code: string,
+  authPath: string,
+  accountsPath?: string,
+  options: OAuthOptions = {},
+): Promise<{ done?: boolean; error?: string }> {
+  const session = getPending(id, options.statePath);
   if (!session) return { error: "login session expired" };
   if (session.provider === "opencode") {
     const key = code.trim();
     if (!key) return { error: "key required" };
     persistOauth(authPath, "opencode", { type: "api", key }, accountsPath);
-    pending.delete(id);
+    deletePending(id, options.statePath);
     return { done: true };
   }
   if (session.provider === "google") {
-    const tokens = await exchangeGoogleToken(code, session.redirectUri, session.verifier);
+    const tokens = await exchangeGoogleToken(code, session.redirectUri, session.verifier, options.fetchImpl, options.signal);
     if ("error" in tokens) return tokens;
-    return saveGoogleTokens(authPath, tokens, id, accountsPath);
+    return saveGoogleTokens(authPath, tokens, id, accountsPath, options);
   }
   if (session.provider !== "anthropic") return { error: "login session expired" };
   const splits = code.trim().split("#");
-  const response = await fetch("https://console.anthropic.com/v1/oauth/token", {
+  const response = await (options.fetchImpl ?? fetch)("https://console.anthropic.com/v1/oauth/token", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -307,6 +391,7 @@ export async function completeOAuthCode(id: string, code: string, authPath: stri
       redirect_uri: CLAUDE_REDIRECT,
       code_verifier: session.verifier,
     }),
+    ...(options.signal ? { signal: options.signal } : {}),
   });
   if (!response.ok) return { error: `Claude login failed (${response.status})` };
   const tokens = (await response.json()) as { access_token: string; refresh_token: string; expires_in?: number };
@@ -316,33 +401,46 @@ export async function completeOAuthCode(id: string, code: string, authPath: stri
     refresh: tokens.refresh_token,
     expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
   }, accountsPath);
-  pending.delete(id);
+  deletePending(id, options.statePath);
   return { done: true };
 }
 
-export async function completeGoogleCallback(state: string, code: string, authPath: string, accountsPath?: string): Promise<{ done?: boolean; error?: string }> {
-  const session = getPending(state);
+export async function completeGoogleCallback(
+  state: string,
+  code: string,
+  authPath: string,
+  accountsPath?: string,
+  options: OAuthOptions = {},
+): Promise<{ done?: boolean; error?: string }> {
+  const session = getPending(state, options.statePath);
   if (!session || session.provider !== "google") return { error: "login session expired" };
-  const tokens = await exchangeGoogleToken(code, session.redirectUri, session.verifier);
+  const tokens = await exchangeGoogleToken(code, session.redirectUri, session.verifier, options.fetchImpl, options.signal);
   if ("error" in tokens) return tokens;
-  return saveGoogleTokens(authPath, tokens, state, accountsPath);
+  return saveGoogleTokens(authPath, tokens, state, accountsPath, options);
 }
 
-export async function pollOAuth(id: string, authPath: string, accountsPath?: string): Promise<{ done?: boolean; error?: string }> {
-  const session = getPending(id);
+export async function pollOAuth(
+  id: string,
+  authPath: string,
+  accountsPath?: string,
+  options: OAuthOptions = {},
+): Promise<{ done?: boolean; error?: string }> {
+  const session = getPending(id, options.statePath);
   if (!session) return { error: "login session expired" };
   if (session.provider === "anthropic" || session.provider === "google" || session.provider === "opencode") return {};
   if (session.provider === "openai") {
-    const response = await fetch(`${OPENAI_ISSUER}/api/accounts/deviceauth/token`, {
+    const fetchImpl = options.fetchImpl ?? fetch;
+    const response = await fetchImpl(`${OPENAI_ISSUER}/api/accounts/deviceauth/token`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ device_auth_id: session.deviceAuthId, user_code: session.userCode }),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (response.status === 400 || response.status === 403) return {};
     if (!response.ok) return { error: `OpenAI poll failed (${response.status})` };
     const data = (await response.json()) as { authorization_code?: string; code_verifier?: string };
     if (!data.authorization_code || !data.code_verifier) return {};
-    const tokenResponse = await fetch(`${OPENAI_ISSUER}/oauth/token`, {
+    const tokenResponse = await fetchImpl(`${OPENAI_ISSUER}/oauth/token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -352,6 +450,7 @@ export async function pollOAuth(id: string, authPath: string, accountsPath?: str
         client_id: OPENAI_CLIENT_ID,
         code_verifier: data.code_verifier,
       }).toString(),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!tokenResponse.ok) return { error: `OpenAI token failed (${tokenResponse.status})` };
     const tokens = (await tokenResponse.json()) as { access_token: string; refresh_token: string; expires_in?: number };
@@ -361,10 +460,10 @@ export async function pollOAuth(id: string, authPath: string, accountsPath?: str
       refresh: tokens.refresh_token,
       expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
     }, accountsPath);
-    pending.delete(id);
+    deletePending(id, options.statePath);
     return { done: true };
   }
-  const response = await fetch(XAI_TOKEN, {
+  const response = await (options.fetchImpl ?? fetch)(XAI_TOKEN, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
     body: new URLSearchParams({
@@ -372,6 +471,7 @@ export async function pollOAuth(id: string, authPath: string, accountsPath?: str
       device_code: session.deviceCode,
       client_id: XAI_CLIENT_ID,
     }).toString(),
+    ...(options.signal ? { signal: options.signal } : {}),
   });
   const data = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string };
   if (data.error === "authorization_pending" || data.error === "slow_down") return {};
@@ -382,11 +482,27 @@ export async function pollOAuth(id: string, authPath: string, accountsPath?: str
     refresh: data.refresh_token,
     expires: Date.now() + (data.expires_in ?? 3600) * 1000,
   }, accountsPath);
-  pending.delete(id);
+  deletePending(id, options.statePath);
   return { done: true };
 }
 
 const REFRESH_SKEW_MS = 60_000;
+const refreshFlights = new Map<string, Promise<string | undefined>>();
+
+function runRefresh(key: string, task: () => Promise<string | undefined>): Promise<string | undefined> {
+  const running = refreshFlights.get(key);
+  if (running) return running;
+  let pending: Promise<string | undefined>;
+  pending = task().finally(() => {
+    if (refreshFlights.get(key) === pending) refreshFlights.delete(key);
+  });
+  refreshFlights.set(key, pending);
+  return pending;
+}
+
+function refreshKey(sourceKey: string, refresh: string | undefined, access: string | undefined): string {
+  return `${sourceKey}:${refresh ?? access ?? "empty"}`;
+}
 
 function oauthString(entry: Record<string, unknown>, name: string): string | undefined {
   const value = entry[name];
@@ -397,12 +513,14 @@ async function requestRefresh(
   provider: string,
   refresh: string,
   fetchImpl: typeof fetch,
+  signal?: AbortSignal,
 ): Promise<{ access: string; refresh?: string; expiresIn?: number } | undefined> {
   if (provider === "anthropic") {
     const response = await fetchImpl("https://console.anthropic.com/v1/oauth/token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ grant_type: "refresh_token", refresh_token: refresh, client_id: CLAUDE_CLIENT_ID }),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) return undefined;
     const data = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
@@ -414,6 +532,7 @@ async function requestRefresh(
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: OPENAI_CLIENT_ID }).toString(),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) return undefined;
     const data = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
@@ -425,6 +544,7 @@ async function requestRefresh(
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
       body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: XAI_CLIENT_ID }).toString(),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) return undefined;
     const data = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
@@ -440,6 +560,7 @@ async function requestRefresh(
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams(secret ? { ...params, client_secret: secret } : params).toString(),
+        ...(signal ? { signal } : {}),
       });
       if (!response.ok) continue;
       const data = (await response.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
@@ -454,22 +575,50 @@ export async function refreshOAuthToken(
   authPath: string,
   fetchImpl: typeof fetch = fetch,
   force = false,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
-  if (provider === "anthropic") {
-    const code = readClaudeCodeOauth();
-    if (code?.access) {
-      if (code.expires && Date.now() < code.expires - REFRESH_SKEW_MS) return code.access;
-      if (!code.refresh) return code.access;
-      const tokens = await requestRefresh(provider, code.refresh, fetchImpl).catch(() => undefined);
-      if (!tokens) return code.access;
-      writeClaudeCodeOauth({
-        access: tokens.access,
-        refresh: tokens.refresh ?? code.refresh,
-        expires: Date.now() + (tokens.expiresIn ?? 3600) * 1000,
-      });
-      return tokens.access;
+  const keychain = provider === "anthropic" ? readClaudeCodeOauth() : undefined;
+  const authEntry = readAuthFile(authPath)[provider];
+  const auth = authEntry && typeof authEntry === "object" && !Array.isArray(authEntry)
+    ? authEntry as Record<string, unknown>
+    : undefined;
+  const sourceKey = keychain?.access ? "keychain:anthropic" : `auth:${provider}`;
+  const refresh = keychain?.refresh ?? (typeof auth?.refresh === "string" ? auth.refresh : undefined);
+  const access = keychain?.access ?? (typeof auth?.access === "string" ? auth.access : undefined);
+  return runRefresh(refreshKey(sourceKey, refresh, access), async () => {
+    if (provider === "anthropic") {
+      const refreshedKeychain = await refreshClaudeCodeToken(fetchImpl, force, signal);
+      if (refreshedKeychain) return refreshedKeychain;
     }
-  }
+    return refreshAuthFileToken(provider, authPath, fetchImpl, force, signal);
+  });
+}
+
+async function refreshClaudeCodeToken(fetchImpl: typeof fetch, force = false, signal?: AbortSignal): Promise<string | undefined> {
+  const code = readClaudeCodeOauth();
+  if (!code?.access) return undefined;
+  if (!force && code.expires && Date.now() < code.expires - REFRESH_SKEW_MS) return code.access;
+  if (!code.refresh) return code.access;
+  const tokens = await requestRefresh("anthropic", code.refresh, fetchImpl, signal).catch((error) => {
+    if (signal?.aborted) throw error;
+    return undefined;
+  });
+  if (!tokens) return code.access;
+  writeClaudeCodeOauth({
+    access: tokens.access,
+    refresh: tokens.refresh ?? code.refresh,
+    expires: Date.now() + (tokens.expiresIn ?? 3600) * 1000,
+  });
+  return tokens.access;
+}
+
+async function refreshAuthFileToken(
+  provider: string,
+  authPath: string,
+  fetchImpl: typeof fetch,
+  force = false,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   const raw = readAuthFile(authPath)[provider];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const entry = raw as Record<string, unknown>;
@@ -479,7 +628,10 @@ export async function refreshOAuthToken(
   const expires = typeof entry.expires === "number" ? entry.expires : 0;
   if (!force && access && expires && Date.now() < expires - REFRESH_SKEW_MS) return access;
   if (!refresh) return access;
-  const tokens = await requestRefresh(provider, refresh, fetchImpl).catch(() => undefined);
+  const tokens = await requestRefresh(provider, refresh, fetchImpl, signal).catch((error) => {
+    if (signal?.aborted) throw error;
+    return undefined;
+  });
   if (!tokens) return access;
   writeAuthEntry(authPath, provider, {
     ...entry,
@@ -492,22 +644,29 @@ export async function refreshOAuthToken(
 
 export async function refreshAccountToken(
   account: ResolvedAccount,
-  opts: { authPath: string; accountsPath?: string; fetchImpl?: typeof fetch; force?: boolean },
+  opts: { authPath: string; accountsPath?: string; fetchImpl?: typeof fetch; force?: boolean; signal?: AbortSignal },
 ): Promise<string | undefined> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   if (account.type !== "oauth") return account.token;
-  if (account.source !== "extra") return (await refreshOAuthToken(account.provider, opts.authPath, fetchImpl, opts.force)) ?? account.token;
-  if (!opts.accountsPath || !account.refresh) return account.token;
-  if (!opts.force && account.expires && Date.now() < account.expires - REFRESH_SKEW_MS) return account.token;
-  const tokens = await requestRefresh(account.provider, account.refresh, fetchImpl).catch(() => undefined);
-  if (!tokens) return account.token;
-  const expires = Date.now() + (tokens.expiresIn ?? 3600) * 1000;
-  updateExtraAccount(opts.accountsPath, account.id, {
-    access: tokens.access,
-    refresh: tokens.refresh ?? account.refresh,
-    expires,
+  const sourceKey = account.sourceKey ?? `${account.source}:${account.id}`;
+  return runRefresh(refreshKey(sourceKey, account.refresh, account.token), async () => {
+    if (account.source === "keychain") return (await refreshClaudeCodeToken(fetchImpl, opts.force, opts.signal)) ?? account.token;
+    if (account.source === "auth") return (await refreshAuthFileToken(account.provider, opts.authPath, fetchImpl, opts.force, opts.signal)) ?? account.token;
+    if (!opts.accountsPath || !account.refresh) return account.token;
+    if (!opts.force && account.expires && Date.now() < account.expires - REFRESH_SKEW_MS) return account.token;
+    const tokens = await requestRefresh(account.provider, account.refresh, fetchImpl, opts.signal).catch((error) => {
+      if (opts.signal?.aborted) throw error;
+      return undefined;
+    });
+    if (!tokens) return account.token;
+    const expires = Date.now() + (tokens.expiresIn ?? 3600) * 1000;
+    updateExtraAccount(opts.accountsPath, account.id, {
+      access: tokens.access,
+      refresh: tokens.refresh ?? account.refresh,
+      expires,
+    });
+    return tokens.access;
   });
-  return tokens.access;
 }
 
 export const CONNECT_PROVIDERS: Record<string, { label: string; consoleUrl: string; oauth: boolean; authId: string }> = {

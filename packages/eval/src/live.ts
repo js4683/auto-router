@@ -1,9 +1,13 @@
 import { runChecks } from "./checks.js";
-import { calculateCost, compositeQuality, evaluateQualityGate } from "./metrics.js";
+import { calculateCost, compositeQuality, evaluateQualityGate, evaluateVersionedQualityGate } from "./metrics.js";
+import { terminalStateFromStatus } from "@auto-router/router-core";
 import type {
   EvalDatasetV1,
+  EvalCostLedger,
   EvalMessage,
   EvalTurnV1,
+  EvalRetryRecord,
+  GroupedQualityCaseScore,
   EvalUsage,
   LiveCallPlan,
   LiveCaseResult,
@@ -43,6 +47,45 @@ export interface CompletionRequest {
 export interface JudgeCaseInput {
   id: string;
   rubric: string;
+}
+
+export interface JudgeResult {
+  scores: Record<string, number>;
+  usage?: EvalUsage;
+  attempts: number;
+  retries: EvalRetryRecord[];
+}
+
+class LiveRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly retries: EvalRetryRecord[] = [],
+    readonly usage?: EvalUsage,
+  ) {
+    super(message);
+  }
+}
+
+function retriesFor(output: LiveOutput): EvalRetryRecord[] {
+  return output.retries ?? [];
+}
+
+export function liveRequestFailure(error: unknown): { status?: number; retries: EvalRetryRecord[]; usage?: EvalUsage } {
+  if (error instanceof LiveRequestError) return { status: error.status, retries: error.retries, usage: error.usage };
+  return { retries: [] };
+}
+
+function emptyUsage(): EvalUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+}
+
+function addUsage(target: EvalUsage, source: EvalUsage | undefined): void {
+  if (!source) return;
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadInputTokens += source.cacheReadInputTokens;
+  target.cacheWriteInputTokens += source.cacheWriteInputTokens;
 }
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -180,10 +223,7 @@ function parseUsage(value: any): EvalUsage | undefined {
 }
 
 function outputTerminalState(payload: any, finishReason: unknown): LiveOutput["terminalState"] {
-  if (payload?.status === "failed" || payload?.status === "cancelled" || finishReason === "content_filter") return "failed";
-  if (["incomplete", "in_progress", "queued"].includes(String(payload?.status)) || finishReason === "length") return "incomplete";
-  if (payload?.status === "completed" || ["stop", "tool_calls", "function_call"].includes(String(finishReason))) return "completed";
-  return "incomplete";
+  return terminalStateFromStatus(payload?.status, finishReason);
 }
 
 function parseOutput(raw: string): LiveOutput {
@@ -197,7 +237,11 @@ function parseOutput(raw: string): LiveOutput {
   const toolCalls = Array.isArray(message?.tool_calls)
     ? message.tool_calls
         .filter((call: any) => typeof call?.function?.name === "string")
-        .map((call: any) => ({ name: call.function.name, arguments: parseArguments(call.function.arguments) }))
+        .map((call: any) => ({
+          ...(typeof call.id === "string" && call.id ? { id: call.id } : {}),
+          name: call.function.name,
+          arguments: parseArguments(call.function.arguments),
+        }))
     : [];
   if (typeof message?.content !== "string" && !toolCalls.length) throw new Error("provider response is missing assistant content");
   const finishReason = payload?.choices?.[0]?.finish_reason;
@@ -207,6 +251,7 @@ function parseOutput(raw: string): LiveOutput {
     toolCalls,
     terminalState: outputTerminalState(payload, finishReason),
     ...(usage ? { usage } : {}),
+    ...(typeof payload?.model === "string" && payload.model ? { runtimeModelId: payload.model } : {}),
   };
 }
 
@@ -246,13 +291,21 @@ function parseResponsesOutput(raw: string): LiveOutput {
     throw new Error("provider returned invalid JSON");
   }
   const text = responsesText(payload);
-  if (text === undefined) throw new Error("provider response is missing assistant content");
+  const toolCalls = (Array.isArray(payload?.output) ? payload.output : [])
+    .filter((item: any) => item?.type === "function_call" && typeof item.name === "string")
+    .map((item: any, index: number) => ({
+      id: item.call_id ?? item.id ?? `call_${index}`,
+      name: item.name,
+      arguments: parseArguments(item.arguments ?? "{}"),
+    }));
+  if (text === undefined && !toolCalls.length) throw new Error("provider response is missing assistant content");
   const usage = parseResponsesUsage(payload?.usage);
   return {
-    text,
-    toolCalls: [],
+    text: text ?? "",
+    toolCalls,
     terminalState: outputTerminalState(payload, undefined),
     ...(usage ? { usage } : {}),
+    ...(typeof payload?.model === "string" && payload.model ? { runtimeModelId: payload.model } : {}),
   };
 }
 
@@ -289,6 +342,7 @@ export async function requestCompletion(
   if (new URL(url).hostname === "generativelanguage.googleapis.com") {
     headers["x-goog-api-key"] = config.apiKey;
   }
+  const retries: EvalRetryRecord[] = [];
   for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
     let response: Response;
     try {
@@ -300,29 +354,45 @@ export async function requestCompletion(
         signal: AbortSignal.timeout(config.timeoutMs),
       });
     } catch (error) {
-      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) throw new Error("provider request timed out");
-      throw new Error("provider request failed");
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new LiveRequestError("provider request timed out", undefined, retries);
+      }
+      throw new LiveRequestError("provider request failed", undefined, retries);
     }
     const raw = await readBounded(response);
-    if (response.ok) return transport === "responses" ? parseResponsesOutput(raw) : parseOutput(raw);
-    if (!RETRYABLE_HTTP_STATUSES.has(response.status) || isDailyQuotaExhausted(raw) || attempt === retry.maxAttempts) {
-      throw new Error(`provider returned HTTP ${response.status}`);
+    if (response.ok) {
+      try {
+        const output = transport === "responses" ? parseResponsesOutput(raw) : parseOutput(raw);
+        return retries.length ? { ...output, retries } : output;
+      } catch (error) {
+        let usage: EvalUsage | undefined;
+        try {
+          const payload = JSON.parse(raw);
+          usage = transport === "responses" ? parseResponsesUsage(payload?.usage) : parseUsage(payload?.usage);
+        } catch {}
+        throw new LiveRequestError(error instanceof Error ? error.message : "provider response is invalid", undefined, retries, usage);
+      }
     }
-    await wait(retryDelayMs(response, raw, attempt, retry));
+    if (!RETRYABLE_HTTP_STATUSES.has(response.status) || isDailyQuotaExhausted(raw) || attempt === retry.maxAttempts) {
+      throw new LiveRequestError(`provider returned HTTP ${response.status}`, response.status, retries);
+    }
+    const delayMs = retryDelayMs(response, raw, attempt, retry);
+    retries.push({ operation: "completion", attempt, delayMs, status: response.status });
+    await wait(delayMs);
   }
   throw new Error("provider retry attempts exhausted");
 }
 
 const JUDGE_LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-export async function judgeLabeledOutputs(
+export async function judgeLabeledOutputsDetailed(
   id: string,
   rubric: string,
   outputs: Array<{ id: string; output: LiveOutput }>,
   config: JudgeClientConfig,
   fetchImpl?: typeof fetch,
   transport: LiveTransport = "chat"
-): Promise<Record<string, number>> {
+): Promise<JudgeResult> {
   if (outputs.length < 2 || outputs.length > 26) throw new Error("judge outputs must contain between 2 and 26 items");
   const labels = [...JUDGE_LABELS.slice(0, outputs.length)];
   const shuffled = shuffleLabeled(outputs, id);
@@ -352,11 +422,53 @@ export async function judgeLabeledOutputs(
     fetchImpl,
     transport
   );
-  if (judged.terminalState !== "completed") throw new Error(`judge response terminal state is ${judged.terminalState}`);
-  const scores = parseJudgeScores(judged.text, labels);
-  const result: Record<string, number> = {};
-  for (const label of labels) result[mapping[label]] = scores[label] / 100;
-  return result;
+  if (judged.terminalState !== "completed") {
+    throw new LiveRequestError(`judge response terminal state is ${judged.terminalState}`, undefined, retriesFor(judged), judged.usage);
+  }
+  let labelScores: Record<string, number>;
+  try {
+    labelScores = parseJudgeScores(judged.text, labels);
+  } catch (error) {
+    throw new LiveRequestError(error instanceof Error ? error.message : "judge response is invalid", undefined, retriesFor(judged), judged.usage);
+  }
+  const scores: Record<string, number> = {};
+  for (const label of labels) scores[mapping[label]] = labelScores[label] / 100;
+  return {
+    scores,
+    ...(judged.usage ? { usage: judged.usage } : {}),
+    attempts: (judged.retries?.length ?? 0) + 1,
+    retries: retriesFor(judged),
+  };
+}
+
+async function judgeOutputsDetailed(
+  input: JudgeCaseInput,
+  outputs: Record<StrategyName, LiveOutput>,
+  config: JudgeClientConfig,
+  fetchImpl: typeof fetch = fetch,
+  transport: LiveTransport = "chat"
+): Promise<JudgeResult> {
+  const names: StrategyName[] = ["router", "always-frontier", "always-cheap"];
+  const scored = await judgeLabeledOutputsDetailed(
+    input.id,
+    input.rubric,
+    names.map((name) => ({ id: name, output: outputs[name] })),
+    config,
+    fetchImpl,
+    transport
+  );
+  return scored;
+}
+
+export async function judgeLabeledOutputs(
+  id: string,
+  rubric: string,
+  outputs: Array<{ id: string; output: LiveOutput }>,
+  config: JudgeClientConfig,
+  fetchImpl?: typeof fetch,
+  transport: LiveTransport = "chat",
+): Promise<Record<string, number>> {
+  return (await judgeLabeledOutputsDetailed(id, rubric, outputs, config, fetchImpl, transport)).scores;
 }
 
 export async function judgeOutputs(
@@ -366,19 +478,11 @@ export async function judgeOutputs(
   fetchImpl: typeof fetch = fetch,
   transport: LiveTransport = "chat"
 ): Promise<Record<StrategyName, number>> {
-  const names: StrategyName[] = ["router", "always-frontier", "always-cheap"];
-  const scored = await judgeLabeledOutputs(
-    input.id,
-    input.rubric,
-    names.map((name) => ({ id: name, output: outputs[name] })),
-    config,
-    fetchImpl,
-    transport
-  );
+  const scored = await judgeOutputsDetailed(input, outputs, config, fetchImpl, transport);
   return {
-    router: scored.router,
-    "always-frontier": scored["always-frontier"],
-    "always-cheap": scored["always-cheap"],
+    router: scored.scores.router,
+    "always-frontier": scored.scores["always-frontier"],
+    "always-cheap": scored.scores["always-cheap"],
   };
 }
 
@@ -439,8 +543,14 @@ function selectionMap(replay: ReplayResult, strategy: StrategyName): Map<string,
   return new Map(replay.strategies[strategy].turns.map((turn) => [turnKey(turn.sessionId, turn.turnId), turn]));
 }
 
-function liveTurns(dataset: EvalDatasetV1): Array<{ sessionId: string; turn: EvalTurnV1 }> {
-  return dataset.sessions.flatMap((session) => session.turns.map((turn) => ({ sessionId: session.id, turn })));
+function liveTurns(dataset: EvalDatasetV1): Array<{ sessionId: string; sessionGroupId: string; cohort: string; turn: EvalTurnV1 }> {
+  const defaultCohort = dataset.provenance?.collectionOrigin ?? "unclassified";
+  return dataset.sessions.flatMap((session) => session.turns.map((turn) => ({
+    sessionId: session.id,
+    sessionGroupId: session.sessionGroupId ?? session.id,
+    cohort: session.cohort ?? defaultCohort,
+    turn,
+  })));
 }
 
 export function planLiveEvaluation(dataset: EvalDatasetV1, replay: ReplayResult): LiveCallPlan {
@@ -468,10 +578,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "live evaluation failed";
 }
 
+function costLedger(
+  candidateGeneration: EvalUsage,
+  judge: EvalUsage,
+  failedAttempts: EvalCostLedger["failedAttempts"],
+  retries: EvalRetryRecord[],
+): EvalCostLedger {
+  return { candidateGeneration, judge, embedding: emptyUsage(), failedAttempts, retries };
+}
+
 async function generateCase(
   dataset: EvalDatasetV1,
   replay: ReplayResult,
   sessionId: string,
+  sessionGroupId: string,
+  cohort: string,
   turn: EvalTurnV1,
   config: JudgeClientConfig,
   fetchImpl: typeof fetch
@@ -482,26 +603,46 @@ async function generateCase(
     ReplayTurnResult
   >;
   const settled: PromiseSettledResult<LiveOutput>[] = [];
+  const candidateGeneration = emptyUsage();
+  const failedAttempts: EvalCostLedger["failedAttempts"] = [];
+  const retries: EvalRetryRecord[] = [];
   const gapMs = Number(process.env.AUTO_ROUTER_EVAL_GAP_MS ?? 0);
   for (const strategy of STRATEGIES) {
     if (gapMs > 0 && settled.length) await new Promise((resolve) => setTimeout(resolve, gapMs));
     try {
-      settled.push({
-        status: "fulfilled",
-        value: await requestCompletion(
-          { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
-          config,
-          fetchImpl,
-          liveTransportFor(dataset, selections[strategy].modelId)
-        ),
-      });
+      const output = await requestCompletion(
+        { model: dataset.liveModelAliases![selections[strategy].modelId], messages: turn.messages! },
+        config,
+        fetchImpl,
+        liveTransportFor(dataset, selections[strategy].modelId)
+      );
+      const requestedModel = dataset.liveModelAliases![selections[strategy].modelId];
+      if (output.runtimeModelId && output.runtimeModelId !== requestedModel) {
+        throw new LiveRequestError(
+          `runtime identity mismatch: requested ${requestedModel}, provider returned ${output.runtimeModelId}`,
+          undefined,
+          retriesFor(output),
+          output.usage,
+        );
+      }
+      addUsage(candidateGeneration, output.usage);
+      retries.push(...retriesFor(output));
+      settled.push({ status: "fulfilled", value: output });
     } catch (reason) {
+      const failure = liveRequestFailure(reason);
+      addUsage(candidateGeneration, failure.usage);
+      failedAttempts.push({
+        modelId: selections[strategy].modelId,
+        ...(failure.status === undefined ? {} : { status: failure.status }),
+        ...(failure.usage ? { usage: failure.usage } : {}),
+      });
+      retries.push(...failure.retries);
       settled.push({ status: "rejected", reason });
     }
   }
   const errors = settled.flatMap((result, index) => (result.status === "rejected" ? [`${STRATEGIES[index]}: ${errorMessage(result.reason)}`] : []));
-  const base = { id: key, sessionId, turnId: turn.id, weight: turn.weight ?? 1 };
-  if (errors.length) return { ...base, complete: false, errors };
+  const base = { id: key, sessionId, sessionGroupId, cohort, turnId: turn.id, weight: turn.weight ?? 1 };
+  if (errors.length) return { ...base, complete: false, errors, costs: costLedger(candidateGeneration, emptyUsage(), failedAttempts, retries) };
   const outputs = Object.fromEntries(settled.map((result, index) => [STRATEGIES[index], (result as PromiseFulfilledResult<LiveOutput>).value])) as Record<
     StrategyName,
     LiveOutput
@@ -509,19 +650,31 @@ async function generateCase(
   const terminalErrors = STRATEGIES.flatMap((strategy) =>
     outputs[strategy].terminalState === "completed" ? [] : [`${strategy}: generated output terminal state is ${outputs[strategy].terminalState}`]
   );
-  if (terminalErrors.length) return { ...base, complete: false, errors: terminalErrors };
-  let judged: Record<StrategyName, number>;
+  for (const strategy of STRATEGIES) {
+    if (outputs[strategy].terminalState !== "completed") {
+      failedAttempts.push({ modelId: selections[strategy].modelId, ...(outputs[strategy].usage ? { usage: outputs[strategy].usage } : {}) });
+    }
+  }
+  if (terminalErrors.length) return { ...base, complete: false, errors: terminalErrors, costs: costLedger(candidateGeneration, emptyUsage(), failedAttempts, retries) };
+  let judged: JudgeResult;
   try {
     if (gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
-    judged = await judgeOutputs({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl, liveTransportFor(dataset));
+    judged = await judgeOutputsDetailed({ id: key, rubric: turn.judgeRubric! }, outputs, config, fetchImpl, liveTransportFor(dataset));
   } catch (error) {
-    return { ...base, complete: false, errors: [`judge: ${errorMessage(error)}`] };
+    const failure = liveRequestFailure(error);
+    failedAttempts.push({
+      modelId: config.judgeModel,
+      ...(failure.status === undefined ? {} : { status: failure.status }),
+      ...(failure.usage ? { usage: failure.usage } : {}),
+    });
+    retries.push(...failure.retries);
+    return { ...base, complete: false, errors: [`judge: ${errorMessage(error)}`], costs: costLedger(candidateGeneration, emptyUsage(), failedAttempts, retries) };
   }
   const liveChecks = (turn.checks ?? []).filter((check) => check.type !== "recorded-outcome");
   const scores = Object.fromEntries(
     STRATEGIES.map((strategy) => {
       const deterministic = runChecks(outputs[strategy], liveChecks);
-      return [strategy, { deterministic, judge: judged[strategy], composite: compositeQuality(deterministic, judged[strategy]) }];
+       return [strategy, { deterministic, judge: judged.scores[strategy], composite: compositeQuality(deterministic, judged.scores[strategy]) }];
     })
   ) as LiveCaseResult["scores"];
   const usage = Object.fromEntries(
@@ -534,7 +687,41 @@ async function generateCase(
       return strategyUsage && price ? [[strategy, calculateCost(strategyUsage, price)]] : [];
     })
   ) as LiveCaseResult["observedCostUsd"];
-  return { ...base, complete: true, scores, usage, observedCostUsd, errors: [] };
+  retries.push(...judged.retries);
+  const costs = costLedger(candidateGeneration, judged.usage ?? emptyUsage(), failedAttempts, retries);
+  return {
+    ...base,
+    complete: true,
+    scores,
+    usage,
+    observedCostUsd,
+    costEvidenceComplete: Boolean(judged.usage && STRATEGIES.every((strategy) => outputs[strategy].usage)),
+    errors: [],
+    costs,
+  };
+}
+
+function versionedQualityInput(dataset: EvalDatasetV1, cases: LiveCaseResult[]): { overall: GroupedQualityCaseScore[]; cohorts: Record<string, GroupedQualityCaseScore[]>; criticalCohorts?: string[]; incompleteCases: number } {
+  const overall: GroupedQualityCaseScore[] = [];
+  const cohorts: Record<string, GroupedQualityCaseScore[]> = {};
+  let incompleteCases = 0;
+  for (const item of cases) {
+    if (!item.complete || !item.scores || !item.costEvidenceComplete) {
+      incompleteCases += 1;
+      continue;
+    }
+    const observation: GroupedQualityCaseScore = {
+      groupId: item.sessionGroupId ?? item.sessionId,
+      cohort: item.cohort ?? dataset.provenance?.collectionOrigin ?? "unclassified",
+      routerScore: item.scores.router.composite,
+      frontierScore: item.scores["always-frontier"].composite,
+      weight: item.weight,
+    };
+    overall.push(observation);
+    (cohorts[observation.cohort] ??= []).push(observation);
+  }
+  const criticalCohorts = dataset.provenance?.collectionOrigin ? [dataset.provenance.collectionOrigin] : undefined;
+  return { overall, cohorts, ...(criticalCohorts ? { criticalCohorts } : {}), incompleteCases };
 }
 
 export async function runLiveEvaluation(
@@ -546,14 +733,19 @@ export async function runLiveEvaluation(
   const plan = planLiveEvaluation(dataset, replay);
   const cases: LiveCaseResult[] = [];
   const gapMs = Number(process.env.AUTO_ROUTER_EVAL_GAP_MS ?? 0);
-  for (const { sessionId, turn } of liveTurns(dataset)) {
+  for (const { sessionId, sessionGroupId, cohort, turn } of liveTurns(dataset)) {
     if (gapMs > 0 && cases.length) await new Promise((resolve) => setTimeout(resolve, gapMs));
-    cases.push(await generateCase(dataset, replay, sessionId, turn, config, fetchImpl));
+    cases.push(await generateCase(dataset, replay, sessionId, sessionGroupId, cohort, turn, config, fetchImpl));
   }
   const qualityCases = cases.flatMap((item) =>
     item.complete && item.scores
       ? [{ routerScore: item.scores.router.composite, frontierScore: item.scores["always-frontier"].composite, weight: item.weight }]
       : []
   );
-  return { plan, cases, qualityGate: evaluateQualityGate(qualityCases) };
+  return {
+    plan,
+    cases,
+    qualityGate: evaluateQualityGate(qualityCases),
+    versionedQualityGate: evaluateVersionedQualityGate(versionedQualityInput(dataset, cases)),
+  };
 }

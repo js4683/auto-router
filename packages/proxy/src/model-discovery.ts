@@ -1,4 +1,4 @@
-import type { Catalog, ModelEntry } from "@auto-router/router-core";
+import type { Catalog, ModelEntry, RoutingCapability, RoutingTransport } from "@auto-router/router-core";
 import { createHash } from "node:crypto";
 import { antigravityUserAgent, ensureGoogleProject } from "./oauth.js";
 
@@ -77,7 +77,7 @@ export function parseAntigravityModels(payload: unknown): DiscoveredModel[] {
 
 export interface ModelDiscoveryAdapter {
   readonly provider: string;
-  discover(account: DiscoveryAccount, fetchImpl: typeof fetch): Promise<readonly DiscoveredModel[]>;
+  discover(account: DiscoveryAccount, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<readonly DiscoveredModel[]>;
 }
 
 export interface DiscoverySnapshot {
@@ -159,6 +159,16 @@ function providerModel(model: ModelEntry, provider: string): boolean {
   return providerOfModel(model) === provider;
 }
 
+function routingCapabilities(model: DiscoveredModel): readonly RoutingCapability[] {
+  return [...new Set(model.capabilities.flatMap((capability) => capability === "image" ? ["vision" as const] : [capability]))];
+}
+
+function routingTransports(provider: string): readonly RoutingTransport[] {
+  if (provider === "anthropic") return ["anthropic"];
+  if (provider === "opencode") return ["responses"];
+  return ["chat", "responses"];
+}
+
 export class ModelDiscoveryManager {
   private readonly adapters: ReadonlyMap<string, ModelDiscoveryAdapter>;
   private readonly maxAgeMs: number;
@@ -179,13 +189,14 @@ export class ModelDiscoveryManager {
     accounts: ReadonlyMap<string, readonly DiscoveryAccount[]>,
     requiredCapabilities: readonly DiscoveryCapability[],
     fetchImplByProvider: ReadonlyMap<string, typeof fetch> = new Map(),
+    signal?: AbortSignal,
   ): Promise<Catalog> {
     let prepared = catalog;
     for (const [provider, adapter] of this.adapters) {
       const snapshots: DiscoverySnapshot[] = [];
       const accountList = accounts.get(provider) ?? [];
       for (const account of accountList) {
-        const snapshot = await this.loadSnapshot(adapter, account, fetchImplByProvider.get(provider) ?? fetch);
+        const snapshot = await this.loadSnapshot(adapter, account, fetchImplByProvider.get(provider) ?? fetch, signal);
         if (snapshot) snapshots.push(snapshot);
       }
       this.states.set(provider, snapshots);
@@ -212,6 +223,7 @@ export class ModelDiscoveryManager {
     adapter: ModelDiscoveryAdapter,
     account: DiscoveryAccount,
     fetchImpl: typeof fetch,
+    signal?: AbortSignal,
   ): Promise<DiscoverySnapshot | undefined> {
     const key = `${adapter.provider}:${account.id}`;
     const currentTime = this.now();
@@ -247,7 +259,7 @@ export class ModelDiscoveryManager {
     if (running) return running;
     const request = (async () => {
       try {
-        const models = (await adapter.discover(account, fetchImpl)).map(normalizedDiscoveredModel).filter((model): model is DiscoveredModel => Boolean(model));
+        const models = (await adapter.discover(account, fetchImpl, signal)).map(normalizedDiscoveredModel).filter((model): model is DiscoveredModel => Boolean(model));
         if (!models.length) throw new Error("provider discovery returned no usable models");
         const fetchedAt = this.now();
         this.cache.set(key, { fingerprint, models, projectId: account.projectId, fetchedAt });
@@ -298,8 +310,12 @@ export class ModelDiscoveryManager {
     const retained = existingProvider.flatMap((model) => {
       const match = [...discovered.values()].find((discoveredModel) => matchesDiscovered(provider, model.id, discoveredModel.id));
       if (!match) return [];
-      if (!match.contextTokens || match.contextTokens === model.windowTokens) return [model];
-      return [{ ...model, windowTokens: match.contextTokens }];
+      return [{
+        ...model,
+        capabilities: routingCapabilities(match),
+        transports: routingTransports(provider),
+        ...(match.contextTokens && match.contextTokens !== model.windowTokens ? { windowTokens: match.contextTokens } : {}),
+      }];
     });
     const additions = [...discovered.values()]
       .filter((model) => !existingProvider.some((entry) => matchesDiscovered(provider, entry.id, model.id)))
@@ -321,10 +337,10 @@ function accountFingerprint(account: DiscoveryAccount): string {
 
 export const googleModelDiscovery: ModelDiscoveryAdapter = {
   provider: "google",
-  async discover(account, fetchImpl) {
+  async discover(account, fetchImpl, signal) {
     let project = account.projectId;
     if (!project) {
-      project = await ensureGoogleProject(account.token, fetchImpl).catch(() => undefined);
+      project = await ensureGoogleProject(account.token, fetchImpl, signal).catch(() => undefined);
       if (project) account.projectId = project;
     }
     const response = await fetchImpl(ANTIGRAVITY_MODELS_URL, {
@@ -336,6 +352,7 @@ export const googleModelDiscovery: ModelDiscoveryAdapter = {
         "user-agent": antigravityUserAgent(),
       },
       body: JSON.stringify(project ? { project } : {}),
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) throw new Error(`Google model discovery failed (${response.status})`);
     let payload: unknown;
@@ -361,5 +378,7 @@ export function discoveredModelEntry(provider: string, model: DiscoveredModel): 
     value: codingIndex / blendedPrice,
     windowTokens: model.contextTokens ?? 128000,
     isFree: false,
+    capabilities: routingCapabilities(model),
+    transports: routingTransports(provider),
   };
 }

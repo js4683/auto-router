@@ -2,6 +2,7 @@ import { chmodSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   embeddingEndpointDigest,
+  assertActivationProvenance,
   normalizeEmbeddingText,
   requestEmbeddings,
   resolveMappedModels,
@@ -12,11 +13,12 @@ import {
   type EmbeddingClientConfig,
   type RouterState,
 } from "@auto-router/router-core";
-import { avengersCorpusDigest, splitAvengersCorpus, type AvengersCorpusExampleV1, type AvengersCorpusV1 } from "./avengers-corpus.js";
-import { bootstrapRetentionInterval, qualityRetained, weightedMean } from "./metrics.js";
+import { avengersCorpusDigest, splitAvengersCorpus, type AvengersCorpusExampleV1, type AvengersCorpusV1, type AvengersOutcomeV1 } from "./avengers-corpus.js";
+import { bootstrapRetentionInterval, evaluateVersionedQualityGate, qualityRetained, weightedMean } from "./metrics.js";
 import { selectReplayRouterStep } from "./replay.js";
 import { modelRuntimeId, selectCheap, selectFrontier } from "./strategies.js";
-import type { EvalDatasetV1, EvalTurnV1 } from "./types.js";
+import type { EvalDatasetV1, EvalTurnV1, EvalUsage, GroupedQualityCaseScore, VersionedQualityGate } from "./types.js";
+import type { VersionedQualityGateV2 } from "@auto-router/router-core";
 
 export interface ValidateAvengersInput {
   corpus: AvengersCorpusV1;
@@ -43,12 +45,18 @@ export interface AvengersValidationReport {
 
 type StrategyName = "tier1" | "tier0" | "always-frontier" | "always-cheap";
 type WeightedObservation = { id: string; score: number; weight: number };
+type GroupedObservation = WeightedObservation & { groupId: string; cohort: string };
 
 function gate(passed: boolean, reason: string): { passed: boolean; reason: string } {
   return { passed, reason };
 }
 
-function emptyReport(artifact: AvengersProArtifactFiles, extra: Partial<AvengersProValidationV1["gates"]>, sampleIds: string[] = []): AvengersValidationReport {
+function emptyReport(
+  artifact: AvengersProArtifactFiles,
+  extra: Partial<AvengersProValidationV1["gates"]>,
+  sampleIds: string[] = [],
+  versionedReason = "not evaluated",
+): AvengersValidationReport {
   const gates: AvengersProValidationV1["gates"] = {
     sampleSize: gate(false, "not evaluated"),
     corpus: gate(true, "corpus digest matches"),
@@ -91,8 +99,24 @@ function emptyReport(artifact: AvengersProArtifactFiles, extra: Partial<Avengers
       qualityRetentionConfidenceInterval: null,
       gates,
       eligible: false,
+      ...(artifact.metadata.schemaVersion === 3
+        ? {
+            versionedQuality: {
+              gateVersion: 2,
+              passed: false,
+              reason: versionedReason,
+              lowerBound: null,
+              independentGroups: 0,
+              cohortResults: {},
+            } satisfies VersionedQualityGateV2,
+          }
+        : {}),
     },
   };
+}
+
+function toVersionedQuality(gate: VersionedQualityGate): VersionedQualityGateV2 {
+  return { gateVersion: 2, ...gate };
 }
 
 function datasetAdapter(corpus: AvengersCorpusV1): EvalDatasetV1 {
@@ -136,7 +160,39 @@ function aggregate(values: Array<{ score: number; weight: number }>): number | n
   return weightedMean(values);
 }
 
+function hasUsage(usage: EvalUsage): boolean {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadInputTokens + usage.cacheWriteInputTokens > 0;
+}
+
+function hasCompleteCostLedger(example: AvengersCorpusExampleV1): boolean {
+  if (!example.costs || !hasUsage(example.costs.candidateGeneration)) return false;
+  const needsJudge = example.outcomes.some((outcome) => outcome.qualitySource === "judge" || outcome.qualitySource === "composite");
+  return !needsJudge || hasUsage(example.costs.judge);
+}
+
+function hasProviderCost(outcome: AvengersOutcomeV1): boolean {
+  return outcome.usageSource === "provider" && outcome.costSource === "provider-usage" && outcome.usage !== undefined && outcome.costUsd !== undefined;
+}
+
 export async function validateAvengersArtifact(input: ValidateAvengersInput): Promise<AvengersValidationReport> {
+  if (input.artifact.metadata.schemaVersion === 3 && !input.corpus.provenance) {
+    return emptyReport(input.artifact, { corpus: gate(false, "provenance-bound artifact requires corpus provenance") }, [], "corpus provenance is missing");
+  }
+  if (input.corpus.provenance) {
+    if (input.artifact.metadata.schemaVersion !== 3) {
+      return emptyReport(input.artifact, { corpus: gate(false, "artifact is missing v3 provenance") }, [], "artifact is missing v3 provenance");
+    }
+    try {
+      assertActivationProvenance(input.artifact, {
+        ...input.corpus.provenance,
+        embeddingEndpointDigest: embeddingEndpointDigest(input.embedding.baseUrl),
+        embeddingModelRevision: input.embedding.revision ?? "unknown",
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "artifact provenance does not match";
+      return emptyReport(input.artifact, { corpus: gate(false, reason) }, [], reason);
+    }
+  }
   const digest = avengersCorpusDigest(input.corpus);
   if (digest !== input.artifact.metadata.corpusDigest) {
     return emptyReport(input.artifact, { corpus: gate(false, "artifact corpus digest does not match") });
@@ -152,7 +208,7 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
   const clock = input.now ?? (() => performance.now());
   const latencies: number[] = [];
   const cases: AvengersValidationReport["cases"] = [];
-  const quality: Record<StrategyName, WeightedObservation[]> = {
+  const quality: Record<StrategyName, GroupedObservation[]> = {
     tier1: [],
     tier0: [],
     "always-frontier": [],
@@ -171,7 +227,6 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
     groups.set(example.sessionGroupId, list);
   }
 
-  let network = true;
   for (const group of [...groups.values()].map((items) => items.sort((a, b) => a.sequence - b.sequence || (a.id < b.id ? -1 : 1)))) {
     let tier0State: RouterState = { currentModel: null, currentTier: null, downgradeCounter: 0 };
     let tier1State: RouterState = { currentModel: null, currentTier: null, downgradeCounter: 0 };
@@ -179,6 +234,14 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
     let previousMessage: string | undefined;
     for (const example of group) {
       const reasons: string[] = [];
+      if (input.corpus.provenance) {
+        if (!example.costs) reasons.push("missing cost ledger");
+        else if (!hasCompleteCostLedger(example)) reasons.push("cost ledger is incomplete");
+        for (const outcome of example.outcomes) {
+          if (outcome.terminalState !== "completed" || outcome.contentTruncated) reasons.push(`candidate ${outcome.paperModelId} outcome is incomplete`);
+          if (!hasProviderCost(outcome)) reasons.push(`candidate ${outcome.paperModelId} outcome is missing cost provenance`);
+        }
+      }
       const selectedRuntimeIds: AvengersValidationReport["cases"][number]["selectedRuntimeIds"] = {
         tier1: null,
         tier0: null,
@@ -190,23 +253,21 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
       if (missing.length) reasons.push("incomplete candidate matrix");
 
       let prediction: AvengersProPrediction | undefined;
-      if (network) {
-        const started = clock();
-        try {
-          const vectors = await requestEmbeddings(
-            [normalizeEmbeddingText(example.text, input.artifact.metadata.maxInputChars)],
-            input.embedding,
-            input.fetchImpl
-          );
-          latencies.push(clock() - started);
-          if (vectors[0].length !== input.artifact.metadata.embeddingDimensions) {
-            reasons.push("embedding dimension mismatch");
-          } else {
-            prediction = scoreAvengersPro(vectors[0], input.artifact);
-          }
-        } catch (error) {
-          reasons.push(error instanceof Error ? error.message : "embedding request failed");
+      const started = clock();
+      try {
+        const vectors = await requestEmbeddings(
+          [normalizeEmbeddingText(example.text, input.artifact.metadata.maxInputChars)],
+          input.embedding,
+          input.fetchImpl
+        );
+        latencies.push(clock() - started);
+        if (vectors[0].length !== input.artifact.metadata.embeddingDimensions) {
+          reasons.push("embedding dimension mismatch");
+        } else {
+          prediction = scoreAvengersPro(vectors[0], input.artifact);
         }
+      } catch (error) {
+        reasons.push(error instanceof Error ? error.message : "embedding request failed");
       }
 
       try {
@@ -240,9 +301,15 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
           continue;
         }
         if (outcome.terminalState !== "completed" || outcome.contentTruncated) reasons.push(`${name} outcome is incomplete`);
-        if (outcome.costUsd === undefined || !outcome.costSource) reasons.push(`${name} outcome is missing cost provenance`);
+        if (outcome.costUsd === undefined || !outcome.costSource || (input.corpus.provenance && !hasProviderCost(outcome))) reasons.push(`${name} outcome is missing cost provenance`);
         else {
-          quality[name].push({ id: example.id, score: outcome.quality, weight: example.weight });
+          quality[name].push({
+            id: example.id,
+            groupId: example.sessionGroupId,
+            cohort: input.corpus.provenance?.collectionOrigin ?? (input.corpus.synthetic ? "synthetic-fixture" : "unclassified"),
+            score: outcome.quality,
+            weight: example.weight,
+          });
           cost[name].push({ id: example.id, score: outcome.costUsd, weight: example.weight });
         }
       }
@@ -263,7 +330,9 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
   const frontierQualityById = new Map(quality["always-frontier"].map((item) => [item.id, item]));
   const pairedQuality = quality.tier1.flatMap((item) => {
     const frontier = frontierQualityById.get(item.id);
-    return frontier ? [{ routerScore: item.score, frontierScore: frontier.score, weight: item.weight }] : [];
+    return frontier
+      ? [{ routerScore: item.score, frontierScore: frontier.score, weight: item.weight, groupId: item.groupId, cohort: item.cohort }]
+      : [];
   });
   const interval = pairedQuality.length
     ? bootstrapRetentionInterval(pairedQuality, input.bootstrapSeed)
@@ -271,6 +340,17 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
   const sortedLatency = [...latencies].sort((a, b) => a - b);
   const p95 = sortedLatency.length ? sortedLatency[Math.ceil(0.95 * sortedLatency.length) - 1] : 0;
   const requiredCasesPassed = cases.length === sampleIds.length && cases.every((item) => item.complete);
+  const versionedInput = {
+    overall: pairedQuality as GroupedQualityCaseScore[],
+    cohorts: Object.fromEntries(
+      [...new Set(pairedQuality.map((item) => item.cohort))].map((cohort) => [cohort, pairedQuality.filter((item) => item.cohort === cohort)])
+    ),
+    ...(input.corpus.provenance ? { criticalCohorts: [input.corpus.provenance.collectionOrigin] } : {}),
+    incompleteCases: cases.filter((item) => !item.complete).length,
+  };
+  const versionedQuality = input.artifact.metadata.schemaVersion === 3
+    ? toVersionedQuality(evaluateVersionedQualityGate(versionedInput))
+    : undefined;
   const gates: AvengersProValidationV1["gates"] = {
     sampleSize: gate(sampleIds.length >= 30, sampleIds.length >= 30 ? "held-out sample is large enough" : "requires at least 30 complete held-out cases"),
     corpus: gate(true, "corpus digest matches"),
@@ -285,7 +365,7 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
     requiredCases: gate(requiredCasesPassed, requiredCasesPassed ? "required cases complete" : "required case incomplete"),
     synthetic: gate(!input.artifact.metadata.synthetic, input.artifact.metadata.synthetic ? "artifact is synthetic" : "artifact is not synthetic"),
   };
-  const eligible = Object.values(gates).every((item) => item.passed);
+  const eligible = Object.values(gates).every((item) => item.passed) && (!versionedQuality || versionedQuality.passed);
   return {
     schemaVersion: 1,
     artifactDigest: input.artifact.digest,
@@ -313,6 +393,7 @@ export async function validateAvengersArtifact(input: ValidateAvengersInput): Pr
       qualityRetentionConfidenceInterval: interval,
       gates,
       eligible,
+      ...(versionedQuality ? { versionedQuality } : {}),
     },
   };
 }

@@ -4,6 +4,11 @@ packages/*/dist/
 dist/
 .cache/
 *.log
+*.credentials.*
+*.secret.*
+.env
+.env.*
+!.env.example
 .opencode/plugins/*.js
 .opencode/plugins/*.js.map
 .opencode/plugins/*.d.ts
@@ -20,3 +25,5 @@ phase-4-validation.local.json
 phase-4-validation.local.md
 phase-4-source-manifest.local.json
 phase-4-*-source-manifest.local.json
+.eval-artifacts/
+.eval-cache/

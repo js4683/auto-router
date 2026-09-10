@@ -27,6 +27,8 @@ describe("catalog build", () => {
     const f = cat.models.find((m) => m.id === "free-model")!;
     expect(f.isFree).toBe(true);
     expect(a.windowTokens).toBe(128000);
+    expect(a.capabilities).toEqual(["text"]);
+    expect(a.transports).toEqual(["chat"]);
   });
 
   it("free join is case-insensitive", () => {
@@ -79,6 +81,8 @@ describe("catalog build", () => {
       runtimeId: "opencode/muse-spark-1.2-contributor-free",
       isFree: true,
       windowTokens: 1048576,
+      capabilities: ["text"],
+      transports: ["responses"],
     });
   });
 

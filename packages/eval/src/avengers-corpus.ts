@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Catalog, ModelMap, RouterConfig, SessionState, TaskType } from "@auto-router/router-core";
 import { validateDatasetRoutingSnapshot } from "./schema.js";
-import type { EvalPrice, EvalUsage, UsageSource } from "./types.js";
+import { canonicalDigest, policyDigest, validateEvalProvenance, type EvalProvenance } from "./provenance.js";
+import type { EvalCostLedger, EvalPrice, EvalUsage, UsageSource } from "./types.js";
 
 const MAX_EXAMPLES = 10_000;
 const MAX_OUTCOMES_PER_EXAMPLE = 64;
@@ -31,6 +32,7 @@ export interface AvengersCorpusExampleV1 {
   sessionState: SessionState;
   requiredCapabilities: string[];
   outcomes: AvengersOutcomeV1[];
+  costs?: EvalCostLedger;
 }
 
 export interface AvengersCorpusV1 {
@@ -45,6 +47,7 @@ export interface AvengersCorpusV1 {
     capabilities: Record<string, string[]>;
     modelMap: ModelMap;
   };
+  provenance?: EvalProvenance;
   examples: AvengersCorpusExampleV1[];
 }
 
@@ -100,6 +103,38 @@ function validateUsage(value: unknown, label: string): EvalUsage {
     throw new Error(`${label} cache token total must not exceed inputTokens`);
   }
   return parsed;
+}
+
+export function validateCostLedger(value: unknown, label = "costs"): EvalCostLedger {
+  const ledger = record(value, label);
+  const candidateGeneration = validateUsage(ledger.candidateGeneration, `${label}.candidateGeneration`);
+  const judge = validateUsage(ledger.judge, `${label}.judge`);
+  const embedding = validateUsage(ledger.embedding, `${label}.embedding`);
+  const failedAttempts = array(ledger.failedAttempts, `${label}.failedAttempts`).map((raw, index) => {
+    const attempt = record(raw, `${label}.failedAttempts[${index}]`);
+    const modelId = nonEmptyString(attempt.modelId, `${label}.failedAttempts[${index}].modelId`);
+    if (attempt.status !== undefined) nonNegativeNumber(attempt.status, `${label}.failedAttempts[${index}].status`);
+    if (attempt.usage !== undefined) validateUsage(attempt.usage, `${label}.failedAttempts[${index}].usage`);
+    return {
+      modelId,
+      ...(attempt.status === undefined ? {} : { status: attempt.status as number }),
+      ...(attempt.usage === undefined ? {} : { usage: validateUsage(attempt.usage, `${label}.failedAttempts[${index}].usage`) }),
+    };
+  });
+  const retries = array(ledger.retries, `${label}.retries`).map((raw, index) => {
+    const retry = record(raw, `${label}.retries[${index}]`);
+    const operation = nonEmptyString(retry.operation, `${label}.retries[${index}].operation`);
+    const attempt = nonNegativeNumber(retry.attempt, `${label}.retries[${index}].attempt`);
+    const delayMs = nonNegativeNumber(retry.delayMs, `${label}.retries[${index}].delayMs`);
+    if (retry.status !== undefined) nonNegativeNumber(retry.status, `${label}.retries[${index}].status`);
+    return {
+      operation,
+      attempt,
+      delayMs,
+      ...(retry.status === undefined ? {} : { status: retry.status as number }),
+    };
+  });
+  return { candidateGeneration, judge, embedding, failedAttempts, retries };
 }
 
 function validateOutcome(value: unknown, label: string, knownRuntimeIds: Set<string>): AvengersOutcomeV1 {
@@ -167,6 +202,7 @@ function validateExample(value: unknown, index: number, candidatePaperModelIds: 
   if (example.taskType !== undefined) nonEmptyString(example.taskType, `${label}.taskType`);
   const sessionState = validateSessionState(example.sessionState);
   const requiredCapabilities = stringArray(example.requiredCapabilities, `${label}.requiredCapabilities`);
+  const costs = example.costs === undefined ? undefined : validateCostLedger(example.costs, `${label}.costs`);
 
   const rawOutcomes = array(example.outcomes, `${label}.outcomes`);
   if (rawOutcomes.length > MAX_OUTCOMES_PER_EXAMPLE) throw new Error(`${label}.outcomes must not exceed 64 entries`);
@@ -189,6 +225,7 @@ function validateExample(value: unknown, index: number, candidatePaperModelIds: 
     sessionState,
     requiredCapabilities,
     outcomes,
+    ...(costs ? { costs } : {}),
   };
 }
 
@@ -241,6 +278,14 @@ export function parseAvengersCorpus(value: unknown): AvengersCorpusV1 {
   const synthetic = boolean(corpus.synthetic, "corpus.synthetic");
   const candidatePaperModelIds = stringArray(corpus.candidatePaperModelIds, "corpus.candidatePaperModelIds");
   const { snapshot, knownRuntimeIds } = validateRoutingSnapshot(corpus.routingSnapshot);
+  const provenance = corpus.provenance === undefined ? undefined : validateEvalProvenance(corpus.provenance);
+  if (provenance) {
+    if (provenance.catalogDigest !== canonicalDigest(snapshot.catalog)) throw new Error("provenance catalog digest does not match corpus");
+    if (provenance.configDigest !== canonicalDigest(snapshot.config)) throw new Error("provenance config digest does not match corpus");
+    if (provenance.policyDigest !== policyDigest(snapshot.config)) throw new Error("provenance policy digest does not match corpus");
+    if (synthetic && provenance.collectionOrigin !== "synthetic-fixture") throw new Error("synthetic corpus provenance is invalid");
+    if (!synthetic && provenance.collectionOrigin === "synthetic-fixture") throw new Error("synthetic corpus cannot be labeled production");
+  }
 
   const rawExamples = array(corpus.examples, "corpus.examples");
   if (rawExamples.length > MAX_EXAMPLES) throw new Error(`corpus must not exceed ${MAX_EXAMPLES} examples`);
@@ -271,6 +316,7 @@ export function parseAvengersCorpus(value: unknown): AvengersCorpusV1 {
     synthetic,
     candidatePaperModelIds,
     routingSnapshot: snapshot,
+    ...(provenance ? { provenance } : {}),
     examples,
   };
 }

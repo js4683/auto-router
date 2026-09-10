@@ -3,17 +3,24 @@ import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
+import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  checkModelEligibility,
   detectBoundary,
   loadCatalogSync,
   loadConfig,
+  passesContextFit,
   selectModel,
+  SelectionConstraintError,
   type AvengersProPrediction,
   type Catalog,
   type RouterConfig,
+  type RoutingCapability,
+  type RoutingTransport,
   type SelectionResult,
+  type SelectionRequirements,
   type SessionState,
 } from "@auto-router/router-core";
 import type { EvalRecorder } from "@auto-router/eval";
@@ -29,16 +36,18 @@ import {
 } from "./accounts.js";
 import { loginExpires, loginIsOAuth, providerLoginSet, resolveCredential, resolveGoogleProject, UI_PROVIDERS } from "./credentials.js";
 import { parseQuota, reconcileUsageQuota, type ProviderQuota } from "./quota.js";
-import { ENV_KEYS, defaultEnvPath, readEnvFile, writeEnvFile } from "./env-file.js";
+import { ENV_KEYS, defaultEnvPath, readEnvFile, validateEnvValue, writeEnvFile } from "./env-file.js";
 import { createProxyRecorderFromEnv, recordProxyResponse } from "./eval-recording.js";
-import { memorySessions, type ProxySessionStore } from "./session.js";
+import { memorySessions, resolveSessionIdentity, type ProxySession, type ProxySessionStore, type SessionIdentity } from "./session.js";
 import { defaultAuthPath, readAuthFile, writeAuthEntry } from "./auth-store.js";
-import { antigravityUserAgent, completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, ensureGoogleProject, pollOAuth, refreshAccountToken, refreshOAuthToken, startOAuth } from "./oauth.js";
+import { antigravityUserAgent, completeGoogleCallback, completeOAuthCode, CONNECT_PROVIDERS, defaultOAuthStatePath, ensureGoogleProject, pollOAuth, refreshAccountToken, refreshOAuthToken, startOAuth } from "./oauth.js";
 import { connectPage } from "./connect-page.js";
 import { mainLogin } from "./login-cli.js";
 import { loginProviderId } from "./login.js";
 import { settingsPage } from "./settings-ui.js";
 import { DEFAULT_UPSTREAM_TIMEOUT_MS, validateUpstreamTimeout } from "./upstream-timeout.js";
+import { normalizeProviderCompletion, normalizeProviderToolCall } from "./protocol.js";
+import { createProxyRequestContext, type FinalResult, type ProxyRequestContext, writeWithBackpressure } from "./request-context.js";
 import {
   googleModelDiscovery,
   ModelDiscoveryManager,
@@ -67,25 +76,58 @@ export interface CreateProxyServerOptions {
   authPath?: string;
   accountsPath?: string;
   claudePath?: string;
+  oauthStatePath?: string;
   modelDiscovery?: readonly ModelDiscoveryAdapter[];
 }
 
 function isLoopbackManagement(req: IncomingMessage): boolean {
+  const peer = req.socket?.remoteAddress;
+  if (typeof peer === "string" && peer && !isLoopbackHostname(peer)) return false;
+
+  const hostHeader = req.headers.host;
+  if (typeof hostHeader !== "string" || !hostHeader) return false;
+  const host = parseAuthority(hostHeader);
+  if (!host || !isLoopbackHostname(host.hostname)) return false;
+
   const origin = req.headers.origin;
   if (typeof origin === "string" && origin) {
     try {
-      const host = new URL(origin).hostname;
-      return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+      const parsed = new URL(origin);
+      if (
+        parsed.protocol !== "http:" ||
+        parsed.username ||
+        parsed.password ||
+        parsed.pathname !== "/" ||
+        parsed.search ||
+        parsed.hash ||
+        origin.toLowerCase() !== parsed.origin
+      ) {
+        return false;
+      }
+      return isLoopbackHostname(parsed.hostname) && parsed.host.toLowerCase() === host.host.toLowerCase();
     } catch {
       return false;
     }
   }
-  const header = req.headers.host;
-  if (typeof header === "string" && header) {
-    const host = header.split(":")[0] ?? "";
-    return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
-  }
   return true;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized.startsWith("::ffff:")) return isLoopbackHostname(normalized.slice("::ffff:".length));
+  if (normalized === "localhost") return true;
+  if (isIP(normalized) === 4) return normalized.startsWith("127.");
+  return normalized === "::1";
+}
+
+function parseAuthority(value: string): URL | undefined {
+  try {
+    const parsed = new URL(`http://${value}`);
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
 }
 
 const MANAGEMENT_BODY_LIMIT = 64_000;
@@ -95,7 +137,13 @@ const ANTIGRAVITY_MODEL_ALIASES: Record<string, string> = {
   "gemini-3.6-flash": "gemini-3.6-flash-high",
 };
 
-function readBody(req: IncomingMessage, limit = REQUEST_BODY_LIMIT): Promise<string> {
+function upstreamSignal(context: ProxyRequestContext, timeoutMs: number): AbortSignal {
+  if (context.remainingMs() <= 0) throw new Error("request timed out");
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return typeof AbortSignal.any === "function" ? AbortSignal.any([context.signal, timeout]) : timeout;
+}
+
+function readBody(req: IncomingMessage, limit = REQUEST_BODY_LIMIT, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -121,12 +169,14 @@ function readBody(req: IncomingMessage, limit = REQUEST_BODY_LIMIT): Promise<str
       resolve(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", (error) => fail(error instanceof Error ? error : new Error("read failed")));
+    signal?.addEventListener("abort", () => fail(new Error("request timed out")), { once: true });
+    if (signal?.aborted) fail(new Error("request timed out"));
   });
 }
 
-async function readBodyOrLimit(req: IncomingMessage, res: ServerResponse, limit: number): Promise<string | undefined> {
+async function readBodyOrLimit(req: IncomingMessage, res: ServerResponse, limit: number, signal?: AbortSignal): Promise<string | undefined> {
   try {
-    return await readBody(req, limit);
+    return await readBody(req, limit, signal);
   } catch (error) {
     if (error instanceof Error && error.message === "payload too large") {
       json(res, 413, { error: "payload too large" });
@@ -143,7 +193,7 @@ function pickAccount(
   skipped: Set<string>,
   limitedUntil: Map<string, number>,
   discovery?: ModelDiscoveryManager,
-): { account?: ResolvedAccount; token?: string; oauth: boolean; discoveryConstrained: boolean } {
+): { account?: ResolvedAccount; token?: string; oauth: boolean; discoveryConstrained: boolean; allAccountsLimited: boolean } {
   const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
   const accounts = listProviderAccounts(provider, {
     env: process.env,
@@ -166,14 +216,34 @@ function pickAccount(
     ? eligibleAccounts.filter((candidate) => discoveredAccounts.has(candidate.id))
     : eligibleAccounts;
   const account = nextOpenAccount(modelAccounts, blocked);
-  const token = account?.token ?? googleApiKey ?? (discoveryConstrained ? undefined : resolveCredential(modelId, credOpts));
+  const allAccountsLimited = modelAccounts.length > 0 && modelAccounts.every((candidate) => {
+    const key = candidate.sourceKey ?? `${candidate.source}:${candidate.id}`;
+    return blocked.has(candidate.id) || blocked.has(key);
+  });
+  const token = account?.token ?? googleApiKey ?? (discoveryConstrained || allAccountsLimited ? undefined : resolveCredential(modelId, credOpts));
   const oauth = Boolean(
     !googleApiKey && (account ? account.type === "oauth" : token && loginIsOAuth(provider, credOpts)),
   );
-  return { account, token, oauth, discoveryConstrained };
+  return { account, token, oauth, discoveryConstrained, allAccountsLimited };
+}
+
+function accountKey(account: Pick<ResolvedAccount, "id" | "source" | "sourceKey">): string {
+  return account.sourceKey ?? `${account.source}:${account.id}`;
+}
+
+function retryAfterMs(headers: Headers): number {
+  const value = headers.get("retry-after");
+  if (value) {
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(600_000, Math.round(seconds * 1000));
+    const date = Date.parse(value);
+    if (Number.isFinite(date)) return Math.min(600_000, Math.max(0, date - Date.now()));
+  }
+  return 300_000;
 }
 
 const ZEN_MODEL_HINT = /muse-spark|contributor-free|big-pickle|mimo-v2|nemotron|ling-3|hy3-free|gpt-5|grok-/i;
+const CHAT_CREDENTIAL_PROVIDERS = new Set(["openai", "opencode", "xai"]);
 const TEXT_MESSAGE_ROLES = new Set(["system", "developer", "user", "assistant"]);
 const CODEX_AUTO_MODEL = {
   slug: "auto",
@@ -231,11 +301,35 @@ interface TextMessage {
 type IngressProtocol = "chat" | "anthropic" | "responses";
 
 function ingressProtocol(url: string | undefined): IngressProtocol {
-  const path = url?.split("?", 1)[0];
+  const path = requestPath(url);
   if (path === "/v1/messages" || path === "/messages") return "anthropic";
   if (path === "/v1/responses" || path === "/responses") return "responses";
   return "chat";
 }
+
+function requestPath(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    return new URL(url, "http://127.0.0.1").pathname;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasContentType(req: IncomingMessage, expected: string): boolean {
+  const contentType = req.headers["content-type"];
+  return typeof contentType === "string" && contentType.split(";", 1)[0]?.trim().toLowerCase() === expected;
+}
+
+const INFERENCE_PATHS = new Set([
+  "/v1/route",
+  "/v1/chat/completions",
+  "/chat/completions",
+  "/v1/responses",
+  "/responses",
+  "/v1/messages",
+  "/messages",
+]);
 
 function bearerToken(value: string | string[] | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -244,7 +338,8 @@ function bearerToken(value: string | string[] | undefined): string | undefined {
 
 /**
  * Inbound client credentials only apply when the client's protocol matches the
- * routed provider. A Claude Code OAuth header must never reach Zen or Gemini.
+ * routed provider. A client bearer must never become a credential for a different
+ * provider or transport.
  */
 function inboundCredentials(
   headers: IncomingMessage["headers"],
@@ -255,7 +350,7 @@ function inboundCredentials(
     const apiKey = headers["x-api-key"];
     return { token: typeof apiKey === "string" ? apiKey : bearerToken(headers.authorization) };
   }
-  const matches = protocol === "chat" || (protocol === "responses" && provider === "openai");
+  const matches = (protocol === "chat" && CHAT_CREDENTIAL_PROVIDERS.has(provider)) || (protocol === "responses" && provider === "openai");
   if (!matches) return {};
   const authorization = headers.authorization ?? headers.Authorization;
   return { authorization, token: bearerToken(authorization) };
@@ -487,11 +582,10 @@ function zenRequest(body: any, model: string): Record<string, unknown> {
 function zenFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string }> {
   return (Array.isArray(payload?.output) ? payload.output : [])
     .filter((item: any) => item?.type === "function_call" && item.name)
-    .map((item: any) => ({
-      id: item.call_id ?? item.id,
-      name: item.name,
-      arguments: item.arguments ?? "{}",
-    }));
+    .flatMap((item: any) => {
+      const normalized = normalizeProviderToolCall(item.call_id ?? item.id, item.name, item.arguments ?? "{}");
+      return normalized ? [{ id: normalized.id, name: normalized.name, arguments: JSON.stringify(normalized.arguments) }] : [];
+    });
 }
 
 function parseToolArguments(raw: string | undefined): Record<string, unknown> {
@@ -647,7 +741,7 @@ function unwrapAntigravityResponse(payload: any): any {
   return response && typeof response === "object" ? response : payload;
 }
 
-function geminiRequest(body: any): Record<string, unknown> {
+function geminiRequest(body: any, sessionKey = "global"): Record<string, unknown> {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const systemParts = messages
     .filter((message: any) => message?.role === "system" || message?.role === "developer")
@@ -678,7 +772,7 @@ function geminiRequest(body: any): Record<string, unknown> {
               (call as any).thought_signature ??
               (call as any).function?.thoughtSignature ??
               (call as any).function?.thought_signature ??
-              geminiThoughtSignatures.get(call.id);
+              geminiThoughtSignatures.get(`${sessionKey}:${call.id}`);
             const fc: Record<string, unknown> = { name: call.function.name, args: parseToolArguments(call.function.arguments) };
             if ((call as any).id) (fc as any).id = (call as any).id;
             if (sig) return { functionCall: fc, thoughtSignature: sig } as unknown;
@@ -700,14 +794,14 @@ function geminiRequest(body: any): Record<string, unknown> {
   };
 }
 
-function geminiFunctionCalls(payload: any): Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }> {
+function geminiFunctionCalls(payload: any, sessionKey = "global"): Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }> {
   const parts = payload?.candidates?.[0]?.content?.parts;
   return (Array.isArray(parts) ? parts : [])
     .filter((part: any) => part?.functionCall?.name)
     .map((part: any, index: number) => {
       const sig = part.thoughtSignature ?? part.thought_signature ?? part.functionCall?.thoughtSignature ?? part.functionCall?.thought_signature;
-      const id = part.functionCall?.id ?? `call_${part.functionCall.name}_${index}`;
-      if (sig) geminiThoughtSignatures.set(id, sig);
+       const id = part.functionCall?.id ?? `call_${randomUUID()}`;
+       if (sig) geminiThoughtSignatures.set(`${sessionKey}:${id}`, sig);
       return {
         id,
         name: part.functionCall.name,
@@ -731,7 +825,6 @@ function upstreamRequest(
   provider: string,
   model: string,
   token: string | undefined,
-  inboundPath: string | undefined,
   projectId?: string,
   sessionKey?: string,
   googleOAuth?: boolean,
@@ -767,7 +860,7 @@ function upstreamRequest(
     const key = token ? `?key=${encodeURIComponent(token)}` : "";
     const alt = isStream ? (key ? "&alt=sse" : "?alt=sse") : "";
     const action = isStream ? "streamGenerateContent" : "generateContent";
-    return { body: geminiRequest(normalizedBody), path: `/models/${model}:${action}${key}${alt}`, translateResponse: true, useGemini: true };
+    return { body: geminiRequest(normalizedBody, sessionKey ?? "global"), path: `/models/${model}:${action}${key}${alt}`, translateResponse: true, useGemini: true };
   }
   if (provider === "anthropic") {
     const native = protocol === "anthropic";
@@ -790,30 +883,55 @@ function upstreamRequest(
   const body = { ...normalizedBody, ...(protocol === "chat" ? {} : { stream: false }), model };
   return {
     body,
-    path: protocol === "chat" ? inboundPath ?? "/v1/chat/completions" : "/v1/chat/completions",
+    path: "/v1/chat/completions",
     translateResponse: protocol !== "chat",
     useGemini: false,
   };
 }
 
-function sessionId(req: IncomingMessage, body: unknown, text: string): string {
-  const header = req.headers["x-session-id"] ?? req.headers["x-opencode-session"];
-  if (typeof header === "string" && header) return header;
-  const first = textMessages(body).find((message) => message.role === "user")?.content ?? text;
-  return (first || "global").slice(0, 64);
+function hasImageContent(value: unknown): boolean {
+  const items = Array.isArray(value) ? value : [value];
+  return items.some((item: any) => {
+    if (!item || typeof item !== "object") return false;
+    if (["image", "image_url", "input_image"].includes(item.type)) return true;
+    return typeof item.source?.media_type === "string" && item.source.media_type.toLowerCase().startsWith("image/");
+  });
 }
 
-function requiredCapabilities(body: any): DiscoveryCapability[] {
+function routingCapabilities(body: any): RoutingCapability[] {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const input = Array.isArray(body?.input) ? body.input : [];
   const declaredTools = Array.isArray(body?.tools) && body.tools.length > 0;
   const toolMessages = messages.some(
     (message: any) =>
       message?.role === "tool" ||
       (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0)
   );
-  const capabilities: DiscoveryCapability[] = ["text"];
-  if (declaredTools || toolMessages) capabilities.push("tools");
+  const inputToolMessages = input.some((item: any) => ["function_call", "function_call_output"].includes(item?.type));
+  const capabilities: RoutingCapability[] = ["text"];
+  if (declaredTools || toolMessages || inputToolMessages) capabilities.push("tools");
+  if (messages.some((message: any) => hasImageContent(message?.content)) || input.some((item: any) => hasImageContent(item?.content))) {
+    capabilities.push("vision");
+  }
+  const formats = [body?.response_format, body?.text?.format, body?.output_config?.format, body?.outputConfig?.format];
+  if (formats.some((format: any) => format && typeof format === "object" && format.type !== "text")) capabilities.push("structured-output");
   return capabilities;
+}
+
+function discoveryCapabilities(body: any): DiscoveryCapability[] {
+  return routingCapabilities(body).flatMap((capability) => {
+    if (capability === "vision") return ["image"];
+    if (capability === "text" || capability === "tools") return [capability];
+    return [];
+  });
+}
+
+function selectionRequirements(body: any, protocol: IngressProtocol, lifetimeTokens: number): SelectionRequirements {
+  return {
+    lifetimeTokens,
+    requiredCapabilities: routingCapabilities(body),
+    transport: protocol as RoutingTransport,
+  };
 }
 
 function estimateTokens(text: string): number {
@@ -921,55 +1039,8 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
 }
 
 function nativeResponse(payload: any, provider: string): { content: string; refusal?: string } {
-  if (provider === "openai" && Array.isArray(payload?.output)) {
-    const output = payload.output;
-    const parts = output
-      .filter((item: any) => item?.type === "message" && Array.isArray(item.content))
-      .flatMap((item: any) => item.content);
-    const content = parts
-      .filter((part: any) => part?.type === "output_text")
-      .map((part: any) => part.text ?? "")
-      .join("");
-    const refusal = parts
-      .filter((part: any) => part?.type === "refusal")
-      .map((part: any) => part.refusal ?? "")
-      .join("");
-    return { content, ...(refusal ? { refusal } : {}) };
-  }
-  const chatMessage = payload?.choices?.[0]?.message;
-  if (provider === "openai" || provider === "xai" || chatMessage) {
-    return { content: messageText(chatMessage?.content) ?? "", ...(chatMessage?.refusal ? { refusal: chatMessage.refusal } : {}) };
-  }
-  if (provider === "google") {
-    const parts = payload?.candidates?.[0]?.content?.parts;
-    return { content: Array.isArray(parts) ? parts.map((part: any) => part?.text ?? "").join("") : "" };
-  }
-  if (provider === "anthropic") {
-    const parts = Array.isArray(payload?.content) ? payload.content : [];
-    const content = parts
-      .filter((part: any) => part?.type === "text")
-      .map((part: any) => part.text ?? "")
-      .join("");
-    const refusal = parts
-      .filter((part: any) => part?.type === "refusal")
-      .map((part: any) => part.refusal ?? "")
-      .join("");
-    return { content, ...(refusal ? { refusal } : {}) };
-  }
-
-  const output = Array.isArray(payload?.output) ? payload.output : [];
-  const parts = output
-    .filter((item: any) => item?.type === "message" && Array.isArray(item.content))
-    .flatMap((item: any) => item.content);
-  const content = parts
-    .filter((part: any) => part?.type === "output_text")
-    .map((part: any) => part.text ?? "")
-    .join("");
-  const refusal = parts
-    .filter((part: any) => part?.type === "refusal")
-    .map((part: any) => part.refusal ?? "")
-    .join("");
-  return { content, ...(refusal ? { refusal } : {}) };
+  const normalized = normalizeProviderCompletion(payload, provider);
+  return { content: normalized.text, ...(normalized.refusal ? { refusal: normalized.refusal } : {}) };
 }
 
 type ChatFinishReason = "stop" | "length" | "content_filter" | "tool_calls";
@@ -1037,67 +1108,23 @@ interface NativeChatUsage {
  * provider-reported token counts instead of silently missing usage.
  */
 function nativeUsage(payload: any, provider: string): NativeChatUsage | undefined {
-  if (provider === "openai" && Array.isArray(payload?.output)) {
-    const usage = payload?.usage;
-    if (!usage) return undefined;
-    const inputTokens = usage.input_tokens ?? 0;
-    const outputTokens = usage.output_tokens ?? 0;
-    const cachedTokens = usage.input_tokens_details?.cached_tokens;
-    return {
-      prompt_tokens: inputTokens,
-      completion_tokens: outputTokens,
-      total_tokens: usage.total_tokens ?? inputTokens + outputTokens,
-      ...(cachedTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {}),
-    };
-  }
-  if (provider === "openai" || provider === "xai") {
-    const usage = payload?.usage;
-    if (!usage) return undefined;
-    const promptTokens = usage.prompt_tokens ?? 0;
-    const completionTokens = usage.completion_tokens ?? 0;
-    return {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: usage.total_tokens ?? promptTokens + completionTokens,
-      ...(usage.prompt_tokens_details ? { prompt_tokens_details: usage.prompt_tokens_details } : {}),
-    };
-  }
-  if (provider === "google") {
-    const usage = payload?.usageMetadata;
-    if (!usage) return undefined;
-    const promptTokens = usage.promptTokenCount ?? 0;
-    const outputTokens = (usage.candidatesTokenCount ?? 0) + (usage.thoughtsTokenCount ?? 0);
-    return {
-      prompt_tokens: promptTokens,
-      completion_tokens: outputTokens,
-      total_tokens: usage.totalTokenCount ?? promptTokens + outputTokens,
-      ...(usage.cachedContentTokenCount !== undefined
-        ? { prompt_tokens_details: { cached_tokens: usage.cachedContentTokenCount } }
-        : {}),
-    };
-  }
-  if (provider === "anthropic") {
-    const usage = payload?.usage;
-    if (!usage) return undefined;
-    const inputTokens = usage.input_tokens ?? 0;
-    const outputTokens = usage.output_tokens ?? 0;
-    const cacheRead = usage.cache_read_input_tokens ?? 0;
-    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-    return {
-      prompt_tokens: inputTokens + cacheRead + cacheWrite,
-      completion_tokens: outputTokens,
-      total_tokens: inputTokens + cacheRead + cacheWrite + outputTokens,
-      ...(cacheRead || cacheWrite ? { prompt_tokens_details: { cached_tokens: cacheRead, cache_creation_tokens: cacheWrite } } : {}),
-    };
-  }
-  return undefined;
+  const usage = normalizeProviderCompletion(payload, provider).usage;
+  if (!usage) return undefined;
+  return {
+    prompt_tokens: usage.inputTokens,
+    completion_tokens: usage.outputTokens,
+    total_tokens: usage.inputTokens + usage.outputTokens,
+    ...(usage.cacheReadInputTokens || usage.cacheWriteInputTokens
+      ? { prompt_tokens_details: { cached_tokens: usage.cacheReadInputTokens, cache_creation_tokens: usage.cacheWriteInputTokens } }
+      : {}),
+  };
 }
 
-function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
+function writeChatCompletion(res: ServerResponse, body: any, provider: string, model: string, payload: any, sessionKey = "global"): void {
   const id = String(payload?.id ?? `chatcmpl-${Date.now()}`);
   const created = Math.floor(Date.now() / 1000);
   const { content, refusal } = nativeResponse(payload, provider);
-  const toolCalls = nativeToolCalls(payload, provider);
+  const toolCalls = nativeToolCalls(payload, provider, sessionKey);
   const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
   const usage = nativeUsage(payload, provider);
   const message = refusal
@@ -1139,20 +1166,26 @@ function writeChatCompletion(res: ServerResponse, body: any, provider: string, m
   res.end(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`);
 }
 
-function nativeToolCalls(payload: any, provider: string): Array<{ id: string; name: string; arguments: string }> {
+function nativeToolCalls(payload: any, provider: string, sessionKey = "global"): Array<{ id: string; name: string; arguments: string }> {
   if (provider === "openai" && Array.isArray(payload?.output)) return zenFunctionCalls(payload);
   if (provider === "openai") {
     const calls = payload?.choices?.[0]?.message?.tool_calls;
     return (Array.isArray(calls) ? calls : [])
       .filter((call: any) => call?.function?.name)
-      .map((call: any) => ({ id: call.id, name: call.function.name, arguments: call.function.arguments ?? "{}" }));
+      .flatMap((call: any) => {
+        const normalized = normalizeProviderToolCall(call.id, call.function.name, call.function.arguments ?? "{}");
+        return normalized ? [{ id: normalized.id, name: normalized.name, arguments: JSON.stringify(normalized.arguments) }] : [];
+      });
   }
-  if (provider === "google") return geminiFunctionCalls(payload);
+  if (provider === "google") return geminiFunctionCalls(payload, sessionKey);
   if (provider === "anthropic") {
     const blocks = Array.isArray(payload?.content) ? payload.content : [];
     return blocks
       .filter((block: any) => block?.type === "tool_use" && block.id && block.name)
-      .map((block: any) => ({ id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}) }));
+      .flatMap((block: any) => {
+        const normalized = normalizeProviderToolCall(block.id, block.name, block.input ?? {});
+        return normalized ? [{ id: normalized.id, name: normalized.name, arguments: JSON.stringify(normalized.arguments) }] : [];
+      });
   }
   if (provider === "opencode") return zenFunctionCalls(payload);
   return [];
@@ -1162,9 +1195,9 @@ type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
 
-function writeAnthropicMessage(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
+function writeAnthropicMessage(res: ServerResponse, body: any, provider: string, model: string, payload: any, sessionKey = "global"): void {
   const { content, refusal } = nativeResponse(payload, provider);
-  const toolCalls = nativeToolCalls(payload, provider);
+  const toolCalls = nativeToolCalls(payload, provider, sessionKey);
   const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
   const blocks: AnthropicContentBlock[] = [
     ...(content || refusal ? [{ type: "text" as const, text: content || refusal || "" }] : []),
@@ -1242,9 +1275,9 @@ function responsesStreamEvents(response: any): Array<[string, unknown]> {
   return events;
 }
 
-function writeResponsesPayload(res: ServerResponse, body: any, provider: string, model: string, payload: any): void {
+function writeResponsesPayload(res: ServerResponse, body: any, provider: string, model: string, payload: any, sessionKey = "global"): void {
   const { content, refusal } = nativeResponse(payload, provider);
-  const toolCalls = nativeToolCalls(payload, provider);
+  const toolCalls = nativeToolCalls(payload, provider, sessionKey);
   const finishReason = nativeFinishReason(payload, provider, refusal, toolCalls);
   const status = nativeResponseStatus(payload, finishReason);
   const incompleteDetails = nativeIncompleteDetails(payload, status, finishReason);
@@ -1287,8 +1320,19 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
   const limitedUntil = new Map<string, number>();
   const modelDiscovery = new ModelDiscoveryManager(opts.modelDiscovery ?? []);
   const accountsFile = () => opts.accountsPath;
+  const storeQuota = (key: string, sample: ProviderQuota) => {
+    const previous = quotas.get(key);
+    if (previous && previous.at > sample.at) return;
+    if (previous && previous.meters.length > 0 && sample.meters.length === 0 && sample.status >= 200 && sample.status < 300) return;
+    quotas.set(key, sample);
+  };
 
-  async function discoveryCatalog(body: any): Promise<Catalog> {
+  interface Decision {
+    result: SelectionResult;
+    state: SessionState;
+  }
+
+  async function discoveryCatalog(body: any, signal?: AbortSignal): Promise<Catalog> {
     if (!opts.modelDiscovery?.length) return opts.catalog;
     const authFile = opts.authPath ?? defaultAuthPath();
     const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
@@ -1313,6 +1357,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           authPath: authFile,
           accountsPath: accountsFile(),
           fetchImpl: opts.backends[adapter.provider]?.fetchImpl ?? fetch,
+          signal,
         });
         if (!token) continue;
         discoveredAccounts.push({
@@ -1327,16 +1372,32 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       const fetchImpl = opts.backends[adapter.provider]?.fetchImpl;
       if (fetchImpl) fetches.set(adapter.provider, fetchImpl);
     }
-    return modelDiscovery.prepareCatalog(opts.catalog, accounts, requiredCapabilities(body), fetches);
+    return modelDiscovery.prepareCatalog(opts.catalog, accounts, discoveryCapabilities(body), fetches, signal);
   }
 
-  async function decide(req: IncomingMessage, body: any, text: string): Promise<SelectionResult> {
-    const id = sessionId(req, body, text);
+  async function decide(
+    req: IncomingMessage,
+    body: any,
+    text: string,
+    identity: SessionIdentity,
+    protocol: IngressProtocol,
+    capabilityBody: any = body,
+    signal?: AbortSignal,
+  ): Promise<Decision> {
+    const id = identity.id;
     const stored = opts.sessions.get(id);
-    const isNewSession = !stored.taskTarget;
-    const state = sessionState(body, text, isNewSession);
+    const baseState = sessionState(body, text, !stored.taskTarget);
+    const requirements = selectionRequirements(capabilityBody, protocol, baseState.lifetimeTokens);
+    const state: SessionState = {
+      ...baseState,
+      requiredCapabilities: requirements.requiredCapabilities,
+      transport: requirements.transport,
+    };
     const boundary = detectBoundary(state, undefined, stored.prevMessage);
     const lockedProvider = stored.taskTarget ? resolveProvider(stored.taskTarget).provider : "";
+    const persist = (next: ProxySession) => {
+      if (identity.stable) opts.sessions.set(id, next);
+    };
     const forcedHeader = req.headers["x-force-model"];
     if (typeof forcedHeader === "string" && forcedHeader) {
       const result: SelectionResult = {
@@ -1350,21 +1411,31 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         score: 0,
         boundary,
       };
-      opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
-      return result;
+      persist({ taskTarget: result.modelId, prevMessage: text });
+      return { result, state };
     }
     if (stored.taskTarget && !boundary.isBoundary && !skippedProviders.has(lockedProvider)) {
-      return {
-        modelId: stored.taskTarget,
-        tier: "simple",
-        taskType: null,
-        confidence: 1,
-        reason: "task lock",
-        via: "stay-sticky",
-        catalogSource: opts.catalog.source,
-        score: 0,
-        boundary,
-      };
+      const current = opts.catalog.models.find((model) => model.id === stored.taskTarget || (model.runtimeId ?? model.id) === stored.taskTarget);
+      if (current) {
+        const eligibility = checkModelEligibility(current, requirements, opts.config);
+        if (!eligibility.pass) throw new SelectionConstraintError(eligibility.code, eligibility.reason);
+      }
+      if (!current || passesContextFit(state.lifetimeTokens, current, opts.config).pass) {
+        return {
+          result: {
+            modelId: stored.taskTarget,
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "task lock",
+            via: "stay-sticky",
+            catalogSource: opts.catalog.source,
+            score: 0,
+            boundary,
+          },
+          state,
+        };
+      }
     }
 
     const forced = requestedModel(body);
@@ -1380,8 +1451,8 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         score: 0,
         boundary,
       };
-      opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
-      return result;
+      persist({ taskTarget: result.modelId, prevMessage: text });
+      return { result, state };
     }
 
     let prediction: AvengersProPrediction | undefined;
@@ -1391,16 +1462,25 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       prediction = undefined;
     }
 
-    const catalog = await discoveryCatalog(body);
-    const result = opts.select(state, catalogExcluding(catalog, skippedProviders), opts.config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, undefined, stored.prevMessage, prediction);
-    opts.sessions.set(id, { taskTarget: result.modelId, prevMessage: text });
-    return result;
+    const catalog = await discoveryCatalog(capabilityBody, signal);
+    const result = opts.select(
+      state,
+      catalogExcluding(catalog, skippedProviders),
+      opts.config,
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      stored.prevMessage,
+      prediction,
+      requirements,
+    );
+    persist({ taskTarget: result.modelId, prevMessage: text });
+    return { result, state };
   }
 
   return {
     async handle(req, res) {
       const startedAt = Date.now();
-      const path = req.url?.split("?", 1)[0];
+      const path = requestPath(req.url);
       if (path === "/health") {
         json(res, 200, { ok: true });
         return;
@@ -1415,20 +1495,21 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         for (const provider of ["anthropic", "openai", "xai"]) {
           const runtime = provider === "anthropic" ? "anthropic/claude" : provider === "openai" ? "openai/gpt" : "xai/grok";
           const accounts = listProviderAccounts(provider, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() });
-          const tokens = accounts.length
-            ? await Promise.all(
-                accounts.map(async (account) => ({
-                  id: account.id,
-                  token:
-                    (await refreshAccountToken(account, { authPath: authFile, accountsPath: accountsFile() })) ?? account.token,
-                })),
-              )
-            : [{ id: provider, token: (await refreshOAuthToken(provider, authFile)) ?? resolveCredential(runtime, credOpts) }];
-          for (const item of tokens) {
-            if (!item.token) continue;
-            const quota = await reconcileUsageQuota(provider, item.token).catch(() => undefined);
-            if (quota) quotas.set(item.id, quota);
-          }
+           const tokens = accounts.length
+             ? await Promise.all(
+                 accounts.map(async (account) => ({
+                   id: account.id,
+                   sourceKey: account.sourceKey ?? accountKey(account),
+                   token:
+                     (await refreshAccountToken(account, { authPath: authFile, accountsPath: accountsFile() })) ?? account.token,
+                 })),
+               )
+             : [{ id: provider, sourceKey: provider, token: (await refreshOAuthToken(provider, authFile)) ?? resolveCredential(runtime, credOpts) }];
+           for (const item of tokens) {
+             if (!item.token) continue;
+             const quota = await reconcileUsageQuota(provider, item.token).catch(() => undefined);
+             if (quota) storeQuota(item.id, { ...quota, sourceKey: item.sourceKey });
+           }
         }
         json(res, 200, { ok: true });
         return;
@@ -1436,6 +1517,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       if (req.method === "POST" && path === "/accounts/remove") {
         if (!isLoopbackManagement(req)) {
           json(res, 403, { error: "forbidden" });
+          return;
+        }
+        if (!hasContentType(req, "application/json")) {
+          json(res, 415, { error: "content type must be application/json" });
           return;
         }
         const file = accountsFile();
@@ -1519,6 +1604,10 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
             json(res, 403, { error: "forbidden" });
             return;
           }
+          if (!hasContentType(req, "application/x-www-form-urlencoded")) {
+            json(res, 415, { error: "content type must be form encoded" });
+            return;
+          }
           const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
           if (raw === undefined) return;
           const key = new URLSearchParams(raw).get("key") ?? "";
@@ -1541,15 +1630,19 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           return;
         }
         if (req.method === "POST" && rest === "oauth/start") {
-          const started = await startOAuth(id);
+           const started = await startOAuth(id, { statePath: opts.oauthStatePath });
           json(res, "error" in started ? 400 : 200, started);
           return;
         }
         if (req.method === "POST" && rest === "oauth/code") {
+          if (!hasContentType(req, "application/x-www-form-urlencoded")) {
+            json(res, 415, { error: "content type must be form encoded" });
+            return;
+          }
           const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
           if (raw === undefined) return;
           const params = new URLSearchParams(raw);
-          const result = await completeOAuthCode(params.get("id") ?? "", params.get("code") ?? "", authFile, accountsFile());
+           const result = await completeOAuthCode(params.get("id") ?? "", params.get("code") ?? "", authFile, accountsFile(), { statePath: opts.oauthStatePath });
           if (result.done) {
             if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
             else {
@@ -1564,7 +1657,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         }
         if (req.method === "GET" && rest === "oauth/callback") {
           const params = new URL(req.url ?? "/", "http://127.0.0.1").searchParams;
-          const result = await completeGoogleCallback(params.get("state") ?? "", params.get("code") ?? "", authFile, accountsFile());
+           const result = await completeGoogleCallback(params.get("state") ?? "", params.get("code") ?? "", authFile, accountsFile(), { statePath: opts.oauthStatePath });
           if (result.done) {
             if (typeof res.writeHead === "function") res.writeHead(303, { location: "/" });
             else {
@@ -1579,7 +1672,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         }
         if (req.method === "GET" && rest === "oauth/poll") {
           const sessionId = new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("id") ?? "";
-          json(res, 200, await pollOAuth(sessionId, authFile, accountsFile()));
+           json(res, 200, await pollOAuth(sessionId, authFile, accountsFile(), { statePath: opts.oauthStatePath }));
           return;
         }
         json(res, 404, { error: "not found" });
@@ -1604,10 +1697,19 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           json(res, 403, { error: "forbidden" });
           return;
         }
+        if (!hasContentType(req, "application/x-www-form-urlencoded")) {
+          json(res, 415, { error: "content type must be form encoded" });
+          return;
+        }
         const raw = await readBodyOrLimit(req, res, MANAGEMENT_BODY_LIMIT);
         if (raw === undefined) return;
         const updates = Object.fromEntries(new URLSearchParams(raw));
-        writeEnvFile(opts.envPath ?? defaultEnvPath(), updates);
+        try {
+          writeEnvFile(opts.envPath ?? defaultEnvPath(), updates);
+        } catch (error) {
+          json(res, 400, { error: error instanceof Error ? error.message : "invalid settings" });
+          return;
+        }
         for (const key of ENV_KEYS) {
           const value = updates[key];
           if (value) process.env[key] = value;
@@ -1638,17 +1740,47 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         json(res, 404, { error: "not found" });
         return;
       }
+      if (req.method !== "POST" || !INFERENCE_PATHS.has(path ?? "")) {
+        json(res, 404, { error: "not found" });
+        return;
+      }
 
-      const raw = await readBodyOrLimit(req, res, REQUEST_BODY_LIMIT);
-      if (raw === undefined) return;
-      const body = raw ? JSON.parse(raw) : {};
+       const requestContext = createProxyRequestContext({ timeoutMs: upstreamTimeoutMs, request: req });
+       let raw: string | undefined;
+       try {
+         raw = await readBodyOrLimit(req, res, REQUEST_BODY_LIMIT, requestContext.signal);
+       } catch (error) {
+         if (requestContext.signal.aborted) {
+           requestContext.finalize({ terminalState: "failed", status: 504 });
+           if (!res.headersSent) json(res, 504, { error: "request deadline exceeded" });
+           else res.end();
+           return;
+         }
+         throw error;
+       }
+       if (raw === undefined) {
+         requestContext.finalize({ terminalState: "failed", status: res.statusCode >= 400 ? res.statusCode : 413 });
+         return;
+       }
+       let body: any;
+       try {
+         body = raw ? JSON.parse(raw) : {};
+       } catch {
+         requestContext.finalize({ terminalState: "failed", status: 400 });
+         json(res, 400, { error: "invalid json" });
+         return;
+       }
       const protocol = ingressProtocol(req.url);
       const normalizedBody = normalizeIngress(body, protocol);
       const messages = textMessages(normalizedBody);
       const text = lastUserText(messages);
-      const id = sessionId(req, normalizedBody, text);
-      const state = sessionState(normalizedBody, text, !opts.sessions.get(id).taskTarget);
-      let result = await decide(req, normalizedBody, text);
+       const identity = resolveSessionIdentity(req, normalizedBody);
+       const id = identity.id;
+       const decision = await opts.sessions.runExclusive(id, () => decide(req, normalizedBody, text, identity, protocol, body, requestContext.signal));
+       let state = decision.state;
+       let result = decision.result;
+       const finalize = (terminalState: FinalResult["terminalState"], status: number) =>
+         requestContext.finalize({ terminalState, status, runtimeModelId: result.modelId });
       const routeRow: { at: number; via: string; modelId: string; status?: number } = {
         at: Date.now(),
         via: result.via,
@@ -1658,13 +1790,14 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       if (routeLog.length > 20) routeLog.length = 20;
       console.log(`[auto-router-proxy] ${result.via} ${result.modelId}`);
 
-      if (path === "/v1/route") {
+       if (path === "/v1/route") {
         json(res, 200, {
           modelId: result.modelId,
           via: result.via,
           ...(opts.avengersArtifactDigest ? { artifactDigest: opts.avengersArtifactDigest } : {}),
-        });
-        return;
+         });
+         finalize("completed", 200);
+         return;
       }
 
       if (opts.recorder && opts.recorder.mode !== "off") {
@@ -1675,37 +1808,60 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           turnId,
           startedAt,
           protocol,
-          selection: { modelId: result.modelId, via: result.via, reason: result.reason },
-          sessionState: state,
-          requiredCapabilities: requiredCapabilities(normalizedBody),
-          ...(Array.isArray(normalizedBody.messages) ? { messages: normalizedBody.messages } : {}),
+           selection: { modelId: result.modelId, via: result.via, reason: result.reason },
+           sessionState: state,
+            sessionStable: identity.stable,
+             requiredCapabilities: routingCapabilities(body),
+           attempts: () => requestContext.attempts,
+           finalRuntimeId: () => requestContext.finalState?.runtimeModelId,
+           ...(Array.isArray(normalizedBody.messages) ? { messages: normalizedBody.messages } : {}),
         });
       }
 
       const skippedAccounts = new Set<string>();
       let zenFailovers = 0;
-      let googleAuthRetries = 0;
-      let lastLimited: { status: number; payload: string; type: string } | undefined;
-      for (let attempt = 0; attempt < 8; attempt++) {
-      const { provider, bareModel } = resolveProvider(result.modelId);
-      const backend = opts.backends[provider];
-      if (!backend) {
-        json(res, 502, { error: `no backend for ${provider}` });
+       let googleAuthRetries = 0;
+       let lastLimited: { status: number; payload: string; type: string } | undefined;
+       for (let attempt = 0; attempt < 8; attempt++) {
+       if (requestContext.signal.aborted || requestContext.remainingMs() <= 0) {
+         finalize("failed", 504);
+         if (!res.headersSent) json(res, 504, { error: "request deadline exceeded" });
+         else res.end();
+         return;
+       }
+       const { provider, bareModel } = resolveProvider(result.modelId);
+       const backend = opts.backends[provider];
+       if (!backend) {
+         finalize("failed", 502);
+         json(res, 502, { error: `no backend for ${provider}` });
         return;
       }
 
-      const inbound = inboundCredentials(req.headers, protocol, provider);
-      const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
-      const picked = pickAccount(provider, result.modelId, opts, skippedAccounts, limitedUntil, modelDiscovery);
+        const inbound = inboundCredentials(req.headers, protocol, provider);
+        const credOpts = { env: process.env, authPath: opts.authPath, claudePath: opts.claudePath };
+        const picked = pickAccount(provider, result.modelId, opts, skippedAccounts, limitedUntil, modelDiscovery);
+        const attemptIndex = requestContext.recordAttempt({ provider, runtimeModelId: result.modelId, accountId: picked.account?.id });
+      if (picked.allAccountsLimited) {
+        if (lastLimited) {
+          if (typeof res.writeHead === "function") res.writeHead(lastLimited.status, { "content-type": lastLimited.type });
+          else res.statusCode = lastLimited.status;
+          res.end(lastLimited.payload);
+         } else {
+           json(res, 429, { error: "rate limited" });
+         }
+         finalize("failed", 429);
+         return;
+      }
       if (picked.discoveryConstrained && !picked.account) {
         if (lastLimited) {
           if (typeof res.writeHead === "function") res.writeHead(lastLimited.status, { "content-type": lastLimited.type });
           else res.statusCode = lastLimited.status;
           res.end(lastLimited.payload);
-        } else {
-          json(res, 503, { error: "no eligible account for discovered model" });
-        }
-        return;
+         } else {
+           json(res, 503, { error: "no eligible account for discovered model" });
+         }
+         finalize("failed", 503);
+         return;
       }
       const oauth = picked.oauth;
       const authFile = opts.authPath ?? defaultAuthPath();
@@ -1715,10 +1871,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           authPath: authFile,
           accountsPath: accountsFile(),
           fetchImpl: backend.fetchImpl ?? fetch,
-        });
-        if (refreshed) resolved = refreshed;
-      } else if (oauth && (provider === "anthropic" || provider === "openai" || provider === "xai" || provider === "google")) {
-        const refreshed = await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch);
+           signal: requestContext.signal,
+         });
+         if (refreshed) resolved = refreshed;
+       } else if (oauth && (provider === "anthropic" || provider === "openai" || provider === "xai" || provider === "google")) {
+         const refreshed = await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch, false, requestContext.signal);
         if (refreshed) resolved = refreshed;
       }
       const authorization = resolved ? `Bearer ${resolved}` : inbound.authorization;
@@ -1728,7 +1885,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         : undefined;
       googleProject ??= resolveGoogleProject(credOpts);
       if (oauth && provider === "google" && token && !googleProject) {
-        googleProject = await ensureGoogleProject(token).catch(() => undefined);
+         googleProject = await ensureGoogleProject(token, backend.fetchImpl ?? fetch, requestContext.signal).catch(() => undefined);
         if (googleProject) {
           const authFile = opts.authPath ?? defaultAuthPath();
           const current = readAuthFile(authFile).google;
@@ -1745,7 +1902,6 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
         provider,
         bareModel,
         token,
-        req.url,
         googleProject,
         id,
         oauth && provider === "google",
@@ -1776,15 +1932,28 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
       }
       const fetchImpl = backend.fetchImpl ?? fetch;
       const upstreamUrl = upstreamRequestPlan.path.startsWith("http") ? upstreamRequestPlan.path : `${backend.baseUrl}${upstreamRequestPlan.path}`;
-      const upstream = await fetchImpl(upstreamUrl, {
-        method: req.method,
-        signal: AbortSignal.timeout(upstreamTimeoutMs),
-        headers,
-        body: JSON.stringify(upstreamRequestPlan.body),
-      });
-      const quota = parseQuota(upstream.headers, upstream.status);
-      quotas.set(picked.account?.id ?? provider, quota);
-      routeRow.status = upstream.status;
+       let upstream: Response;
+       try {
+         upstream = await fetchImpl(upstreamUrl, {
+           method: req.method,
+           redirect: "error",
+           signal: upstreamSignal(requestContext, upstreamTimeoutMs),
+           headers,
+           body: JSON.stringify(upstreamRequestPlan.body),
+         });
+       } catch (error) {
+         if (requestContext.signal.aborted || (error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name))) {
+           finalize("failed", 504);
+           if (!res.headersSent) json(res, 504, { error: "upstream request timed out" });
+           else res.end();
+           return;
+         }
+         throw error;
+       }
+       const quota = parseQuota(upstream.headers, upstream.status, picked.account ? accountKey(picked.account) : provider);
+       storeQuota(picked.account?.id ?? provider, quota);
+       requestContext.updateAttempt(attemptIndex, upstream.status);
+       routeRow.status = upstream.status;
       routeRow.via = result.via;
       routeRow.modelId = result.modelId;
       if (
@@ -1801,25 +1970,28 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
               accountsPath: accountsFile(),
               fetchImpl: backend.fetchImpl ?? fetch,
               force: true,
+              signal: requestContext.signal,
             })
-          : await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch, true);
+          : await refreshOAuthToken(provider, authFile, backend.fetchImpl ?? fetch, true, requestContext.signal);
         if (refreshed && refreshed !== previous) {
           await upstream.arrayBuffer();
           continue;
         }
       }
       if (upstream.status === 429 && picked.account) {
-        skippedAccounts.add(picked.account.id);
-        limitedUntil.set(picked.account.id, Date.now() + 300_000);
+         const limitedAccountKey = accountKey(picked.account);
+         skippedAccounts.add(limitedAccountKey);
+         limitedUntil.set(limitedAccountKey, Date.now() + retryAfterMs(upstream.headers));
         const limitedPayload = await upstream.text();
         lastLimited = { status: 429, payload: limitedPayload, type: upstream.headers.get("content-type") ?? "application/json" };
         if (picked.discoveryConstrained || nextOpenAccount(listProviderAccounts(provider, { env: process.env, authPath: opts.authPath, accountsPath: accountsFile() }), skippedAccounts)) {
           continue;
         }
-        if (typeof res.writeHead === "function") res.writeHead(429, { "content-type": lastLimited.type });
-        else res.statusCode = 429;
-        res.end(limitedPayload);
-        return;
+         if (typeof res.writeHead === "function") res.writeHead(429, { "content-type": lastLimited.type });
+         else res.statusCode = 429;
+         res.end(limitedPayload);
+         finalize("failed", 429);
+         return;
       }
 
       const isUpstreamEventStream = (upstream.headers.get("content-type") ?? "").includes("text/event-stream");
@@ -1847,17 +2019,18 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
                 while ((separator = /\r?\n\r?\n/.exec(buf))) {
                   const raw = buf.slice(0, separator.index);
                   buf = buf.slice(separator.index + separator[0].length);
-                  if (raw.trim()) (res as any).write(raw + "\n\n");
+                  if (raw.trim()) await writeWithBackpressure(res, raw + "\n\n");
                 }
               }
-              if (buf.trim()) (res as any).write(buf);
+              if (buf.trim()) await writeWithBackpressure(res, buf);
             } else {
               const text = await upstream.text();
-              (res as any).write(text);
+              await writeWithBackpressure(res, text);
             }
-          }
-          (res as any).end();
-          return;
+           }
+           (res as any).end();
+           finalize("completed", upstream.status);
+           return;
         }
 
         // Translated streaming: Gemini -> Chat
@@ -1873,10 +2046,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           if (!reader) {
             const text = await upstream.text();
             // fallback to buffered
-            const parsedFallback = JSON.parse(text);
-            // synthesize from fallback? but we are in streaming branch, shouldn't happen
-            (res as any).end(text);
-            return;
+             const parsedFallback = JSON.parse(text);
+             // synthesize from fallback? but we are in streaming branch, shouldn't happen
+             (res as any).end(text);
+             finalize("completed", upstream.status);
+             return;
           }
           const decoder = new TextDecoder();
           let buf = "";
@@ -1899,7 +2073,7 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
                   const delta: any = firstDelta ? { role: "assistant", content: textDelta } : { content: textDelta };
                   firstDelta = false;
                   const downstreamChunk = { id, object: "chat.completion.chunk", created, model: bareModel, choices: [{ index: 0, delta, logprobs: null, finish_reason: null }] };
-                  (res as any).write(`data: ${JSON.stringify(downstreamChunk)}\n\n`);
+                  await writeWithBackpressure(res, `data: ${JSON.stringify(downstreamChunk)}\n\n`);
                 }
                 // handle finishReason if present
                 const finishReason = payloadJson.candidates?.[0]?.finishReason;
@@ -1910,10 +2084,11 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
             }
           }
           const finalChunk = { id, object: "chat.completion.chunk", created, model: bareModel, choices: [{ index: 0, delta: {}, logprobs: null, finish_reason: "stop" }] };
-          (res as any).write(`data: ${JSON.stringify(finalChunk)}\n\n`);
-          (res as any).write("data: [DONE]\n\n");
-          (res as any).end();
-          return;
+          await writeWithBackpressure(res, `data: ${JSON.stringify(finalChunk)}\n\n`);
+           await writeWithBackpressure(res, "data: [DONE]\n\n");
+           (res as any).end();
+           finalize("completed", upstream.status);
+           return;
         }
       }
 
@@ -1923,35 +2098,42 @@ export function createProxyServer(opts: CreateProxyServerOptions): {
           isUpstreamEventStream || payload.trimStart().startsWith("event:") || payload.trimStart().startsWith("data:")
             ? parseSsePayload(payload)
             : JSON.parse(payload);
-        if (parsed == null) {
-          json(res, 502, { error: "empty upstream stream" });
+         if (parsed == null) {
+           finalize("failed", 502);
+           json(res, 502, { error: "empty upstream stream" });
           return;
         }
         const translated = provider === "google" ? unwrapAntigravityResponse(parsed) : parsed;
-        if (protocol === "chat") writeChatCompletion(res, normalizedBody, provider, bareModel, translated);
-        if (protocol === "anthropic") writeAnthropicMessage(res, normalizedBody, provider, bareModel, translated);
-        if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, translated);
-        return;
+         if (protocol === "chat") writeChatCompletion(res, normalizedBody, provider, bareModel, translated, id);
+         if (protocol === "anthropic") writeAnthropicMessage(res, normalizedBody, provider, bareModel, translated, id);
+         if (protocol === "responses") writeResponsesPayload(res, normalizedBody, provider, bareModel, translated, id);
+         finalize(normalizeProviderCompletion(translated, provider).terminalState, upstream.status);
+         return;
       }
       if (zenFailovers < 1 && provider === "opencode" && isZenBillingError(upstream.status, payload)) {
         zenFailovers += 1;
         skippedProviders.add("opencode");
-        opts.sessions.set(id, { taskTarget: null, prevMessage: text });
-        result = await decide(req, normalizedBody, text);
+        if (identity.stable) opts.sessions.set(id, { taskTarget: null, prevMessage: text });
+         const nextDecision = await opts.sessions.runExclusive(id, () => decide(req, normalizedBody, text, identity, protocol, body, requestContext.signal));
+        state = nextDecision.state;
+        result = nextDecision.result;
         continue;
       }
       if (typeof res.writeHead === "function") res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
-      else res.statusCode = upstream.status;
-      res.end(payload);
-      return;
+       else res.statusCode = upstream.status;
+       res.end(payload);
+       finalize(upstream.ok ? "completed" : "failed", upstream.status);
+       return;
       }
       if (lastLimited) {
         if (typeof res.writeHead === "function") res.writeHead(lastLimited.status, { "content-type": lastLimited.type });
-        else res.statusCode = lastLimited.status;
-        res.end(lastLimited.payload);
-        return;
+       else res.statusCode = lastLimited.status;
+       res.end(lastLimited.payload);
+       finalize("failed", lastLimited.status);
+       return;
       }
-      json(res, 429, { error: "rate limited" });
+       json(res, 429, { error: "rate limited" });
+       finalize("failed", 429);
     },
     close() {
       void opts.recorder?.flush().catch(() => {
@@ -1965,6 +2147,10 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
   const stored = readEnvFile(defaultEnvPath());
   for (const [key, value] of Object.entries(stored)) {
     if (!process.env[key]) process.env[key] = value;
+  }
+  for (const key of ENV_KEYS) {
+    const value = process.env[key];
+    if (value) validateEnvValue(key, value);
   }
   const config = loadConfig();
   const catalog = loadCatalogSync(config);
@@ -1984,6 +2170,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
   });
   const runtime = createAvengersRuntime({
     config,
+    catalog,
     env: process.env,
     warn: (event) => console.warn("[auto-router]", event.code),
   });
@@ -2009,6 +2196,7 @@ export function bootstrapProxyOptions(): CreateProxyServerOptions {
     authPath,
     accountsPath: defaultAccountsPath(),
     claudePath: join(homedir(), ".claude/.credentials.json"),
+    oauthStatePath: defaultOAuthStatePath(),
     modelDiscovery: [googleModelDiscovery],
   };
 }
@@ -2017,19 +2205,24 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   if (process.argv[2] === "login") {
     process.exit(await mainLogin(process.argv.slice(3)));
   }
-  const server = createProxyServer(bootstrapProxyOptions());
   const host = process.env.AUTO_ROUTER_HOST ?? "127.0.0.1";
   const port = Number(process.env.AUTO_ROUTER_PORT ?? 8787);
-  createServer((req, res) => {
-    void server.handle(req, res).catch(() => {
-      if (!res.headersSent) {
-        res.statusCode = 500;
-        res.end(JSON.stringify({ error: "internal error" }));
-        return;
-      }
-      res.end();
+  if (!isLoopbackHostname(host)) {
+    console.error("[auto-router-proxy] AUTO_ROUTER_HOST must be a loopback address");
+    process.exitCode = 1;
+  } else {
+    const server = createProxyServer(bootstrapProxyOptions());
+    createServer((req, res) => {
+      void server.handle(req, res).catch(() => {
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: "internal error" }));
+          return;
+        }
+        res.end();
+      });
+    }).listen(port, host, () => {
+      console.log(`[auto-router-proxy] listening on http://${host}:${port}`);
     });
-  }).listen(port, host, () => {
-    console.log(`[auto-router-proxy] listening on http://${host}:${port}`);
-  });
+  }
 }

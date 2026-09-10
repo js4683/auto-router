@@ -35,3 +35,9 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Check release inventory
+        run: npm run release:check
+
+      - name: Check whitespace
+        run: git diff --check

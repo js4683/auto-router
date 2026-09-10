@@ -69,6 +69,21 @@ describe("planAvengersCollection", () => {
 });
 
 describe("collectAvengersOutcomes", () => {
+  it("preserves an explicit session group in collection evidence", async () => {
+    const source = dataset();
+    source.sessions[0].sessionGroupId = "shared-group";
+    const records = await collectAvengersOutcomes(source, aliases(), config, async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === config.judgeModel) {
+        const request = JSON.parse(body.messages[1].content);
+        return completion(JSON.stringify({ scores: Object.fromEntries(request.responses.map((item: { label: string }) => [item.label, 80])) }));
+      }
+      return completion("ok");
+    });
+
+    expect(records[0].sessionGroupId).toBe("shared-group");
+  });
+
   it("does not retry a timed-out candidate call", async () => {
     let calls = 0;
     const oneTurn = fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "timeout" }] })]);
@@ -98,6 +113,27 @@ describe("collectAvengersOutcomes", () => {
     expect(request.responses.map((item: any) => item.label).sort()).toEqual(["A", "B", "C"]);
   });
 
+  it("keeps candidate, judge, failed-attempt, and retry accounting separate", async () => {
+    const records = await collectAvengersOutcomes(
+      fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "hi" }] })]),
+      aliases(),
+      { ...config, retry: { maxAttempts: 2, baseDelayMs: 0, maxDelayMs: 1 } },
+      async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        if (body.model === "provider/frontier") return completion("failed", "content_filter");
+        if (body.model === "judge/model") {
+          const request = JSON.parse(body.messages[1].content);
+          return completion(JSON.stringify({ scores: Object.fromEntries(request.responses.map((item: any) => [item.label, 80])) }));
+        }
+        return completion("ok");
+      },
+    );
+    const costs = records[0].costs as { candidateGeneration: { inputTokens: number }; judge: { inputTokens: number }; failedAttempts: unknown[] };
+    expect(costs.candidateGeneration.inputTokens).toBe(30);
+    expect(costs.judge.inputTokens).toBe(0);
+    expect(costs.failedAttempts).toHaveLength(1);
+  });
+
   it("skips judging when a generation is incomplete", async () => {
     const models: string[] = [];
     await collectAvengersOutcomes(fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "hi" }] })]), aliases(), config, async (_url, init) => {
@@ -124,7 +160,26 @@ describe("collectAvengersOutcomes", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].collectionError).toBe("judge failed: provider returned HTTP 503");
     expect(rows[0].outcomes.every((outcome: { qualitySource: string }) => outcome.qualitySource === "unjudged")).toBe(true);
+    expect(rows[0].costs.failedAttempts).toEqual([{ modelId: "judge/model", status: 503 }]);
     expect(() => curateAvengersCollection(output, source, aliases())).toThrow("example session-1/turn-1 is unjudged");
+  });
+
+  it("records judge usage when a completed judge response is malformed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avengers-judge-payload-fail-"));
+    tempDirs.push(dir);
+    const output = join(dir, "collection.jsonl");
+    const source = fixtureDataset([fixtureTurn({ judgeRubric: "Score.", messages: [{ role: "user", content: "first" }] })]);
+    await expect(collectAvengersOutcomes(source, aliases(), config, async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "judge/model") return completion(JSON.stringify({ scores: { A: 80 } }));
+      return completion("ok");
+    }, output)).rejects.toThrow("judge failed");
+
+    const row = JSON.parse(readFileSync(output, "utf8"));
+    expect(row.costs.judge.inputTokens).toBe(10);
+    expect(row.costs.failedAttempts).toEqual([
+      { modelId: "judge/model", usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 } },
+    ]);
   });
 
   it("preflights user text before making generation calls", async () => {

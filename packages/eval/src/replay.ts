@@ -1,5 +1,6 @@
-import { classify, selectModel, tierRank, type AvengersProPrediction, type ModelEntry, type RouterState, type SelectionResult } from "@auto-router/router-core";
-import { capabilityEligibleModels, eligibleModels, modelRuntimeId, selectCheap, selectFrontier } from "./strategies.js";
+import { selectModel, type AvengersProPrediction, type Catalog, type ModelEntry, type RouterState, type RoutingCapability, type RoutingTransport, type SelectionRequirements, type SelectionResult } from "@auto-router/router-core";
+import { liveTransportFor } from "./live.js";
+import { modelRuntimeId, selectCheap, selectFrontier } from "./strategies.js";
 import type { EvalDatasetV1, EvalTurnV1, ReplayResult, ReplayTurnResult, StrategyReplayResult } from "./types.js";
 
 export function advanceRouterState(state: RouterState, result: SelectionResult): RouterState {
@@ -69,6 +70,37 @@ export interface ReplayRouterStep {
   previousMessage?: string;
 }
 
+function replayRequirements(dataset: EvalDatasetV1, turn: EvalTurnV1): SelectionRequirements {
+  const requiredCapabilities: RoutingCapability[] = turn.requiredCapabilities.length
+    ? turn.requiredCapabilities as RoutingCapability[]
+    : ["text"];
+  return {
+    lifetimeTokens: turn.sessionState.lifetimeTokens,
+    requiredCapabilities,
+    transport: liveTransportFor(dataset) as RoutingTransport,
+  };
+}
+
+function replayCatalog(dataset: EvalDatasetV1): Catalog {
+  return {
+    ...dataset.catalog,
+    models: dataset.catalog.models.map((model) => {
+      const runtimeId = modelRuntimeId(model);
+      const capabilities = dataset.capabilities?.[runtimeId] ?? dataset.capabilities?.[model.id];
+      const transport = dataset.liveTransports?.[runtimeId] ?? dataset.liveTransports?.[model.id];
+      return {
+        ...model,
+        ...(capabilities !== undefined ? { capabilities: capabilities as RoutingCapability[] } : {}),
+        ...(transport !== undefined
+          ? { transports: [transport as RoutingTransport] }
+          : model.transports === undefined
+            ? { transports: [liveTransportFor(dataset, runtimeId) as RoutingTransport] }
+            : {}),
+      };
+    }),
+  };
+}
+
 export function selectReplayRouterStep(
   dataset: EvalDatasetV1,
   turn: EvalTurnV1,
@@ -77,28 +109,20 @@ export function selectReplayRouterStep(
   previousMessage?: string,
   avengers?: AvengersProPrediction
 ): ReplayRouterStep {
-  const eligible = eligibleModels(dataset, turn);
-  if (!eligible.length) throw new Error(`no eligible model for turn ${turn.id}`);
-  const capabilityEligible = capabilityEligibleModels(dataset, turn);
-  const eligibleIds = new Set(eligible.flatMap((model) => [model.id, modelRuntimeId(model)]));
-  const selectionState = state.currentModel && !eligibleIds.has(state.currentModel)
-    ? { currentModel: null, currentTier: null, downgradeCounter: 0 }
-    : state;
-  const requestedTier = classify(turn.sessionState, dataset.config).tier;
-  const isDowngrade = selectionState.currentTier !== null && tierRank(requestedTier) < tierRank(selectionState.currentTier);
-  const routerModels = isDowngrade ? capabilityEligible : eligible;
+  const requirements = replayRequirements(dataset, turn);
   const selection = selectModel(
     turn.sessionState,
-    { ...dataset.catalog, models: routerModels.map((model) => ({ ...model })) },
+    replayCatalog(dataset),
     dataset.config,
-    selectionState,
+    state,
     turn.prevAgent ?? previousAgent,
     turn.prevMessage ?? previousMessage,
-    avengers
+    avengers,
+    requirements,
   );
   return {
     selection,
-    state: advanceRouterState(selectionState, selection),
+    state: advanceRouterState(state, selection),
     previousAgent: turn.sessionState.activeAgent,
     previousMessage: turn.sessionState.currentTask.lastUserMessage,
   };

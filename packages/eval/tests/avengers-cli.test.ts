@@ -28,6 +28,20 @@ function io(fetchImpl?: typeof fetch) {
   };
 }
 
+function writeSourceManifest(path: string, dataset: ReturnType<typeof fixtureDataset>, candidates: string[]): void {
+  writeFileSync(path, JSON.stringify({
+    schemaVersion: 1,
+    datasetId: dataset.id,
+    collectionOrigin: "synthetic-fixture",
+    records: dataset.sessions.flatMap((session) => session.turns.map((turn, sequence) => ({
+      id: `${session.id}/${turn.id}`,
+      sessionGroupId: session.id,
+      sequence,
+      candidatePaperModelIds: [...candidates].sort(),
+    }))),
+  }));
+}
+
 describe("Phase 4 CLI", () => {
   it("refuses every networked Phase 4 command without confirmation", async () => {
     const directory = mkdtempSync(join(tmpdir(), "avengers-cli-"));
@@ -46,15 +60,13 @@ describe("Phase 4 CLI", () => {
     const directory = mkdtempSync(join(tmpdir(), "avengers-cli-"));
     const datasetPath = join(directory, "dataset.json");
     const outputPath = join(directory, "out.jsonl");
-    writeFileSync(
-      datasetPath,
-      JSON.stringify(
-        fixtureDataset([
-          fixtureTurn({ id: "turn-1", judgeRubric: "Score.", messages: [{ role: "user", content: "one" }] }),
-          fixtureTurn({ id: "turn-2", judgeRubric: "Score.", messages: [{ role: "user", content: "two" }] }),
-        ])
-      )
-    );
+    const dataset = fixtureDataset([
+      fixtureTurn({ id: "turn-1", judgeRubric: "Score.", messages: [{ role: "user", content: "one" }] }),
+      fixtureTurn({ id: "turn-2", judgeRubric: "Score.", messages: [{ role: "user", content: "two" }] }),
+    ]);
+    writeFileSync(datasetPath, JSON.stringify(dataset));
+    const manifestPath = join(directory, "manifest.json");
+    writeSourceManifest(manifestPath, dataset, ["paper/a", "paper/b", "paper/c"]);
     const bodies: unknown[] = [];
     const output = io(async (_url, init) => {
       const body = JSON.parse(String(init?.body));
@@ -76,7 +88,7 @@ describe("Phase 4 CLI", () => {
       );
     });
     const status = await runCli(
-      ["collect-avengers", "--dataset", datasetPath, "--models", "paper/a=provider/cheap,paper/b=provider/frontier,paper/c=provider/cheap", "--output", outputPath, "--confirm-live"],
+      ["collect-avengers", "--dataset", datasetPath, "--models", "paper/a=provider/cheap,paper/b=provider/frontier,paper/c=provider/cheap", "--output", outputPath, "--source-manifest", manifestPath, "--confirm-live"],
       output.value
     );
     expect(status).toBe(0);
@@ -88,12 +100,15 @@ describe("Phase 4 CLI", () => {
     const directory = mkdtempSync(join(tmpdir(), "avengers-cli-"));
     const datasetPath = join(directory, "dataset.json");
     const outputPath = join(directory, "out.jsonl");
-    writeFileSync(datasetPath, JSON.stringify(fixtureDataset([fixtureTurn({ judgeRubric: "Score." })])));
+    const dataset = fixtureDataset([fixtureTurn({ judgeRubric: "Score." })]);
+    writeFileSync(datasetPath, JSON.stringify(dataset));
+    const manifestPath = join(directory, "manifest.json");
+    writeSourceManifest(manifestPath, dataset, ["paper/a", "paper/b"]);
     const output = io(async () => new Response("rate limited", { status: 429 }));
     output.value.env.AUTO_ROUTER_EVAL_RETRY_MAX_ATTEMPTS = "1";
 
     const status = await runCli(
-      ["collect-avengers", "--dataset", datasetPath, "--models", "paper/a=provider/cheap,paper/b=provider/frontier", "--output", outputPath, "--confirm-live"],
+      ["collect-avengers", "--dataset", datasetPath, "--models", "paper/a=provider/cheap,paper/b=provider/frontier", "--output", outputPath, "--source-manifest", manifestPath, "--confirm-live"],
       output.value,
     );
 

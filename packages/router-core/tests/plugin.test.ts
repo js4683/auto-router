@@ -124,6 +124,29 @@ describe("auto-router provider discovery", () => {
     });
   });
 
+  it("does not select a text-only target for a tool request", async () => {
+    const data = {
+      ...providerData,
+      all: providerData.all.map((provider) => provider.id === "openai"
+        ? {
+            ...provider,
+            models: {
+              ...provider.models,
+              "fable-latest": { ...provider.models["fable-latest"], capabilities: ["text", "tools"] },
+            },
+          }
+        : provider),
+    };
+    const fixture = testClient(async () => ({ data }));
+    const hooks = await plugin(fixture.client);
+    const output = message("apply the requested patch", { sessionID: "tool-request" });
+    (output.message as any).tools = [{ type: "function", function: { name: "apply_patch" } }];
+
+    await hooks["chat.message"]!({ sessionID: "tool-request", agent: "build" } as any, output as any);
+
+    expect(output.message.model).toEqual({ providerID: "openai", modelID: "fable-latest" });
+  });
+
   it("reapplies the locked target without selecting again on a sticky turn", async () => {
     const fixture = testClient();
     const hooks = await plugin(fixture.client);

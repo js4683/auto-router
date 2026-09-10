@@ -33,4 +33,29 @@ describe("env-file", () => {
     expect(() => writeEnvFile(path, { AUTO_ROUTER_UPSTREAM_TIMEOUT_MS: "600001" })).toThrow(/upstream timeout/);
     expect(readEnvFile(path)).toMatchObject({ AUTO_ROUTER_UPSTREAM_TIMEOUT_MS: "120000" });
   });
+
+  it("rejects newline-containing values before changing the file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "auto-router-env-"));
+    const path = join(dir, ".env");
+    writeEnvFile(path, { ANTHROPIC_API_KEY: "sk-valid" });
+
+    expect(() => writeEnvFile(path, { ANTHROPIC_API_KEY: "sk-attacker\nOPENAI_API_KEY=sk-injected" })).toThrow(/newline/i);
+    expect(readEnvFile(path)).toEqual({ ANTHROPIC_API_KEY: "sk-valid" });
+  });
+
+  it("rejects unsafe provider base URLs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "auto-router-env-"));
+    const path = join(dir, ".env");
+    writeEnvFile(path, { OPENAI_BASE_URL: "https://api.openai.com" });
+
+    for (const value of [
+      "https://user:pass@example.com/v1",
+      "https://example.com/v1?token=secret",
+      "https://example.com/v1#secret",
+      "http://example.com/v1",
+    ]) {
+      expect(() => writeEnvFile(path, { OPENAI_BASE_URL: value })).toThrow(/base URL/i);
+    }
+    expect(readEnvFile(path)).toMatchObject({ OPENAI_BASE_URL: "https://api.openai.com" });
+  });
 });

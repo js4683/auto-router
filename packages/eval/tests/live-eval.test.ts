@@ -18,6 +18,13 @@ function responseWithFinishReason(content: string, finishReason: string): Respon
   );
 }
 
+function responseWithModel(content: string, model: string): Response {
+  return new Response(
+    JSON.stringify({ model, choices: [{ message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 20 } }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
 function liveFixture() {
   const dataset = fixtureDataset([
     fixtureTurn({
@@ -74,6 +81,7 @@ describe("live evaluation orchestration", () => {
     const report = buildLiveReport(dataset, replay, result);
     expect(report.mode).toBe("live");
     expect(report.gates.liveQuality).toMatchObject({ passed: false, reason: "requires at least 30 complete live cases" });
+    expect((report.gates as any).versionedQuality).toMatchObject({ passed: false, independentGroups: 1 });
     expect(report.strategies.router.metrics).toMatchObject({ isEstimated: true, totalCostUsd: 0.0012 });
     expect(report.strategies.router.live).toMatchObject({
       sampleSize: 1,
@@ -122,6 +130,7 @@ describe("live evaluation orchestration", () => {
     });
     expect(report.strategies.router.live?.providerObserved.incompleteReasons).toContain("missing provider usage for router in case session-1\u0000turn-1");
     expect(report.strategies["always-frontier"].live?.providerObserved.totalCostUsd).toBe(0.0016);
+    expect(report.gates.versionedQuality?.reason).toContain("incomplete");
   });
 
   it("preserves failed generations and skips judging incomplete cases", async () => {
@@ -140,7 +149,28 @@ describe("live evaluation orchestration", () => {
     expect(calls).toBe(3);
     expect(result.cases[0].complete).toBe(false);
     expect(result.cases[0].errors.join("\n")).toContain("always-frontier: provider returned HTTP 503");
+    expect(result.cases[0].costs?.failedAttempts).toEqual([{ modelId: "provider/frontier", status: 503 }]);
     expect(result.qualityGate.sampleSize).toBe(0);
+  });
+
+  it("rejects a provider runtime identity that does not match the requested alias", async () => {
+    const dataset = liveFixture();
+    const replay = replayDataset(dataset);
+    let judgeCalls = 0;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "live/judge") {
+        judgeCalls += 1;
+        return response(JSON.stringify({ scores: { A: 90, B: 90, C: 90 } }));
+      }
+      return body.model === "live/frontier" ? responseWithModel("wrong", "served/other") : response(body.model);
+    };
+
+    const result = await runLiveEvaluation(dataset, replay, config, fetchImpl);
+
+    expect(judgeCalls).toBe(0);
+    expect(result.cases[0].complete).toBe(false);
+    expect(result.cases[0].errors.join("\n")).toContain("runtime identity mismatch");
   });
 
   it("does not count a generated incomplete terminal state as a complete case", async () => {
@@ -178,6 +208,9 @@ describe("live evaluation orchestration", () => {
 
     expect(result.cases[0]).toMatchObject({ complete: false });
     expect(result.cases[0].errors).toContain("judge: judge response terminal state is incomplete");
+    expect(result.cases[0].costs?.failedAttempts).toEqual([
+      { modelId: "live/judge", usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 } },
+    ]);
     expect(result.qualityGate.sampleSize).toBe(0);
   });
 

@@ -5,11 +5,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   artifactDigest,
+  assertActivationProvenance,
   assertActivationEligible,
   loadAvengersProArtifact,
   loadAvengersProArtifactFiles,
   type ArtifactDigestInput,
   type AvengersProMetadataV2,
+  type AvengersProMetadataV3,
   type AvengersProValidationV1,
 } from "../src/avengers-pro-artifacts.js";
 
@@ -53,6 +55,23 @@ function digestInput(): ArtifactDigestInput {
         "paper/frontier": { qualityMean: 0.9, completed: 1, failed: 0, observations: 1 },
       },
     },
+  };
+}
+
+function v3DigestInput(): ArtifactDigestInput {
+  return {
+    ...digestInput(),
+    metadata: {
+      ...metadata(),
+      schemaVersion: 3,
+      embeddingEndpointDigest: "b".repeat(64),
+      embeddingModelRevision: "revision-a",
+      catalogDigest: "c".repeat(64),
+      configDigest: "d".repeat(64),
+      policyDigest: "e".repeat(64),
+      sourceManifestDigest: "f".repeat(64),
+      collectionOrigin: "consented-production",
+    } as AvengersProMetadataV3,
   };
 }
 
@@ -127,6 +146,95 @@ describe("Avengers-Pro artifact boundary", () => {
       normalizationVersion: "phase4-text-v1",
     });
     expect(artifact.validation.artifactDigest).toBe(artifact.digest);
+  });
+
+  it("loads an ineligible validation manifest with no held-out cases", () => {
+    const files = digestInput();
+    const manifest = validation(files);
+    const artifact = loadAvengersProArtifact(artifactDir(files, {
+      ...manifest,
+      sampleSize: 0,
+      metrics: {
+        qualityRetentionVsFrontier: null,
+        costSavingsVsFrontier: null,
+        qualityDeltaVsTier0: null,
+        costDeltaVsTier0: null,
+      },
+      qualityRetentionConfidenceInterval: null,
+      gates: {
+        ...manifest.gates,
+        sampleSize: { passed: false, reason: "no cases" },
+        candidateMatrix: { passed: false, reason: "no cases" },
+        qualityRetention: { passed: false, reason: "no cases" },
+        costSavings: { passed: false, reason: "no cases" },
+        tier0Quality: { passed: false, reason: "no cases" },
+        tier0Cost: { passed: false, reason: "no cases" },
+        uncertainty: { passed: false, reason: "no cases" },
+        requiredCases: { passed: false, reason: "no cases" },
+      },
+      eligible: false,
+    }));
+
+    expect(artifact.validation.sampleSize).toBe(0);
+    expect(artifact.validation.eligible).toBe(false);
+  });
+
+  it("rejects a v2 artifact for provenance-bound activation", () => {
+    const artifact = loadAvengersProArtifact(artifactDir());
+    expect(() => assertActivationProvenance(artifact, {
+      collectionOrigin: "consented-production",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: "b".repeat(64),
+      configDigest: "c".repeat(64),
+      policyDigest: "d".repeat(64),
+      embeddingEndpointDigest: "e".repeat(64),
+      embeddingModelRevision: "revision-a",
+    })).toThrow(/v3|provenance/i);
+  });
+
+  it("rejects a v3 artifact without a versioned quality gate", () => {
+    const files = v3DigestInput();
+    expect(() => loadAvengersProArtifact(artifactDir(files))).toThrow(/quality gate|versioned|eligibility/i);
+  });
+
+  it("loads a v3 artifact with an eligible versioned quality gate", () => {
+    const files = v3DigestInput();
+    const manifest = {
+      ...validation(files),
+      versionedQuality: {
+        gateVersion: 2 as const,
+        passed: true,
+        reason: "all critical cohorts passed",
+        lowerBound: 0.95,
+        independentGroups: 200,
+        cohortResults: {
+          "consented-production": { passed: true, lowerBound: 0.95, independentGroups: 100, reason: "ok" },
+        },
+      },
+    };
+    const artifact = loadAvengersProArtifact(artifactDir(files, manifest));
+
+    expect(artifact.validation.versionedQuality).toMatchObject({ gateVersion: 2, passed: true, independentGroups: 200 });
+    expect(() => assertActivationEligible(artifact)).not.toThrow();
+  });
+
+  it("does not let an aggregate versioned pass hide a failed cohort", () => {
+    const files = v3DigestInput();
+    const manifest = {
+      ...validation(files),
+      versionedQuality: {
+        gateVersion: 2 as const,
+        passed: true,
+        reason: "overall passed",
+        lowerBound: 0.95,
+        independentGroups: 200,
+        cohortResults: {
+          "consented-production": { passed: false, lowerBound: 0.8, independentGroups: 100, reason: "cohort failed" },
+        },
+      },
+    };
+
+    expect(() => loadAvengersProArtifact(artifactDir(files, manifest))).toThrow(/cohort|versioned quality/i);
   });
 
   it("loads digest inputs without requiring a validation manifest", () => {

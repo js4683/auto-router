@@ -1,4 +1,6 @@
 export * from "./types.js";
+export * from "./protocol.js";
+export * from "./eligibility.js";
 export * from "./classify.js";
 export * from "./guards.js";
 export * from "./catalog.js";
@@ -9,3 +11,4 @@ export * from "./avengers-pro-artifacts.js";
 export * from "./avengers-pro.js";
 export * from "./model-map.js";
 export * from "./embeddings.js";
+export * from "./digest.js";

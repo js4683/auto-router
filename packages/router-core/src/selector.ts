@@ -1,11 +1,16 @@
-import type { AvengersProPrediction, Catalog, ModelEntry, ModelMap, RouterConfig, RouterState, SessionState, SelectionResult, TaskStrategy, Tier } from "./types.js";
+import { checkModelEligibility, filterEligibleModels, SelectionConstraintError } from "./eligibility.js";
+import type { AvengersProPrediction, Catalog, ModelEntry, ModelMap, RouterConfig, RouterState, SelectionRequirements, SessionState, SelectionResult, TaskStrategy, Tier } from "./types.js";
 import { classify, detectBoundary, tierRank } from "./classify.js";
 import { passesContextFit, isUpgrade } from "./guards.js";
 import { resolveTaskType } from "./task-type.js";
 import { resolveMappedModels } from "./model-map.js";
 
-function bestModelForTier(catalog: Catalog, minQuality: number, strategy: TaskStrategy): ModelEntry | null {
-  const eligible = catalog.models.filter((m) => m.codingIndex >= minQuality);
+function fitsContext(session: SessionState, model: ModelEntry, config: RouterConfig): boolean {
+  return passesContextFit(session.lifetimeTokens, model, config).pass;
+}
+
+function bestModelForTier(catalog: Catalog, minQuality: number, strategy: TaskStrategy, session: SessionState, config: RouterConfig): ModelEntry | null {
+  const eligible = catalog.models.filter((m) => m.codingIndex >= minQuality && fitsContext(session, m, config));
   if (!eligible.length) return null;
 
   if (strategy !== "quality") {
@@ -45,13 +50,15 @@ function learnedCandidates(
   prediction: AvengersProPrediction,
   modelMap: ModelMap,
   catalog: Catalog,
-  minQuality: number
+  minQuality: number,
+  session: SessionState,
+  config: RouterConfig,
 ): LearnedCandidate[] {
   const candidates: LearnedCandidate[] = [];
   for (const entry of resolveMappedModels(prediction.paperIds, modelMap, catalog)) {
     const model = catalog.models.find((item) => modelRuntimeId(item) === entry.runtimeId || item.id === entry.runtimeId);
     const predictedQuality = prediction.predictedQuality[entry.paperId];
-    if (!model || !(model.codingIndex >= minQuality) || !Number.isFinite(predictedQuality)) continue;
+    if (!model || !(model.codingIndex >= minQuality) || !Number.isFinite(predictedQuality) || !fitsContext(session, model, config)) continue;
     candidates.push({ model, predictedQuality });
   }
   return candidates;
@@ -84,12 +91,26 @@ function bestLearnedModel(candidates: LearnedCandidate[], strategy: TaskStrategy
   )[0]?.model ?? null;
 }
 
+function selectionRequirements(session: SessionState): SelectionRequirements | undefined {
+  if (!session.requiredCapabilities && !session.transport) return undefined;
+  return {
+    lifetimeTokens: session.lifetimeTokens,
+    requiredCapabilities: session.requiredCapabilities ?? ["text"],
+    transport: session.transport ?? "chat",
+  };
+}
+
+function noEligibleModelError(catalog: Catalog, requirements: SelectionRequirements, config: RouterConfig): Error {
+  const firstFailure = catalog.models
+    .map((model) => checkModelEligibility(model, requirements, config))
+    .find((result) => !result.pass);
+  const detail = firstFailure && !firstFailure.pass ? `${firstFailure.code}: ${firstFailure.reason}` : "catalog is empty";
+  return new Error(`no eligible model (${detail})`);
+}
+
 /**
- * Two-axis selectModel (grill Q8):
- *  1. resolve task type (explicit / gated auto)
- *  2. candidate = taskTypeModels[type].prefer if set and clears tier's minQuality
- *  3. else free-first within tier, then best value
- *  4. apply guards: context-fit, then stickiness/downgrade counter, then commit (or keep current)
+ * Apply the shared hard-eligibility contract before the ranking/stickiness
+ * transition. Callers without request requirements retain the legacy API.
  */
 export function selectModel(
   session: SessionState,
@@ -98,7 +119,42 @@ export function selectModel(
   state: RouterState,
   prevAgent?: string,
   prevMessage?: string,
-  avengers?: AvengersProPrediction
+  avengers?: AvengersProPrediction,
+  requirements?: SelectionRequirements,
+): SelectionResult {
+  const effectiveRequirements = requirements ?? selectionRequirements(session);
+  if (!effectiveRequirements) return selectFromEligibleCatalog(session, catalog, config, state, prevAgent, prevMessage, avengers);
+
+  const eligible = filterEligibleModels(catalog, effectiveRequirements, config);
+  if (!eligible.length) throw noEligibleModelError(catalog, effectiveRequirements, config);
+
+  const boundary = detectBoundary(session, prevAgent, prevMessage);
+  if (state.currentModel && !boundary.isBoundary) {
+    const current = catalog.models.find((model) => model.id === state.currentModel || modelRuntimeId(model) === state.currentModel);
+    if (!current) throw new Error(`sticky model ${state.currentModel} is unavailable`);
+    const eligibility = checkModelEligibility(current, effectiveRequirements, config);
+    if (!eligibility.pass) throw new SelectionConstraintError(eligibility.code, eligibility.reason);
+  }
+
+  return selectFromEligibleCatalog(
+    session,
+    { ...catalog, models: eligible },
+    config,
+    state,
+    prevAgent,
+    prevMessage,
+    avengers,
+  );
+}
+
+function selectFromEligibleCatalog(
+  session: SessionState,
+  catalog: Catalog,
+  config: RouterConfig,
+  state: RouterState,
+  prevAgent?: string,
+  prevMessage?: string,
+  avengers?: AvengersProPrediction,
 ): SelectionResult {
   const cls = classify(session, config);
   const boundary = detectBoundary(session, prevAgent, prevMessage);
@@ -117,7 +173,7 @@ export function selectModel(
   if (taskType && config.taskTypeModels[taskType]?.prefer) {
     const preferredId = config.taskTypeModels[taskType]!.prefer!;
     const preferred = catalog.models.find((m) => m.id === preferredId || m.runtimeId === preferredId);
-    if (preferred && preferred.codingIndex >= minQuality) {
+    if (preferred && preferred.codingIndex >= minQuality && fitsContext(session, preferred, config)) {
       candidate = preferred;
       via = "taskType-prefer";
       reason = `taskType ${taskType} prefer ${preferredId} clears tier ${cls.tier} (quality ${preferred.codingIndex} >= ${minQuality})`;
@@ -127,7 +183,7 @@ export function selectModel(
   }
 
   if (!candidate && avengers?.paperIds?.length && config.modelMap) {
-    candidate = bestLearnedModel(learnedCandidates(avengers, config.modelMap, catalog, minQuality), strategy);
+    candidate = bestLearnedModel(learnedCandidates(avengers, config.modelMap, catalog, minQuality, session, config), strategy);
     if (candidate) {
       via = strategy === "value" || !taskPolicy?.strategy ? "avengers-pro" : candidate.isFree && strategy !== "quality" ? "free-first" : strategy;
       reason = `avengers-pro mapped ${candidate.id}`;
@@ -137,7 +193,7 @@ export function selectModel(
   // Step 3: tier-default (free-first)
   if (!candidate) {
     // If taskType but no prefer, reason already set; keep
-    candidate = bestModelForTier(catalog, minQuality, strategy);
+    candidate = bestModelForTier(catalog, minQuality, strategy, session, config);
     if (candidate) {
       via = candidate.isFree && strategy !== "quality" ? "free-first" : strategy;
       reason = reason ? `${reason}; fallback ${via} ${candidate.id} (value ${candidate.value.toFixed(2)})` : `${via} ${candidate.id} for tier ${cls.tier}`;
@@ -146,8 +202,8 @@ export function selectModel(
 
   // Fallback if nothing eligible (e.g., minQuality too high)
   if (!candidate) {
-    // pick highest quality available
-    candidate = catalog.models.sort((a, b) => b.codingIndex - a.codingIndex)[0] ?? null;
+    const fitting = catalog.models.filter((model) => fitsContext(session, model, config));
+    candidate = [...fitting].sort((a, b) => b.codingIndex - a.codingIndex)[0] ?? null;
     via = "fallback";
     reason = `no model clears minQuality ${minQuality}, fallback to highest quality ${candidate?.id}`;
   }
@@ -157,36 +213,17 @@ export function selectModel(
   }
 
   // Step 4: guards
-  // Context-fit: refuse downgrade if session won't fit target window + margin
-  // candidate derived from cls.tier, so downgrade = cls.tier < state.currentTier
   const wouldDowngradeTier = state.currentTier ? tierRank(cls.tier) < tierRank(state.currentTier) : false;
-
-  // If wouldDowngrade, check context fit for the candidate target
-  if (wouldDowngradeTier) {
-    const fit = passesContextFit(session.lifetimeTokens, candidate, config);
-    if (!fit.pass) {
-      // block downgrade — stay on current model
-      return {
-        modelId: state.currentModel ?? modelRuntimeId(candidate),
-        tier: cls.tier,
-        taskType,
-        confidence: cls.confidence,
-        reason: `context-fit block: ${fit.reason}; staying on ${state.currentModel ?? candidate.id}`,
-        via: "context-fit-block",
-        blockedDowngrade: true,
-        catalogSource: catalog.source,
-        score: cls.score,
-        boundary,
-      };
-    }
-  }
 
   // Stickiness: hold model within task until confident boundary or upgrade
   // Downgrade needs downgradeAfter confident boundaries; upgrade bypasses.
   const upgrade = state.currentTier ? isUpgrade(state.currentTier, cls.tier) : false;
   const hardUpgradeSignal = (session.currentTask.priorErrors ?? 0) > 0 || /why doesn't|not working|error.*retry/i.test(session.currentTask.lastUserMessage);
 
-  if (state.currentModel && !boundary.isBoundary && !upgrade && !hardUpgradeSignal) {
+  const current = state.currentModel
+    ? catalog.models.find((model) => model.id === state.currentModel || modelRuntimeId(model) === state.currentModel)
+    : undefined;
+  if (state.currentModel && !boundary.isBoundary && !upgrade && !hardUpgradeSignal && (!current || fitsContext(session, current, config))) {
     // Not a boundary, not upgrade, not hard signal -> stay sticky
     return {
       modelId: state.currentModel,

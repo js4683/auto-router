@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { normalizeEmbeddingText, type EmbeddingClientConfig } from "@auto-router/router-core";
-import { embedCorpusExamples } from "../src/avengers-embedding-cache.js";
+import { cacheKey, embedCorpusExamples } from "../src/avengers-embedding-cache.js";
 import type { AvengersCorpusExampleV1 } from "../src/avengers-corpus.js";
 
 const client: EmbeddingClientConfig = {
@@ -40,6 +40,13 @@ afterEach(() => {
 });
 
 describe("embedCorpusExamples", () => {
+  it("binds cache keys to endpoint, model revision, and normalization", () => {
+    const base = { endpoint: "https://embed.test/v1", model: "embed", revision: "a", normalization: "v1:32" };
+    expect(cacheKey(base)).not.toBe(cacheKey({ ...base, endpoint: "https://other.test/v1" }));
+    expect(cacheKey(base)).not.toBe(cacheKey({ ...base, revision: "b" }));
+    expect(cacheKey(base)).not.toBe(cacheKey({ ...base, normalization: "v2:32" }));
+  });
+
   it("requests only missing or invalidated embeddings", async () => {
     const dir = mkdtempSync(join(tmpdir(), "embed-cache-"));
     dirs.push(dir);
@@ -92,6 +99,34 @@ describe("embedCorpusExamples", () => {
       },
     });
     expect(called).toBe(true);
+  });
+
+  it("treats a v1 cache as cold for provenance-bound runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "embed-cache-"));
+    dirs.push(dir);
+    const cachePath = join(dir, "cache.json");
+    writeFileSync(cachePath, JSON.stringify({
+      schemaVersion: 1,
+      model: "embed/test",
+      dimensions: 2,
+      entries: { a: { inputDigest: "unused", vector: [1, 0] } },
+    }));
+    let calls = 0;
+    await embedCorpusExamples([example("a", "one")], {
+      client,
+      maxInputChars,
+      cachePath,
+      modelRevision: "revision-a",
+      corpusDigest: "a".repeat(64),
+      sourceManifestDigest: "b".repeat(64),
+      provenanceBound: true,
+      fetchImpl: async () => {
+        calls += 1;
+        return embedResponse([[0, 1]]);
+      },
+    });
+    expect(calls).toBe(1);
+    expect(JSON.parse(readFileSync(cachePath, "utf8")).schemaVersion).toBe(2);
   });
 
   it("rejects duplicate example IDs", async () => {

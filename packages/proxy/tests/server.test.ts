@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createJsonlRecorder, type EvalRecordInput, type EvalRecorder } from "@auto-router/eval";
-import { selectModel, type AvengersProPrediction, type Catalog, type RouterConfig, type SessionState } from "@auto-router/router-core";
+import {
+  selectModel,
+  type AvengersProPrediction,
+  type Catalog,
+  type RouterConfig,
+  type SelectionRequirements,
+  type SessionState,
+} from "@auto-router/router-core";
 import { createProxyServer } from "../src/server.js";
 import { memorySessions } from "../src/session.js";
 
@@ -21,6 +28,8 @@ const catalog: Catalog = {
       value: 780,
       windowTokens: 272000,
       isFree: true,
+      capabilities: ["text", "tools", "vision", "structured-output"],
+      transports: ["chat", "responses", "anthropic"],
     },
     {
       id: "gpt-5.6-sol",
@@ -30,6 +39,8 @@ const catalog: Catalog = {
       value: 7.6,
       windowTokens: 272000,
       isFree: false,
+      capabilities: ["text", "tools", "vision", "structured-output"],
+      transports: ["chat", "responses", "anthropic"],
     },
   ],
 };
@@ -75,6 +86,23 @@ function fakeReq(url: string, body: unknown, headers: Record<string, string | un
   req.headers = requestHeaders;
   queueMicrotask(() => {
     req.emit("data", Buffer.from(JSON.stringify(body)));
+    req.emit("end");
+  });
+  return req;
+}
+
+function fakeRawReq(url: string, body: string, headers: Record<string, string | undefined> = {}): IncomingMessage {
+  const req = new IncomingMessage(new Socket());
+  req.method = "POST";
+  req.url = url;
+  const requestHeaders: Record<string, string> = { "content-type": "application/json", "x-session-id": "ses_test" };
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) delete requestHeaders[name];
+    else requestHeaders[name] = value;
+  }
+  req.headers = requestHeaders;
+  queueMicrotask(() => {
+    req.emit("data", Buffer.from(body));
     req.emit("end");
   });
   return req;
@@ -290,10 +318,11 @@ describe("proxy", () => {
         },
         modelDiscovery: [
           {
-            provider: "google",
-            async discover(account) {
-              return [{ id: account.id === "google-extra" ? "gemini-extra" : "gemini-primary", capabilities: ["text", "tools"] }];
-            },
+           provider: "google",
+           async discover(account) {
+             account.projectId = `${account.id}-project`;
+             return [{ id: account.id === "google-extra" ? "gemini-extra" : "gemini-primary", capabilities: ["text", "tools"] }];
+           },
           },
         ],
         select: () =>
@@ -360,6 +389,169 @@ describe("proxy", () => {
       else process.env.GEMINI_API_KEY = previousKey;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("keeps absolute-form request targets on the configured upstream route", async () => {
+    const upstreamUrls: string[] = [];
+    const redirects: Array<RequestRedirect | undefined> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        xai: {
+          baseUrl: "https://api.x.ai",
+          apiKey: "configured-xai-key",
+          fetchImpl: async (url, init) => {
+            upstreamUrls.push(String(url));
+            redirects.push(init?.redirect);
+            return new Response(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }), {
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "xai/grok-4.6",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(fakeReq("http://attacker.example/v1/chat/completions", { messages: [{ role: "user", content: "hello" }] }), res as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(upstreamUrls).toEqual(["https://api.x.ai/v1/chat/completions"]);
+    expect(redirects).toEqual(["error"]);
+  });
+
+  it("rejects unknown request paths before routing or provider calls", async () => {
+    let backendCalls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        xai: {
+          baseUrl: "https://api.x.ai",
+          apiKey: "configured-xai-key",
+          fetchImpl: async () => {
+            backendCalls += 1;
+            return new Response("unexpected");
+          },
+        },
+      },
+      select: () => {
+        throw new Error("unknown path was routed");
+      },
+    });
+
+    const res = collectRes();
+    await server.handle(fakeReq("http://attacker.example/credential-capture", { messages: [{ role: "user", content: "hello" }] }), res as never);
+
+    expect(res.statusCode).toBe(404);
+    expect(backendCalls).toBe(0);
+  });
+
+  it("does not forward a Chat bearer token to Google", async () => {
+    const previousGeminiKey = process.env.GEMINI_API_KEY;
+    const previousGoogleKey = process.env.GOOGLE_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    try {
+      const server = createProxyServer({
+        catalog,
+        config,
+        sessions: memorySessions(),
+        backends: {
+          google: {
+            baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+            fetchImpl: async (url, init) => {
+              requests.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") });
+              return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), {
+                headers: { "content-type": "application/json" },
+              });
+            },
+          },
+        },
+        select: () =>
+          ({
+            modelId: "google/gemini-3.6-flash",
+            tier: "simple",
+            taskType: null,
+            confidence: 1,
+            reason: "fixture",
+            via: "force",
+            catalogSource: "live",
+            score: 0,
+            boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+          }) as never,
+      });
+
+      const res = collectRes();
+      await server.handle(fakeReq("/v1/chat/completions", { messages: [{ role: "user", content: "hello" }] }, { authorization: "Bearer inbound-openai-token" }), res as never);
+
+      expect(res.statusCode).toBe(200);
+      expect(requests).toEqual([
+        {
+          url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent",
+          authorization: null,
+        },
+      ]);
+    } finally {
+      if (previousGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = previousGeminiKey;
+      if (previousGoogleKey === undefined) delete process.env.GOOGLE_API_KEY;
+      else process.env.GOOGLE_API_KEY = previousGoogleKey;
+    }
+  });
+
+  it("does not forward a Chat bearer token as an Anthropic API key", async () => {
+    const requests: Array<{ url: string; apiKey: string | null; authorization: string | null }> = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        anthropic: {
+          baseUrl: "https://api.anthropic.com",
+          fetchImpl: async (url, init) => {
+            const headers = new Headers(init?.headers);
+            requests.push({ url: String(url), apiKey: headers.get("x-api-key"), authorization: headers.get("authorization") });
+            return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }), {
+              headers: { "content-type": "application/json" },
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "anthropic/claude-sonnet-4-5",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { messages: [{ role: "user", content: "hello" }] }, { authorization: "Bearer inbound-openai-token" }), res as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(requests).toEqual([{ url: "https://api.anthropic.com/v1/messages", apiKey: null, authorization: null }]);
   });
 
   it("handles the Claude Code preflight without calling a backend", async () => {
@@ -511,6 +703,48 @@ describe("proxy", () => {
     expect(rankCalls).toBe(1);
   });
 
+  it("passes hard routing requirements derived from the normalized request", async () => {
+    let requirements: SelectionRequirements | undefined;
+    const server = createProxyServer({
+      catalog: {
+        ...catalog,
+        models: catalog.models.map((model) => ({
+          ...model,
+          capabilities: ["text", "tools", "vision", "structured-output"],
+          transports: ["responses"],
+        })),
+      },
+      config,
+      sessions: memorySessions(),
+      backends: {
+        opencode: {
+          baseUrl: "https://backend.test",
+          fetchImpl: async () => new Response(JSON.stringify({ id: "ok", output: [] }), { status: 200 }),
+        },
+      },
+      select: ((...args: Parameters<typeof selectModel>) => {
+        requirements = args[7];
+        return selectModel(...args);
+      }) as typeof selectModel,
+    });
+
+    await server.handle(
+      fakeReq("/v1/responses", {
+        model: "auto",
+        input: [{ role: "user", content: [{ type: "input_image", image_url: "https://example.test/image.png" }] }],
+        tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
+        text: { format: { type: "json_object" } },
+      }),
+      collectRes() as never,
+    );
+
+    expect(requirements).toEqual({
+      lifetimeTokens: expect.any(Number),
+      requiredCapabilities: ["text", "tools", "vision", "structured-output"],
+      transport: "responses",
+    });
+  });
+
   it("reselects for a long run task but holds the target for a short follow-up", async () => {
     const selections: ReturnType<typeof selectModel>[] = [];
     const server = createProxyServer({
@@ -558,6 +792,64 @@ describe("proxy", () => {
     expect(selections).toHaveLength(2);
     expect(selections.map((selection) => selection.boundary.isBoundary)).toEqual([true, true]);
     expect(shortRun).toEqual({ modelId: longRun.modelId, via: "stay-sticky" });
+  });
+
+  it("does not keep a sticky target that no longer fits the session", async () => {
+    const overflowCatalog: Catalog = {
+      fetchedAt: "t",
+      source: "live",
+      models: [
+        {
+          id: "tiny",
+          runtimeId: "opencode/tiny",
+          codingIndex: 70,
+          blendedPrice: 0,
+          value: 700,
+          windowTokens: 12000,
+          isFree: true,
+          capabilities: ["text", "tools", "vision", "structured-output"],
+          transports: ["chat", "responses", "anthropic"],
+        },
+        {
+          id: "wide",
+          runtimeId: "openai/wide",
+          codingIndex: 92,
+          blendedPrice: 12,
+          value: 7.6,
+          windowTokens: 272000,
+          isFree: false,
+          capabilities: ["text", "tools", "vision", "structured-output"],
+          transports: ["chat", "responses", "anthropic"],
+        },
+      ],
+    };
+    const server = createProxyServer({
+      catalog: overflowCatalog,
+      config,
+      sessions: memorySessions(),
+      backends: {},
+      select: selectModel,
+    });
+    const first = collectRes();
+    await server.handle(fakeReq("/v1/route", { messages: [{ role: "user", content: "hi" }] }, { "x-session-id": "overflow-lock" }), first as never);
+    expect(JSON.parse(first.body).modelId).toBe("opencode/tiny");
+
+    await expect(
+      server.handle(
+        fakeReq(
+          "/v1/route",
+          {
+            messages: [
+              { role: "user", content: "hi" },
+              { role: "assistant", content: "x".repeat(20000) },
+              { role: "user", content: "continue" },
+            ],
+          },
+          { "x-session-id": "overflow-lock" },
+        ),
+        collectRes() as never,
+      ),
+    ).rejects.toMatchObject({ name: "SelectionConstraintError", code: "context-overflow" });
   });
 
   it("returns a route decision without calling a backend", async () => {
@@ -1188,6 +1480,56 @@ describe("proxy", () => {
     }
   });
 
+  it("returns a single gateway timeout when the upstream never completes", async () => {
+    let calls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      upstreamTimeoutMs: 10,
+      backends: {
+        openai: {
+          baseUrl: "https://openai.test",
+          fetchImpl: async (_url, init) => {
+            calls += 1;
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+            });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "forced",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const res = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "wait" }] }), res as never);
+
+    expect(calls).toBe(1);
+    expect(res.statusCode).toBe(504);
+    expect(res.body).toContain("upstream request timed out");
+  });
+
+  it("returns a client error for malformed inference JSON", async () => {
+    const server = createProxyServer({ catalog, config, sessions: memorySessions(), backends: {}, select: selectModel });
+    const res = collectRes();
+
+    await expect(server.handle(fakeRawReq("/v1/chat/completions", "{"), res as never)).resolves.toBeUndefined();
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toContain("invalid json");
+  });
+
   it("reads the upstream timeout from the proxy environment", async () => {
     vi.stubEnv("AUTO_ROUTER_UPSTREAM_TIMEOUT_MS", "300000");
     try {
@@ -1424,6 +1766,65 @@ describe("proxy", () => {
         },
       }],
     });
+  });
+
+  it("scopes Gemini thought signatures to the stable session and generates missing call IDs", async () => {
+    const requests: any[] = [];
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      backends: {
+        google: {
+          baseUrl: "https://generativelanguage.googleapis.com",
+          apiKey: "AIza-test-key",
+          fetchImpl: async (_url, init) => {
+            requests.push(JSON.parse(String((init as RequestInit).body)));
+            return new Response(JSON.stringify({
+              candidates: [{
+                content: { parts: [{ functionCall: { name: "read_file", args: { path: "README.md" } }, thoughtSignature: "sig-a" }] },
+                finishReason: "STOP",
+              }],
+            }), { headers: { "content-type": "application/json" } });
+          },
+        },
+      },
+      select: () => ({
+        modelId: "google/gemini-3-flash",
+        tier: "simple",
+        taskType: null,
+        confidence: 1,
+        reason: "forced",
+        via: "force",
+        catalogSource: "live",
+        score: 0,
+        boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+      }) as never,
+    });
+
+    const first = collectRes();
+    await server.handle(
+      fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "read README" }] }, { "x-session-id": "gemini-one" }),
+      first as never,
+    );
+    const generatedCallId = JSON.parse(first.body).choices[0].message.tool_calls[0].id;
+
+    const continuation = {
+      model: "auto",
+      messages: [
+        { role: "user", content: "read README" },
+        { role: "assistant", content: null, tool_calls: [{ id: generatedCallId, type: "function", function: { name: "read_file", arguments: '{"path":"README.md"}' } }] },
+        { role: "tool", tool_call_id: generatedCallId, content: "contents" },
+      ],
+    };
+    await server.handle(fakeReq("/v1/chat/completions", continuation, { "x-session-id": "gemini-one" }), collectRes() as never);
+    await server.handle(fakeReq("/v1/chat/completions", continuation, { "x-session-id": "gemini-two" }), collectRes() as never);
+
+    const signature = requests[1].contents.flatMap((item: any) => item.parts ?? []).find((part: any) => part.functionCall)?.thoughtSignature;
+    const otherSessionSignature = requests[2].contents.flatMap((item: any) => item.parts ?? []).find((part: any) => part.functionCall)?.thoughtSignature;
+    expect(generatedCallId).toMatch(/^call_/);
+    expect(signature).toBe("sig-a");
+    expect(otherSessionSignature).toBeUndefined();
   });
 
   it("maps Gemini MAX_TOKENS to an incomplete Responses result", async () => {
@@ -2213,7 +2614,7 @@ describe("proxy", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ status: "completed", usageSource: "estimated", requiredCapabilities: ["text"] });
+    expect(records[0]).toMatchObject({ status: "completed", usageSource: "estimated", requiredCapabilities: ["text"], sessionStable: true });
     expect(records[0].sessionId).toMatch(/^session-[0-9a-f]{64}$/);
     expect(records[0].turnId).toMatch(/^turn-[0-9a-f]{64}$/);
     expect(records[0].sessionId).not.toBe("ses_test");
@@ -2340,6 +2741,7 @@ describe("proxy", () => {
 
       expect(record.sessionId).toMatch(/^session-[0-9a-f]{64}$/);
       expect(record.turnId).toMatch(/^turn-[0-9a-f]{64}$/);
+      expect(record.sessionStable).toBe(false);
       expect(record.requiredCapabilities).toEqual(["text", "tools"]);
       expect(line).not.toContain(prompt);
       expect(line).not.toContain("super-secret-value");
@@ -2737,7 +3139,7 @@ describe("proxy", () => {
     const req = new IncomingMessage(new Socket());
     req.method = "POST";
     req.url = "/settings";
-    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    req.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded" };
     queueMicrotask(() => {
       req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-ant-1&GEMINI_API_KEY="));
       req.emit("end");
@@ -2774,7 +3176,7 @@ describe("proxy", () => {
     const req = new IncomingMessage(new Socket());
     req.method = "POST";
     req.url = "/settings";
-    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    req.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded" };
     queueMicrotask(() => {
       req.emit("data", Buffer.alloc(70_000, 97));
       req.emit("end");
@@ -2809,7 +3211,7 @@ describe("proxy", () => {
     const req = new IncomingMessage(new Socket());
     req.method = "POST";
     req.url = "/settings";
-    req.headers = { "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example" };
+    req.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded", origin: "https://evil.example" };
     queueMicrotask(() => {
       req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-stolen"));
       req.emit("end");
@@ -2818,6 +3220,98 @@ describe("proxy", () => {
     await server.handle(req, res as never);
     expect(res.statusCode).toBe(403);
     expect(() => readFileSync(envPath, "utf8")).toThrow();
+  });
+
+  it("requires matching loopback authority and peer for management mutations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-management-boundary-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const cases = [
+      { host: "10.0.0.8:8787", origin: "http://127.0.0.1:8787" },
+      { host: "127.0.0.1:8787", origin: "http://127.0.0.1:9999" },
+      { origin: "http://127.0.0.1:8787" },
+    ];
+    for (const headers of cases) {
+      const req = new IncomingMessage(new Socket());
+      req.method = "POST";
+      req.url = "/settings";
+      req.headers = { "content-type": "application/x-www-form-urlencoded", ...headers };
+      queueMicrotask(() => {
+        req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-rejected"));
+        req.emit("end");
+      });
+      const res = collectRes();
+      await server.handle(req, res as never);
+      expect(res.statusCode).toBe(403);
+    }
+
+    const remoteReq = new IncomingMessage(new Socket());
+    Object.defineProperty(remoteReq.socket, "remoteAddress", { value: "10.0.0.8" });
+    remoteReq.method = "POST";
+    remoteReq.url = "/settings";
+    remoteReq.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      remoteReq.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-rejected"));
+      remoteReq.emit("end");
+    });
+    const remoteRes = collectRes();
+    await server.handle(remoteReq, remoteRes as never);
+    expect(remoteRes.statusCode).toBe(403);
+    expect(() => readFileSync(envPath, "utf8")).toThrow();
+  });
+
+  it("accepts an IPv6 loopback Host for management mutations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-management-ipv6-"));
+    const envPath = join(dir, ".env");
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      envPath,
+      backends: {},
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+    const req = new IncomingMessage(new Socket());
+    req.method = "POST";
+    req.url = "/settings";
+    req.headers = { host: "[::1]:8787", "content-type": "application/x-www-form-urlencoded" };
+    queueMicrotask(() => {
+      req.emit("data", Buffer.from("ANTHROPIC_API_KEY=sk-ipv6"));
+      req.emit("end");
+    });
+    const res = collectRes();
+    await server.handle(req, res as never);
+    expect(res.statusCode).toBe(303);
   });
 
   it("does not assign unexpected env keys from settings", async () => {
@@ -2846,7 +3340,7 @@ describe("proxy", () => {
     const req = new IncomingMessage(new Socket());
     req.method = "POST";
     req.url = "/settings";
-    req.headers = { "content-type": "application/x-www-form-urlencoded" };
+    req.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded" };
     queueMicrotask(() => {
       req.emit("data", Buffer.from("PATH=/tmp/evil&ANTHROPIC_API_KEY=sk-ant-2"));
       req.emit("end");
@@ -2992,7 +3486,7 @@ describe("proxy", () => {
     const keyReq = new IncomingMessage(new Socket());
     keyReq.method = "POST";
     keyReq.url = "/connect/openai/key";
-    keyReq.headers = { "content-type": "application/x-www-form-urlencoded" };
+    keyReq.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded" };
     queueMicrotask(() => {
       keyReq.emit("data", Buffer.from("key=sk-test-connect"));
       keyReq.emit("end");
@@ -3287,7 +3781,7 @@ describe("proxy", () => {
     const keyReq = new IncomingMessage(new Socket());
     keyReq.method = "POST";
     keyReq.url = "/connect/openai/key";
-    keyReq.headers = { "content-type": "application/x-www-form-urlencoded" };
+      keyReq.headers = { host: "127.0.0.1:8787", "content-type": "application/x-www-form-urlencoded" };
     queueMicrotask(() => {
       keyReq.emit("data", Buffer.from("key=sk-extra"));
       keyReq.emit("end");
@@ -3319,7 +3813,7 @@ describe("proxy", () => {
             const token = String(new Headers(init?.headers).get("authorization") ?? "");
             used.push(token);
             if (token === "Bearer sk-limited") {
-              return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json" } });
+              return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json", "retry-after": "0" } });
             }
             return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
               status: 200,
@@ -3346,6 +3840,10 @@ describe("proxy", () => {
     expect(used).toEqual(["Bearer sk-limited", "Bearer sk-open"]);
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain("ok");
+
+    const second = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "again" }] }), second as never);
+    expect(used).toEqual(["Bearer sk-limited", "Bearer sk-open", "Bearer sk-limited", "Bearer sk-open"]);
   });
 
   it("refreshes an extra oauth account before retrying after 429", async () => {
@@ -3491,7 +3989,7 @@ describe("proxy", () => {
     const req = new IncomingMessage(new Socket());
     req.method = "POST";
     req.url = "/accounts/remove";
-    req.headers = { "content-type": "application/json" };
+    req.headers = { host: "127.0.0.1:8787", "content-type": "application/json" };
     queueMicrotask(() => {
       req.emit("data", Buffer.from(JSON.stringify({ id: "extra-1" })));
       req.emit("end");
@@ -3547,6 +4045,56 @@ describe("proxy", () => {
     await server.handle(fakeReq("/v1/chat/completions", { model: "auto", messages: [{ role: "user", content: "hi" }] }), res as never);
     expect(res.statusCode).toBe(429);
     expect(calls).toBe(7);
+  });
+
+  it("does not reuse the primary credential while every account is cooling down", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-429-cooldown-reuse-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api", key: "sk-0" } }));
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({ accounts: [{ id: "extra-1", provider: "openai", type: "api", key: "sk-1" }] }),
+    );
+    let calls = 0;
+    const server = createProxyServer({
+      catalog,
+      config,
+      sessions: memorySessions(),
+      authPath,
+      accountsPath,
+      backends: {
+        openai: {
+          baseUrl: "https://api.openai.com",
+          fetchImpl: async () => {
+            calls += 1;
+            return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "content-type": "application/json" } });
+          },
+        },
+      },
+      select: () =>
+        ({
+          modelId: "openai/gpt-5.6-sol",
+          tier: "simple",
+          taskType: null,
+          confidence: 1,
+          reason: "fixture",
+          via: "force",
+          catalogSource: "live",
+          score: 0,
+          boundary: { isBoundary: true, confidence: 1, signals: ["newSession"], reason: "new session" },
+        }) as never,
+    });
+
+    const first = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { messages: [{ role: "user", content: "one" }] }, { "x-session-id": "cooldown-one" }), first as never);
+    expect(first.statusCode).toBe(429);
+    expect(calls).toBe(2);
+
+    const second = collectRes();
+    await server.handle(fakeReq("/v1/chat/completions", { messages: [{ role: "user", content: "two" }] }, { "x-session-id": "cooldown-two" }), second as never);
+    expect(second.statusCode).toBe(429);
+    expect(calls).toBe(2);
   });
 
   it("uses the Gemini API key instead of an extra Google OAuth token", async () => {
@@ -3630,7 +4178,7 @@ describe("proxy", () => {
     });
     const first = fakeReq(
       "/v1/chat/completions",
-      { model: "auto", messages: [{ role: "user", content: "plan the architecture" }] },
+      { model: "auto", conversation_id: "thread-1", messages: [{ role: "user", content: "plan the architecture" }] },
       { "x-session-id": undefined },
     );
     await server.handle(first, collectRes() as never);
@@ -3638,6 +4186,7 @@ describe("proxy", () => {
       "/v1/chat/completions",
       {
         model: "auto",
+        conversation_id: "thread-1",
         messages: [
           { role: "user", content: "plan the architecture" },
           { role: "assistant", content: "ok" },

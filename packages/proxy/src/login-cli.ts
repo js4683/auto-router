@@ -3,7 +3,7 @@ import { stdin as stdinStream, stdout as stdoutStream } from "node:process";
 import { defaultAccountsPath } from "./accounts.js";
 import { defaultAuthPath } from "./auth-store.js";
 import { loginProviderId } from "./login.js";
-import { completeOAuthCode, pollOAuth, startOAuth, type OAuthStart } from "./oauth.js";
+import { completeOAuthCode, defaultOAuthStatePath, pollOAuth, startOAuth, type OAuthOptions, type OAuthStart } from "./oauth.js";
 
 const ALIASES: Record<string, string> = {
   claude: "anthropic",
@@ -17,15 +17,17 @@ const ALIASES: Record<string, string> = {
 const USAGE = "help: auto-router login <claude|codex|grok|zen|gemini|antigravity> [--code <auth-code> --id <session-id>]";
 
 export interface LoginCliDeps {
-  startOAuth: (provider: string) => Promise<OAuthStart>;
-  pollOAuth: (id: string, authPath: string, accountsPath?: string) => Promise<{ done?: boolean; error?: string }>;
-  completeOAuthCode: (id: string, code: string, authPath: string, accountsPath?: string) => Promise<{ done?: boolean; error?: string }>;
+  startOAuth: (provider: string, options?: OAuthOptions) => Promise<OAuthStart>;
+  pollOAuth: (id: string, authPath: string, accountsPath?: string, options?: OAuthOptions) => Promise<{ done?: boolean; error?: string }>;
+  completeOAuthCode: (id: string, code: string, authPath: string, accountsPath?: string, options?: OAuthOptions) => Promise<{ done?: boolean; error?: string }>;
   authPath: string;
   accountsPath: string;
+  statePath?: string;
   stdout: { write(chunk: string): void };
   stderr: { write(chunk: string): void };
   readCode?: () => Promise<string>;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
 function parseLoginArgs(args: string[]): { provider?: string; code?: string; id?: string; help?: boolean; error?: string } {
@@ -58,8 +60,17 @@ const DEVICE_POLL_ATTEMPTS = 40;
 
 async function pollUntilDone(id: string, provider: string, deps: LoginCliDeps): Promise<number> {
   const sleep = deps.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = deps.now ?? (() => Date.now());
+  const deadline = now() + 120_000;
   for (let attempt = 0; attempt < DEVICE_POLL_ATTEMPTS; attempt += 1) {
-    const result = await deps.pollOAuth(id, deps.authPath, deps.accountsPath);
+    if (now() >= deadline) break;
+    let result: { done?: boolean; error?: string };
+    try {
+      result = await deps.pollOAuth(id, deps.authPath, deps.accountsPath, { statePath: deps.statePath });
+    } catch {
+      deps.stdout.write(`error: login failed\n${USAGE}\n`);
+      return 1;
+    }
     if (result.done) {
       deps.stdout.write(connected(provider));
       return 0;
@@ -68,7 +79,7 @@ async function pollUntilDone(id: string, provider: string, deps: LoginCliDeps): 
       deps.stdout.write(`error: ${result.error}\n${USAGE}\n`);
       return 1;
     }
-    await sleep(3000);
+    await sleep(Math.min(3000, Math.max(0, deadline - now())));
   }
   deps.stdout.write(`error: login timed out\n${USAGE}\n`);
   return 1;
@@ -98,7 +109,13 @@ export async function runLogin(args: string[], deps: LoginCliDeps): Promise<numb
       deps.stdout.write(`error: --id is required with --code\n${USAGE}\n`);
       return 2;
     }
-    const result = await deps.completeOAuthCode(parsed.id, parsed.code.trim(), deps.authPath, deps.accountsPath);
+    let result: { done?: boolean; error?: string };
+    try {
+      result = await deps.completeOAuthCode(parsed.id, parsed.code.trim(), deps.authPath, deps.accountsPath, { statePath: deps.statePath });
+    } catch {
+      deps.stdout.write(`error: login failed\n${USAGE}\n`);
+      return 1;
+    }
     if (!result.done) {
       deps.stdout.write(`error: ${result.error ?? "login failed"}\n${USAGE}\n`);
       return 1;
@@ -106,7 +123,13 @@ export async function runLogin(args: string[], deps: LoginCliDeps): Promise<numb
     deps.stdout.write(connected(provider));
     return 0;
   }
-  const started = await deps.startOAuth(provider);
+  let started: OAuthStart;
+  try {
+    started = await deps.startOAuth(provider, { statePath: deps.statePath });
+  } catch {
+    deps.stdout.write(`error: login failed\n${USAGE}\n`);
+    return 1;
+  }
   if ("error" in started) {
     deps.stdout.write(`error: ${started.error}\n${USAGE}\n`);
     return 1;
@@ -122,7 +145,13 @@ export async function runLogin(args: string[], deps: LoginCliDeps): Promise<numb
     deps.stdout.write(`error: --code is required\n${USAGE}\n`);
     return 2;
   }
-  const result = await deps.completeOAuthCode(started.id, pasted, deps.authPath, deps.accountsPath);
+  let result: { done?: boolean; error?: string };
+  try {
+    result = await deps.completeOAuthCode(started.id, pasted, deps.authPath, deps.accountsPath, { statePath: deps.statePath });
+  } catch {
+    deps.stdout.write(`error: login failed\n${USAGE}\n`);
+    return 1;
+  }
   if (!result.done) {
     deps.stdout.write(`error: ${result.error ?? "login failed"}\n${USAGE}\n`);
     return 1;
@@ -132,7 +161,14 @@ export async function runLogin(args: string[], deps: LoginCliDeps): Promise<numb
 }
 
 async function readStdinCode(): Promise<string> {
-  if (!stdinStream.isTTY) return "";
+  if (!stdinStream.isTTY) {
+    let input = "";
+    for await (const chunk of stdinStream) {
+      input += String(chunk);
+      if (Buffer.byteLength(input, "utf8") >= 16 * 1024) break;
+    }
+    return input.slice(0, 16 * 1024).trim();
+  }
   const rl = createInterface({ input: stdinStream, output: stdoutStream });
   try {
     return await rl.question("Authorization code: ");
@@ -148,6 +184,7 @@ export async function mainLogin(args = process.argv.slice(3)): Promise<number> {
     completeOAuthCode,
     authPath: defaultAuthPath(),
     accountsPath: defaultAccountsPath(),
+    statePath: defaultOAuthStatePath(),
     stdout: process.stdout,
     stderr: process.stderr,
     readCode: readStdinCode,

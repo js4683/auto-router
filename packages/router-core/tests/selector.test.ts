@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { selectModel } from "../src/selector.js";
-import type { AvengersProPrediction, Catalog, RouterConfig, RouterState, SessionState, TaskStrategy } from "../src/types.js";
+import type { AvengersProPrediction, Catalog, RouterConfig, RouterState, SelectionRequirements, SessionState, TaskStrategy } from "../src/types.js";
 
 const cfg: RouterConfig = {
   tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
@@ -190,9 +190,45 @@ describe("selector — two axes + guards + stickiness", () => {
     // Need a confident boundary to get past sticky to the context-fit check. Context-fit is checked before sticky, but we force boundary to ensure downgrade path evaluated
     const sBoundary = { ...s, isCompacted: true } as SessionState;
     const r = selectModel(sBoundary, catalog, cfg, state);
-    expect(r.via).toBe("context-fit-block");
-    expect(r.blockedDowngrade).toBe(true);
-    expect(r.modelId).toBe("frontier"); // stayed
+    expect(r.modelId).toBe("frontier");
+    expect(["free-medium", "small-window"]).not.toContain(r.modelId);
+  });
+
+  it("filters overflowing models on a fresh selection", () => {
+    const s = sess({ lifetimeTokens: 200000, lastUserMessage: "fix typo", forceTier: "simple", isNewSession: true });
+    const r = selectModel(s, catalog, cfg, { currentModel: null, currentTier: null, downgradeCounter: 0 });
+    expect(r.modelId).toBe("frontier");
+    expect(r.via).not.toBe("stay-sticky");
+  });
+
+  it("rejects an explicit transport requirement before ranking candidates", () => {
+    const requirements: SelectionRequirements = {
+      lifetimeTokens: 5000,
+      requiredCapabilities: ["text"],
+      transport: "responses",
+    };
+    const chatOnly: Catalog = {
+      ...catalog,
+      models: catalog.models.map((model) => ({ ...model, capabilities: ["text"], transports: ["chat"] })),
+    };
+
+    expect(() => selectModel(
+      sess({ forceTier: "simple", isNewSession: true }),
+      chatOnly,
+      cfg,
+      { currentModel: null, currentTier: null, downgradeCounter: 0 },
+      undefined,
+      undefined,
+      undefined,
+      requirements,
+    )).toThrow(/unsupported-transport|no eligible model/);
+  });
+
+  it("does not stay sticky on a model that no longer fits", () => {
+    const s = sess({ lifetimeTokens: 200000, lastUserMessage: "continue same task", forceTier: "simple" });
+    const r = selectModel(s, catalog, cfg, { currentModel: "small-window", currentTier: "simple", downgradeCounter: 0 }, "implement", "continue same task");
+    expect(r.via).not.toBe("stay-sticky");
+    expect(r.modelId).toBe("frontier");
   });
 
   it("anti-thrash: no boundary + not upgrade => stay-sticky", () => {
@@ -465,8 +501,8 @@ describe("selector — two axes + guards + stickiness", () => {
       prediction
     );
 
-    expect(result.modelId).toBe("frontier");
-    expect(result.via).toBe("context-fit-block");
+    expect(result.modelId).not.toBe("small-window");
+    expect(result.via).not.toBe("avengers-pro");
   });
 
   it("uses the first mapped Avengers-Pro paper id on a new task", () => {

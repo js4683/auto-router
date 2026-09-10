@@ -1,12 +1,13 @@
-import { loadAvengersProArtifactFiles, type EmbeddingClientConfig } from "@auto-router/router-core";
+import { embeddingEndpointDigest, loadAvengersProArtifactFiles, type EmbeddingClientConfig } from "@auto-router/router-core";
 import {
   collectAvengersOutcomes,
   curateAvengersCollection,
   parseAvengersAliases,
   planAvengersCollection,
+  readAvengersSourceManifest,
   writeCuratedCorpus,
 } from "./avengers-collection.js";
-import { readAvengersCorpus, splitAvengersCorpus } from "./avengers-corpus.js";
+import { avengersCorpusDigest, readAvengersCorpus, splitAvengersCorpus } from "./avengers-corpus.js";
 import { embedCorpusExamples } from "./avengers-embedding-cache.js";
 import { trainAvengersArtifact, validateAvengersTrainingPlan, writeAvengersArtifact } from "./avengers-training.js";
 import { validateAvengersArtifact, writeAvengersValidation } from "./avengers-validation.js";
@@ -30,6 +31,7 @@ function embeddingConfig(io: CliIo, timeoutMs: number): EmbeddingClientConfig {
     apiKey: requiredEnv(io, "AUTO_ROUTER_EMBEDDING_API_KEY"),
     model: requiredEnv(io, "AUTO_ROUTER_EMBEDDING_MODEL"),
     timeoutMs,
+    revision: io.env.AUTO_ROUTER_EMBEDDING_REVISION ?? "unknown",
   };
 }
 
@@ -38,6 +40,7 @@ async function runCollect(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const dataset = readDataset(requireValue(parsed, "--dataset"));
   const aliases = parseAvengersAliases(requireValue(parsed, "--models"));
   const output = requireValue(parsed, "--output");
+  const sourceManifest = readAvengersSourceManifest(requireValue(parsed, "--source-manifest"));
   const plan = planAvengersCollection(dataset, aliases);
   io.stdout(`planned calls: ${plan.generationCalls} generation, ${plan.judgeCalls} judge, ${plan.totalCalls} total`);
   await collectAvengersOutcomes(
@@ -56,17 +59,20 @@ async function runCollect(parsed: ParsedArgs, io: CliIo): Promise<number> {
       },
     },
     io.fetch ?? fetch,
-    output
+    output,
+    sourceManifest,
   );
   io.stdout(`wrote ${output}`);
   return 0;
 }
 
 function runCurate(parsed: ParsedArgs, io: CliIo): number {
+  const sourceManifest = readAvengersSourceManifest(requireValue(parsed, "--source-manifest"));
   const corpus = curateAvengersCollection(
     requireValue(parsed, "--input"),
     readDataset(requireValue(parsed, "--dataset")),
-    parseAvengersAliases(requireValue(parsed, "--models"))
+    parseAvengersAliases(requireValue(parsed, "--models")),
+    sourceManifest,
   );
   const output = requireValue(parsed, "--output");
   writeCuratedCorpus(output, corpus);
@@ -90,19 +96,36 @@ async function runTrain(parsed: ParsedArgs, io: CliIo): Promise<number> {
     minObservations: positiveFlag(parsed, "--min-observations"),
   };
   validateAvengersTrainingPlan(corpus, options);
+  if (!corpus.provenance) throw new Error("training requires dataset provenance");
   const split = splitAvengersCorpus(corpus, options.splitSeed, options.heldOutRatio);
   const cachePath = requireValue(parsed, "--cache");
   io.stdout(`planned embeddings: ${split.train.length} train examples`);
+  const embedding = embeddingConfig(io, positiveFlag(parsed, "--timeout-ms"));
   const vectors = await embedCorpusExamples(split.train, {
-    client: embeddingConfig(io, positiveFlag(parsed, "--timeout-ms")),
+    client: embedding,
     maxInputChars: options.maxInputChars,
     cachePath,
     fetchImpl: io.fetch,
+    modelRevision: embedding.revision,
+    corpusDigest: avengersCorpusDigest(corpus),
+    sourceManifestDigest: corpus.provenance.sourceManifestDigest,
+    provenanceBound: true,
   });
   const first = vectors.values().next().value;
   if (!first) throw new Error("training produced no vectors");
   options.embeddingDimensions = first.length;
-  const artifact = trainAvengersArtifact(corpus, vectors, options);
+   const artifact = trainAvengersArtifact(corpus, vectors, {
+     ...options,
+     provenance: {
+       embeddingEndpointDigest: embeddingEndpointDigest(embedding.baseUrl),
+       embeddingModelRevision: embedding.revision ?? "unknown",
+       catalogDigest: corpus.provenance.catalogDigest,
+       configDigest: corpus.provenance.configDigest,
+       policyDigest: corpus.provenance.policyDigest,
+       sourceManifestDigest: corpus.provenance.sourceManifestDigest,
+       collectionOrigin: corpus.provenance.collectionOrigin,
+     },
+   });
   const artifactDir = requireValue(parsed, "--artifact-dir");
   writeAvengersArtifact(artifactDir, artifact);
   io.stdout(`wrote ${artifactDir}`);

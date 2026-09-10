@@ -42,6 +42,10 @@ export interface SessionState {
   isNewSession?: boolean;
   /** optional manual override for testing: force tier */
   forceTier?: Tier;
+  /** hard capabilities required by the current request */
+  requiredCapabilities?: readonly RoutingCapability[];
+  /** transport expected by the current request */
+  transport?: RoutingTransport;
 }
 
 // ---- Classifier ----
@@ -60,6 +64,21 @@ export interface BoundaryResult {
   reason: string;
 }
 
+export type RoutingCapability = "text" | "tools" | "vision" | "structured-output";
+export type RoutingTransport = "chat" | "responses" | "anthropic";
+
+export interface SelectionRequirements {
+  lifetimeTokens: number;
+  requiredCapabilities: readonly RoutingCapability[];
+  transport: RoutingTransport;
+}
+
+export type EligibilityFailureCode = "context-overflow" | "missing-capability" | "unsupported-transport";
+
+export type ModelEligibility =
+  | { pass: true; reason: string }
+  | { pass: false; code: EligibilityFailureCode; reason: string };
+
 // ---- Catalog ----
 export interface ModelEntry {
   id: string;
@@ -75,6 +94,10 @@ export interface ModelEntry {
   windowTokens: number;
   /** whether model is free to the user (explicit free set or authoritative zero pricing) */
   isFree: boolean;
+  /** capabilities explicitly advertised by the provider or catalog source */
+  capabilities?: readonly RoutingCapability[];
+  /** ingress/target transports supported by the runtime model */
+  transports?: readonly RoutingTransport[];
   /** tie-breakers from AA */
   medianOutputTokensPerSec?: number;
   medianTimeToFirstTokenSec?: number;
@@ -143,7 +166,7 @@ export interface RouterConfig {
   avengersPro?: {
     enabled: boolean;
     artifactDir: string;
-    embedding?: { baseUrl: string; apiKeyEnv: string; model: string };
+    embedding?: { baseUrl: string; apiKeyEnv: string; model: string; revision?: string };
     timeoutMs: number;
     maxInputChars: number;
   };

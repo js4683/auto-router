@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { selectModel } from "@auto-router/router-core";
 import { replayDataset, selectReplayRouterStep } from "../src/replay.js";
 import { fixtureDataset, fixtureTurn } from "./fixtures.js";
 
@@ -9,6 +10,25 @@ describe("selectReplayRouterStep", () => {
     const step = selectReplayRouterStep(dataset, turn, { currentModel: null, currentTier: null, downgradeCounter: 0 });
     const replay = replayDataset(dataset);
     expect(step.selection.modelId).toBe(replay.strategies.router.turns[0].modelId);
+  });
+
+  it("uses the same hard capability candidate set as runtime selection", () => {
+    const turn = fixtureTurn({ requiredCapabilities: ["tools"] });
+    const dataset = fixtureDataset([turn]);
+    dataset.catalog.models = dataset.catalog.models.map((model) => ({
+      ...model,
+      capabilities: model.id === "cheap" ? ["text"] : ["text", "tools"],
+      transports: ["chat"],
+    }));
+    dataset.capabilities = { "provider/cheap": ["text"], "provider/frontier": ["text", "tools"] };
+
+    const state = { currentModel: null, currentTier: null, downgradeCounter: 0 } as const;
+    const requirements = { lifetimeTokens: turn.sessionState.lifetimeTokens, requiredCapabilities: ["tools"] as const, transport: "chat" as const };
+    const runtime = selectModel(turn.sessionState, dataset.catalog, dataset.config, state, undefined, undefined, undefined, requirements);
+    const replay = selectReplayRouterStep(dataset, turn, state);
+
+    expect(replay.selection.modelId).toBe(runtime.modelId);
+    expect(replay.selection.via).toBe(runtime.via);
   });
 });
 
@@ -53,6 +73,7 @@ describe("replayDataset", () => {
       sessionState: {
         ...first.sessionState,
         isNewSession: false,
+        isCompacted: true,
         currentTask: { ...first.sessionState.currentTask, lastUserMessage: "Continue with the required tool" },
       },
     });
@@ -65,7 +86,7 @@ describe("replayDataset", () => {
     expect(result.strategies.router.turns[0]).toMatchObject({ weight: 1, terminalState: "completed", contentTruncated: false });
   });
 
-  it("lets the context-fit guard own a downgrade when the cheap model no longer fits", () => {
+  it("selects the best fitting model when a boundary permits a downgrade", () => {
     const dataset = fixtureDataset();
     dataset.config.stickiness.downgradeAfter = 1;
     dataset.catalog.models.push({
@@ -95,7 +116,7 @@ describe("replayDataset", () => {
 
     const result = replayDataset({ ...dataset, sessions: [{ id: "session-1", turns: [first, downgrade] }] });
 
-    expect(result.strategies.router.turns[1]).toMatchObject({ modelId: "provider/frontier", via: "context-fit-block" });
+    expect(result.strategies.router.turns[1]).toMatchObject({ modelId: "provider/alternate", via: "value" });
   });
 
   it("excludes context-ineligible models from an initial selection", () => {

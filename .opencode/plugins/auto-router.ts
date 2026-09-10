@@ -3,9 +3,19 @@
  * Grill contract: two-window SessionState, gated heuristics, context-fit, stickiness, 2-axis selection.
  * Wires: filesTouched / diffHunks / toolDepth / priorErrors / lifetimeTokens via opencode events + tool hooks.
  */
-import type { Plugin } from "@opencode-ai/plugin";
 import { selectModel, loadConfig, loadCatalogSync, resolveTaskType, buildCatalogFromProviders, detectBoundary } from "../../packages/router-core/src/index.js";
-import type { Catalog, SessionState, Tier } from "../../packages/router-core/src/index.js";
+import type { Catalog, RoutingCapability, RoutingTransport, SelectionRequirements, SessionState, Tier } from "../../packages/router-core/src/index.js";
+
+// Keep plugin typechecking independent from an optional host package.
+type Plugin = (context: { client: any; directory: string }) => Promise<{
+  config?: (input: any) => unknown;
+  "chat.message"?: (input: any, output: any) => unknown;
+  "chat.params"?: (input: any, output: any) => unknown;
+  "tool.execute.before"?: (input: any, output: any) => unknown;
+  "tool.execute.after"?: (input: any, output: any) => unknown;
+  event?: (input: { event: any }) => unknown;
+  [key: string]: unknown;
+}>;
 
 type LiveCatalogSnapshot = Readonly<{
   catalog: Catalog;
@@ -95,6 +105,30 @@ function extractTextFromMessage(msg: any): string {
   if (typeof msg.content === "string") return msg.content;
   if (Array.isArray(msg.content)) return msg.content.map((c: any) => c.text ?? "").join("\n");
   return "";
+}
+
+function isRoutingTransport(value: unknown): value is RoutingTransport {
+  return value === "chat" || value === "responses" || value === "anthropic";
+}
+
+function hasToolContent(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((item) => item?.type === "tool_use" || item?.type === "tool_result" || item?.type === "function_call");
+}
+
+function pluginRequirements(output: any, sessionState: SessionState): SelectionRequirements {
+  const message = output?.message ?? output;
+  const parts = Array.isArray(output?.parts) ? output.parts : [];
+  const content = Array.isArray(message?.content) ? message.content : [];
+  const capabilities: RoutingCapability[] = ["text"];
+  if (Array.isArray(message?.tools) || Array.isArray(output?.tools) || hasToolContent(parts) || hasToolContent(content)) {
+    capabilities.push("tools");
+  }
+  if (content.some((item: any) => item?.type === "image" || item?.type === "image_url") || parts.some((item: any) => item?.type === "image")) {
+    capabilities.push("vision");
+  }
+  const transport = [output?.transport, message?.transport, output?.protocol, message?.protocol].find(isRoutingTransport) ?? "responses";
+  return { lifetimeTokens: sessionState.lifetimeTokens, requiredCapabilities: capabilities, transport };
 }
 
 function extractSessionState(sessionID: string, msgText: string, agentHint?: string, opts?: { forceTier?: Tier; userTag?: string }): SessionState {
@@ -237,24 +271,24 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
     sessionState: SessionState,
     boundary: ReturnType<typeof detectBoundary>,
     prevAgent?: string,
-    prevMessage?: string
+    prevMessage?: string,
+    requirements?: SelectionRequirements,
   ): Promise<TaskSelection | undefined> {
     const liveSnapshot = await loadLiveCatalog();
-    const selectionState: SessionState = {
-      ...sessionState,
-      currentTask: {
-        ...sessionState.currentTask,
-        taskTokens: sessionState.currentTask.promptTokens,
-        filesTouched: 0,
-        diffHunks: 0,
-        toolDepth: 0,
-        priorErrors: 0,
-      },
-    };
+    const selectionState = sessionState;
 
     let result: ReturnType<typeof selectModel>;
     try {
-      result = selectModel(selectionState, liveSnapshot.catalog, config, { currentModel: null, currentTier: null, downgradeCounter: 0 }, prevAgent, prevMessage);
+      result = selectModel(
+        selectionState,
+        liveSnapshot.catalog,
+        config,
+        { currentModel: null, currentTier: null, downgradeCounter: 0 },
+        prevAgent,
+        prevMessage,
+        undefined,
+        requirements,
+      );
     } catch (error) {
       session.taskTarget = null;
       await logDecision("[auto-router] TASK ERROR selection failed", "warn", {
@@ -350,6 +384,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const prevAgent = s.prevAgent;
       const prevMessage = s.prevMessage;
       const sessionState = extractSessionState(sessionID, msgText, agent);
+      const requirements = pluginRequirements(output, sessionState);
       const boundary = detectBoundary(sessionState, prevAgent, prevMessage);
       s.prevAgent = agent ?? sessionState.activeAgent;
       s.prevMessage = msgText;
@@ -358,7 +393,7 @@ export const AutoRouterPlugin: Plugin = async ({ client, directory }) => {
       const shouldSelect = !requestTarget || boundary.isBoundary || !requestSnapshot.runtimeIDs.has(requestTarget);
 
       if (shouldSelect) {
-        const selection = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage);
+        const selection = await selectTaskTarget(sessionID, s, sessionState, boundary, prevAgent, prevMessage, requirements);
         if (!selection) return;
         await applyTaskTarget(sessionID, s, selection.target, output.message, selection.liveSnapshot, true);
         return;

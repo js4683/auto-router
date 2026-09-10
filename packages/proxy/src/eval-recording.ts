@@ -16,8 +16,11 @@ export interface ProxyEvalRecordContext {
   protocol: "chat" | "anthropic" | "responses";
   selection: EvalRecordInput["selection"];
   sessionState: EvalRecordInput["sessionState"];
+  sessionStable?: boolean;
   requiredCapabilities: string[];
   messages?: EvalMessage[];
+  attempts?: () => EvalRecordInput["attempts"];
+  finalRuntimeId?: () => string | undefined;
 }
 
 const MAX_RECORDED_RESPONSE_BYTES = 512 * 1024;
@@ -135,6 +138,7 @@ export function recordProxyResponse(res: ServerResponse, recorder: EvalRecorder,
       status: recordedStatus(res.statusCode, output, context.protocol),
       selection: context.selection,
       sessionState: context.sessionState,
+      ...(context.sessionStable !== undefined ? { sessionStable: context.sessionStable } : {}),
       requiredCapabilities: context.requiredCapabilities,
       usageSource: "estimated",
       usage: {
@@ -143,6 +147,8 @@ export function recordProxyResponse(res: ServerResponse, recorder: EvalRecorder,
         cacheReadInputTokens: 0,
         cacheWriteInputTokens: 0,
       },
+      ...(context.attempts?.()?.length ? { attempts: context.attempts() } : {}),
+      ...(context.finalRuntimeId?.() ? { finalRuntimeId: context.finalRuntimeId() } : {}),
       ...(context.messages ? { messages: context.messages } : {}),
       ...(output ? { output } : {}),
       ...(contentTruncated ? { contentTruncated: true } : {}),

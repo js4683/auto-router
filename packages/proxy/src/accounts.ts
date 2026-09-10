@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { readAuthFile, writeAuthEntry } from "./auth-store.js";
 import { readClaudeCodeOauth } from "./claude-code-auth.js";
+import { readJsonStore, updateJsonStore } from "./secure-json-store.js";
 
 export interface AccountIdentity {
   email?: string;
@@ -35,6 +36,7 @@ export interface ResolvedAccount {
   primary: boolean;
   refresh?: string;
   source: "keychain" | "auth" | "extra";
+  sourceKey?: string;
 }
 
 export function defaultAccountsPath(): string {
@@ -100,64 +102,75 @@ export function accountIdentity(provider: string, authPath?: string): AccountIde
 function isExtraAccount(value: unknown): value is ExtraAccount {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return typeof record.id === "string" && typeof record.provider === "string" && (record.type === "oauth" || record.type === "api");
+  if (typeof record.id !== "string" || !record.id || typeof record.provider !== "string" || !record.provider) return false;
+  if (record.type !== "oauth" && record.type !== "api") return false;
+  for (const key of ["access", "refresh", "key", "email", "plan", "projectId"] as const) {
+    if (record[key] !== undefined && typeof record[key] !== "string") return false;
+  }
+  return record.expires === undefined || (typeof record.expires === "number" && Number.isFinite(record.expires));
 }
 
 export function readExtraAccounts(path: string): ExtraAccount[] {
-  let text = "";
-  try {
-    text = readFileSync(path, "utf8");
-  } catch {
-    return [];
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error("accounts file is not valid JSON");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("accounts file is malformed");
-  }
-  const accounts = (parsed as { accounts?: unknown }).accounts;
-  if (accounts === undefined) return [];
-  if (!Array.isArray(accounts)) throw new Error("accounts file is malformed");
-  return accounts.filter(isExtraAccount);
-}
-
-function writeExtraAccounts(path: string, accounts: ExtraAccount[]): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify({ accounts }, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, path);
-  chmodSync(path, 0o600);
+  const parsed = readJsonStore(path, (value): ExtraAccount[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("accounts file is malformed");
+    const accounts = (value as { accounts?: unknown }).accounts;
+    if (accounts === undefined) return [];
+    if (!Array.isArray(accounts)) throw new Error("accounts file is malformed");
+    return accounts.map((account, index) => {
+      if (!isExtraAccount(account)) throw new Error(`accounts file contains invalid account entry at index ${index}`);
+      return account;
+    });
+  });
+  return parsed ?? [];
 }
 
 export function addExtraAccount(path: string, input: Omit<ExtraAccount, "id"> & { id?: string }): ExtraAccount {
-  const accounts = readExtraAccounts(path);
   const account: ExtraAccount = { ...input, id: input.id ?? randomUUID() };
-  accounts.push(account);
-  writeExtraAccounts(path, accounts);
+  updateJsonStore(path, { accounts: [] }, (value): { accounts: ExtraAccount[] } => {
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray((value as { accounts?: unknown }).accounts)) {
+      throw new Error("accounts file is malformed");
+    }
+    const accounts = (value as { accounts: unknown[] }).accounts;
+    if (accounts.some((item) => !isExtraAccount(item))) throw new Error("accounts file contains invalid account entry");
+    return { accounts: accounts as ExtraAccount[] };
+  }, (value) => ({ accounts: [...value.accounts, account] }));
   return account;
 }
 
 export function updateExtraAccount(path: string, id: string, patch: Partial<ExtraAccount>): ExtraAccount | undefined {
-  const accounts = readExtraAccounts(path);
-  const index = accounts.findIndex((item) => item.id === id);
-  if (index < 0) return undefined;
-  const current = accounts[index];
-  if (!current) return undefined;
-  accounts[index] = { ...current, ...patch, id: current.id, provider: current.provider };
-  writeExtraAccounts(path, accounts);
-  return accounts[index];
+  let updated: ExtraAccount | undefined;
+  updateJsonStore(path, { accounts: [] }, (value): { accounts: ExtraAccount[] } => {
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray((value as { accounts?: unknown }).accounts)) {
+      throw new Error("accounts file is malformed");
+    }
+    const accounts = (value as { accounts: unknown[] }).accounts;
+    if (accounts.some((item) => !isExtraAccount(item))) throw new Error("accounts file contains invalid account entry");
+    return { accounts: accounts as ExtraAccount[] };
+  }, (value) => {
+    const index = value.accounts.findIndex((item) => item.id === id);
+    if (index < 0) return value;
+    const current = value.accounts[index];
+    updated = { ...current, ...patch, id: current.id, provider: current.provider };
+    return { accounts: value.accounts.map((item, itemIndex) => (itemIndex === index ? updated! : item)) };
+  });
+  return updated;
 }
 
 export function removeExtraAccount(path: string, id: string): boolean {
-  const accounts = readExtraAccounts(path);
-  const kept = accounts.filter((item) => item.id !== id);
-  if (kept.length === accounts.length) return false;
-  writeExtraAccounts(path, kept);
-  return true;
+  let removed = false;
+  updateJsonStore(path, { accounts: [] }, (value): { accounts: ExtraAccount[] } => {
+    if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray((value as { accounts?: unknown }).accounts)) {
+      throw new Error("accounts file is malformed");
+    }
+    const accounts = (value as { accounts: unknown[] }).accounts;
+    if (accounts.some((item) => !isExtraAccount(item))) throw new Error("accounts file contains invalid account entry");
+    return { accounts: accounts as ExtraAccount[] };
+  }, (value) => {
+    const kept = value.accounts.filter((item) => item.id !== id);
+    removed = kept.length !== value.accounts.length;
+    return { accounts: kept };
+  });
+  return removed;
 }
 
 function entryToken(entry: Record<string, unknown>, provider: string): string | undefined {
@@ -183,7 +196,7 @@ function fromEntry(provider: string, entry: Record<string, unknown>, id: string,
   const projectId = typeof entry.projectId === "string" ? entry.projectId : undefined;
   const expires = typeof entry.expires === "number" ? entry.expires : undefined;
   const refresh = typeof entry.refresh === "string" ? entry.refresh : undefined;
-  return { id, provider, token, type, email, plan, projectId, expires, primary, refresh, source: "auth" };
+  return { id, provider, token, type, email, plan, projectId, expires, primary, refresh, source: "auth", sourceKey: `auth:${provider}` };
 }
 
 export function listProviderAccounts(
@@ -193,8 +206,11 @@ export function listProviderAccounts(
   const out: ResolvedAccount[] = [];
   const seen = new Set<string>();
   const push = (account: ResolvedAccount | undefined) => {
-    if (!account || seen.has(account.token)) return;
-    seen.add(account.token);
+    if (!account) return;
+    const sourceKey = account.sourceKey ?? `${account.source}:${account.id}`;
+    const dedupeKey = `${sourceKey}\0${account.token}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
     out.push(account);
   };
   if (provider === "anthropic") {
@@ -212,6 +228,7 @@ export function listProviderAccounts(
         primary: true,
         refresh: code.refresh,
         source: "keychain",
+        sourceKey: `keychain:${provider}`,
       });
     }
   }
@@ -238,6 +255,7 @@ export function listProviderAccounts(
         primary: out.length === 0,
         refresh: extra.refresh,
         source: "extra",
+        sourceKey: `extra:${extra.id}`,
       });
     }
   }
@@ -284,5 +302,8 @@ export function saveProviderCredential(opts: {
 }
 
 export function nextOpenAccount(accounts: ResolvedAccount[], skipped: Set<string>): ResolvedAccount | undefined {
-  return accounts.find((account) => !skipped.has(account.id));
+  return accounts.find((account) => {
+    const sourceKey = account.sourceKey ?? `${account.source}:${account.id}`;
+    return !skipped.has(account.id) && !skipped.has(sourceKey);
+  });
 }

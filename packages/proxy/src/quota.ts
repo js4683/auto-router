@@ -1,9 +1,14 @@
+export type QuotaState = "observed" | "unknown" | "stale";
+export type QuotaUnit = "requests" | "tokens" | "percent" | "currency";
+
 export interface QuotaMeter {
   label: string;
   used: number;
   limit: number;
   remaining: number;
   percent: number;
+  unit: QuotaUnit;
+  state: QuotaState;
   resetLabel?: string;
 }
 
@@ -12,6 +17,7 @@ export interface ProviderQuota {
   status: number;
   at: number;
   meters: QuotaMeter[];
+  sourceKey?: string;
 }
 
 function headerNumber(headers: Headers, name: string): number | undefined {
@@ -21,20 +27,21 @@ function headerNumber(headers: Headers, name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
-function meter(label: string, remaining: number | undefined, limit: number | undefined): QuotaMeter | undefined {
+function meter(label: string, remaining: number | undefined, limit: number | undefined, unit: QuotaUnit): QuotaMeter | undefined {
   if (remaining === undefined || limit === undefined || limit <= 0) return undefined;
-  const used = Math.max(0, limit - remaining);
-  return { label, used, limit, remaining, percent: Math.min(100, Math.round((used / limit) * 100)) };
+  const boundedRemaining = Math.min(limit, Math.max(0, remaining));
+  const used = limit - boundedRemaining;
+  return { label, used, limit, remaining: boundedRemaining, percent: Math.min(100, Math.round((used / limit) * 100)), unit, state: "observed" };
 }
 
-export function parseQuota(headers: Headers, status: number): ProviderQuota {
+export function parseQuota(headers: Headers, status: number, sourceKey?: string): ProviderQuota {
   const meters = [
-    meter("Requests", headerNumber(headers, "anthropic-ratelimit-requests-remaining") ?? headerNumber(headers, "x-ratelimit-remaining-requests"), headerNumber(headers, "anthropic-ratelimit-requests-limit") ?? headerNumber(headers, "x-ratelimit-limit-requests")),
-    meter("Tokens", headerNumber(headers, "anthropic-ratelimit-tokens-remaining") ?? headerNumber(headers, "x-ratelimit-remaining-tokens"), headerNumber(headers, "anthropic-ratelimit-tokens-limit") ?? headerNumber(headers, "x-ratelimit-limit-tokens")),
-    meter("Input tokens", headerNumber(headers, "anthropic-ratelimit-input-tokens-remaining"), headerNumber(headers, "anthropic-ratelimit-input-tokens-limit")),
-    meter("Output tokens", headerNumber(headers, "anthropic-ratelimit-output-tokens-remaining"), headerNumber(headers, "anthropic-ratelimit-output-tokens-limit")),
+    meter("Requests", headerNumber(headers, "anthropic-ratelimit-requests-remaining") ?? headerNumber(headers, "x-ratelimit-remaining-requests"), headerNumber(headers, "anthropic-ratelimit-requests-limit") ?? headerNumber(headers, "x-ratelimit-limit-requests"), "requests"),
+    meter("Tokens", headerNumber(headers, "anthropic-ratelimit-tokens-remaining") ?? headerNumber(headers, "x-ratelimit-remaining-tokens"), headerNumber(headers, "anthropic-ratelimit-tokens-limit") ?? headerNumber(headers, "x-ratelimit-limit-tokens"), "tokens"),
+    meter("Input tokens", headerNumber(headers, "anthropic-ratelimit-input-tokens-remaining"), headerNumber(headers, "anthropic-ratelimit-input-tokens-limit"), "tokens"),
+    meter("Output tokens", headerNumber(headers, "anthropic-ratelimit-output-tokens-remaining"), headerNumber(headers, "anthropic-ratelimit-output-tokens-limit"), "tokens"),
   ].filter((item): item is QuotaMeter => Boolean(item));
-  return { limited: status === 429, status, at: Date.now(), meters };
+  return { limited: status === 429, status, at: Date.now(), meters, ...(sourceKey ? { sourceKey } : {}) };
 }
 
 function clampPercent(value: number): number {
@@ -42,6 +49,7 @@ function clampPercent(value: number): number {
 }
 
 function utilizationPercent(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed)) return undefined;
   const percent = parsed <= 1 ? parsed * 100 : parsed;
@@ -49,6 +57,7 @@ function utilizationPercent(value: unknown): number | undefined {
 }
 
 function usedPercent(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed)) return undefined;
   return clampPercent(parsed);
@@ -73,7 +82,7 @@ function resetFromSeconds(value: unknown): string | undefined {
 
 function windowMeter(label: string, percent: number | undefined, reset?: string): QuotaMeter | undefined {
   if (percent === undefined) return undefined;
-  return { label, used: percent, limit: 100, remaining: Math.max(0, 100 - percent), percent, resetLabel: reset };
+  return { label, used: percent, limit: 100, remaining: Math.max(0, 100 - percent), percent, unit: "percent", state: "observed", resetLabel: reset };
 }
 
 export function parseClaudeUsage(payload: unknown): QuotaMeter[] {
