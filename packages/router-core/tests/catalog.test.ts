@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 import { checkModelEligibility } from "../src/eligibility.js";
 import { buildCatalog, buildCatalogFromProviders, loadCatalogSync } from "../src/catalog.js";
+import { selectModel } from "../src/selector.js";
 import type { RouterConfig } from "../src/types.js";
 
 const cfg: RouterConfig = {
@@ -133,6 +134,40 @@ describe("catalog build", () => {
         requiredCapabilities: ["text"],
         transport: "responses",
       }, cfg)).toMatchObject({ pass: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("selects the cheapest provider-qualified OpenAI fallback for verification", () => {
+    const root = mkdtempSync(join(tmpdir(), "ar-openai-fallback-"));
+    const fallbackConfig: RouterConfig = {
+      ...cfg,
+      taskTypeModels: { ...cfg.taskTypeModels, run_tests: { prefer: null, strategy: "lowest-cost" } },
+      windowRegistry: { "gpt-5.3-codex-spark": 100000, "gpt-5.6-sol": 272000 },
+      modelMap: { "openai/gpt-5-medium": [{ runtimeId: "openai/gpt-5.6-sol", source: "hand" }] },
+    };
+
+    try {
+      const fallback = loadCatalogSync(fallbackConfig, join(root, "missing.json"));
+      const result = selectModel(
+        {
+          lifetimeTokens: 1,
+          currentTask: { promptTokens: 1, taskTokens: 1, filesTouched: 0, diffHunks: 0, toolDepth: 0, lastUserMessage: "run verification" },
+          userTag: "run_tests",
+          isNewSession: true,
+        },
+        fallback,
+        fallbackConfig,
+        { currentModel: null, currentTier: null, downgradeCounter: 0 },
+        undefined,
+        undefined,
+        undefined,
+        { lifetimeTokens: 1, requiredCapabilities: ["text"], transport: "chat" },
+      );
+
+      expect(result.modelId).toBe("openai/gpt-5.3-codex-spark");
+      expect(result.via).toBe("lowest-cost");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
