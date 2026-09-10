@@ -308,6 +308,19 @@ describe("curateAvengersCollection", () => {
       "example session-1/turn-1 candidate paper/a used unexpected runtime provider/substituted"
     );
   });
+
+  it("rejects incomplete outcomes during curation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "avengers-incomplete-outcome-"));
+    tempDirs.push(dir);
+    const output = join(dir, "collection.jsonl");
+    const source = fixtureDataset([fixtureTurn({ checks: [{ type: "exact-text", expected: "ok" }] })]);
+    await collectAvengersOutcomes(source, aliases(), config, async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return completion(body.model === "provider/frontier" ? "cut" : "ok", body.model === "provider/frontier" ? "length" : "stop");
+    }, output);
+
+    expect(() => curateAvengersCollection(output, source, aliases())).toThrow("example session-1/turn-1 is incomplete");
+  });
 });
 
 describe("judgeLabeledOutputs", () => {

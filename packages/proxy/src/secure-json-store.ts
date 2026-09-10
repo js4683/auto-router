@@ -6,13 +6,17 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  rmSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 const MAX_CONFLICT_RETRIES = 3;
+const MAX_LOCK_RETRIES = 20;
+const LOCK_WAIT_MS = 5;
+const LOCK_SLEEP = new Int32Array(new SharedArrayBuffer(4));
 
 export class JsonStoreCorruptionError extends Error {
   readonly code = "ERR_JSON_STORE_CORRUPT";
@@ -48,6 +52,60 @@ function readBytes(path: string): Buffer | undefined {
 function sameBytes(left: Buffer | undefined, right: Buffer | undefined): boolean {
   if (!left || !right) return left === right;
   return left.equals(right);
+}
+
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(LOCK_SLEEP, 0, 0, milliseconds);
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: string }).code === "EEXIST");
+}
+
+function lockOwner(lockPath: string): { raw: string; pid: number } | undefined {
+  try {
+    const raw = readFileSync(join(lockPath, "owner"), "utf8").trim();
+    const pid = Number(raw.split(":", 1)[0]);
+    return Number.isInteger(pid) && pid > 0 ? { raw, pid } : undefined;
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    return undefined;
+  }
+}
+
+function acquireStoreLock(path: string): () => void {
+  const lockPath = `${path}.lock`;
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const owner = `${process.pid}:${randomUUID()}`;
+  for (let attempt = 0; attempt < MAX_LOCK_RETRIES; attempt += 1) {
+    try {
+      mkdirSync(lockPath, { mode: 0o700 });
+      try {
+        writeFileSync(join(lockPath, "owner"), `${owner}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      } catch (error) {
+        rmSync(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      return () => {
+        if (lockOwner(lockPath)?.raw !== owner) return;
+        rmSync(lockPath, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+      // A stale-lock delete can race with a new owner; fail closed instead.
+      sleepSync(LOCK_WAIT_MS);
+    }
+  }
+  throw new ConcurrentStoreUpdateError(path);
+}
+
+function withStoreLock<T>(path: string, operation: () => T): T {
+  const release = acquireStoreLock(path);
+  try {
+    return operation();
+  } finally {
+    release();
+  }
 }
 
 function parseBytes<T>(path: string, bytes: Buffer, parse: (value: unknown) => T): T {
@@ -96,7 +154,7 @@ export function readJsonStore<T>(path: string, parse: (value: unknown) => T): T 
 }
 
 export function writeJsonStore<T>(path: string, value: T): void {
-  writeAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+  withStoreLock(path, () => writeAtomic(path, `${JSON.stringify(value, null, 2)}\n`));
 }
 
 export function updateJsonStore<T>(
@@ -107,12 +165,14 @@ export function updateJsonStore<T>(
 ): T {
   let conflict: ConcurrentStoreUpdateError | undefined;
   for (let attempt = 0; attempt <= MAX_CONFLICT_RETRIES; attempt += 1) {
-    const original = readBytes(path);
-    const current = original === undefined ? initial : parseBytes(path, original, parse);
-    const next = mutate(current);
     try {
-      writeAtomic(path, `${JSON.stringify(next, null, 2)}\n`, original, true);
-      return next;
+      return withStoreLock(path, () => {
+        const original = readBytes(path);
+        const current = original === undefined ? initial : parseBytes(path, original, parse);
+        const next = mutate(current);
+        writeAtomic(path, `${JSON.stringify(next, null, 2)}\n`, original, true);
+        return next;
+      });
     } catch (error) {
       if (!(error instanceof ConcurrentStoreUpdateError)) throw error;
       conflict = error;
@@ -122,5 +182,5 @@ export function updateJsonStore<T>(
 }
 
 export function writeAtomicText(path: string, body: string): void {
-  writeAtomic(path, body);
+  withStoreLock(path, () => writeAtomic(path, body));
 }

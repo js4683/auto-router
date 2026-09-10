@@ -20,14 +20,8 @@ function tomlString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function removeProviderTable(existing: string): string {
-  const header = /^[ \t]*\[model_providers\.auto-router\][^\r\n]*(?:\r?\n|$)/m.exec(existing);
-  if (!header || header.index === undefined) return existing;
-  const start = header.index;
-  const bodyStart = start + header[0].length;
-  const next = /^[ \t]*\[[^\]\r\n]+\][^\r\n]*(?:\r?\n|$)/m.exec(existing.slice(bodyStart));
-  const end = next ? bodyStart + next.index : existing.length;
-  return existing.slice(0, start) + existing.slice(end);
+function hasAutoRouterProviderTable(existing: string): boolean {
+  return /^[ \t]*\[model_providers\.auto-router\][^\r\n]*(?:\r?\n|$)/m.test(existing);
 }
 
 function firstTableIndex(existing: string): number {
@@ -61,8 +55,8 @@ function codexBlock(baseUrl: string): string {
 
 export function upsertCodexProvider(existing: string, baseUrl: string): string {
   const withoutManaged = removeManagedBlock(existing);
-  const withoutProvider = removeProviderTable(withoutManaged);
-  const { prefix, suffix } = rootPrefix(withoutProvider);
+  if (hasAutoRouterProviderTable(withoutManaged)) throw new Error("refusing to overwrite user-owned [model_providers.auto-router] table");
+  const { prefix, suffix } = rootPrefix(withoutManaged);
   const root = setRootProvider(prefix);
   const separator = suffix && root && !root.endsWith("\n") ? "\n" : "";
   return `${root}${separator}${codexBlock(baseUrl)}${suffix}`;
@@ -78,16 +72,9 @@ export function removeCodexProvider(existing: string, state: { ownedKeys: string
     const expected = `[model_providers.auto-router]\nname = "auto-router"\nbase_url = "${tomlString(expectedBase)}"\nwire_api = "responses"`;
     return managed === expected ? removeOwnedRootProvider(removeManagedBlock(existing)) : existing;
   }
+  if (hasAutoRouterProviderTable(existing)) return existing;
   let next = existing;
   const { prefix, suffix } = rootPrefix(next);
   next = removeOwnedRootProvider(`${prefix}${suffix}`);
-  const table = /^[ \t]*\[model_providers\.auto-router\][^\r\n]*(?:\r?\n|$)/m.exec(next);
-  if (!table || table.index === undefined) return next;
-  const start = table.index;
-  const bodyStart = start + table[0].length;
-  const nextHeader = /^[ \t]*\[[^\]\r\n]+\][^\r\n]*(?:\r?\n|$)/m.exec(next.slice(bodyStart));
-  const end = nextHeader ? bodyStart + nextHeader.index : next.length;
-  const block = next.slice(start, end);
-  const canonical = `[model_providers.auto-router]\nname = "auto-router"\nbase_url = "${tomlString(expectedBase)}"\nwire_api = "responses"\n`;
-  return block === canonical ? next.slice(0, start) + next.slice(end) : next;
+  return next;
 }

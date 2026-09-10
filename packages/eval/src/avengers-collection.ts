@@ -360,15 +360,19 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
     const expectedRecord = expected.get(id);
     if (!expectedRecord) throw new Error(`collection contains unknown example ${id}`);
     validateRecordBinding(record, expectedRecord, id);
-    if (record.collectionError || (record.outcomes as Array<Record<string, unknown>> | undefined)?.some((outcome) => outcome.qualitySource === "unjudged")) {
+    const rawOutcomes = Array.isArray(record.outcomes) ? record.outcomes as Array<Record<string, unknown>> : [];
+    if (record.collectionError || rawOutcomes.some((outcome) => outcome.qualitySource === "unjudged")) {
       throw new Error(`example ${id} is unjudged`);
+    }
+    if (rawOutcomes.some((outcome) => outcome.terminalState !== "completed" || outcome.contentTruncated === true)) {
+      throw new Error(`example ${id} is incomplete`);
     }
     const sessionGroupId = String(record.sessionGroupId ?? "");
     const sequence = Number(record.sequence);
     const group = byGroup.get(sessionGroupId) ?? [];
     group.push(sequence);
     byGroup.set(sessionGroupId, group);
-    const outcomes = Array.isArray(record.outcomes) ? record.outcomes : [];
+    const outcomes = rawOutcomes;
     const seenModels = new Set<string>();
     const curatedOutcomes: AvengersOutcomeV1[] = outcomes.map((raw) => {
       const outcome = raw as Record<string, unknown>;

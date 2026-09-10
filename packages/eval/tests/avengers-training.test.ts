@@ -113,6 +113,32 @@ describe("trainAvengersArtifact", () => {
     expect(stats.completed + stats.failed).toBeLessThanOrEqual(stats.observations);
   });
 
+  it("rejects incomplete outcomes for provenance-bound training", () => {
+    const corpus = trainingCorpus();
+    const provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "synthetic-fixture",
+      sourceManifestDigest: "f".repeat(64),
+      catalogDigest: canonicalDigest(corpus.routingSnapshot.catalog),
+      configDigest: canonicalDigest(corpus.routingSnapshot.config),
+      policyDigest: policyDigest(corpus.routingSnapshot.config),
+    } as const;
+    corpus.provenance = provenance;
+
+    expect(() => trainAvengersArtifact(corpus, trainVectors(corpus), {
+      ...options,
+      provenance: {
+        embeddingEndpointDigest: "a".repeat(64),
+        embeddingModelRevision: "revision-a",
+        catalogDigest: provenance.catalogDigest,
+        configDigest: provenance.configDigest,
+        policyDigest: provenance.policyDigest,
+        sourceManifestDigest: provenance.sourceManifestDigest,
+        collectionOrigin: provenance.collectionOrigin,
+      },
+    })).toThrow("provenance-bound training requires complete outcomes");
+  });
+
   it("rejects vector IDs that do not match the derived train partition", () => {
     const corpus = trainingCorpus();
     expect(() => trainAvengersArtifact(corpus, new Map([["missing", [1, 0]]]), options)).toThrow(/vector IDs/);
@@ -171,6 +197,7 @@ describe("trainAvengersArtifact", () => {
 
   it("emits v3 provenance when training is bound to an evaluation source", () => {
     const corpus = trainingCorpus();
+    corpus.examples[1].outcomes[0] = outcome("paper/model", 0);
     corpus.provenance = {
       schemaVersion: 1,
       collectionOrigin: "synthetic-fixture",
