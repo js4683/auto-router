@@ -21,6 +21,12 @@ describe("Codex config", () => {
     expect(next.indexOf("[model_providers.auto-router]")).toBeLessThan(next.indexOf("[profiles.work]"));
   });
 
+  it("refuses to overwrite an unmarked provider table", () => {
+    const existing = '[model_providers.auto-router]\nname = "user-owned"\nbase_url = "https://user.example/v1"\n';
+
+    expect(() => upsertCodexProvider(existing, "http://127.0.0.1:8787")).toThrow(/user-owned|collision/i);
+  });
+
   it("preserves an edited managed block during uninstall", () => {
     const installed = upsertCodexProvider("theme = \"dark\"\n", "http://127.0.0.1:8787");
     const edited = installed.replace('wire_api = "responses"', 'wire_api = "chat"');

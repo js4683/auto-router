@@ -93,6 +93,9 @@ function validateTrainingOptions(corpus: AvengersCorpusV1, options: AvengersTrai
   positiveInteger(options.embeddingDimensions, "embeddingDimensions");
   if (options.provenance) {
     if (!corpus.provenance) throw new Error("provenance-bound training requires corpus provenance");
+    if (corpus.examples.some((example) => example.outcomes.some((outcome) => outcome.terminalState !== "completed" || outcome.contentTruncated))) {
+      throw new Error("provenance-bound training requires complete outcomes");
+    }
     for (const field of ["sourceManifestDigest", "catalogDigest", "configDigest", "policyDigest", "collectionOrigin"] as const) {
       if (options.provenance[field] !== corpus.provenance[field]) throw new Error(`training ${field} provenance does not match corpus`);
     }

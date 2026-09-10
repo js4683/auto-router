@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -62,5 +62,27 @@ describe("secure json store", () => {
     updateJsonStore(path, [], parseValues, (values) => [...values, "second"]);
 
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(["first", "second"]);
+  });
+
+  it("rejects an update while another writer holds the store lock", () => {
+    const path = storePath();
+    writeJsonStore(path, { value: 1 });
+    const lockPath = `${path}.lock`;
+    mkdirSync(lockPath, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lockPath, "owner"), `${process.pid}:other\n`, { mode: 0o600 });
+
+    expect(() => updateJsonStore(path, { value: 0 }, parseObject, (current) => ({ value: current.value + 1 }))).toThrow(/concurrent update conflict/);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ value: 1 });
+  });
+
+  it("fails closed when a lock owner is no longer running", () => {
+    const path = storePath();
+    writeJsonStore(path, { value: 1 });
+    const lockPath = `${path}.lock`;
+    mkdirSync(lockPath, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lockPath, "owner"), `${Number.MAX_SAFE_INTEGER}:dead\n`, { mode: 0o600 });
+
+    expect(() => updateJsonStore(path, { value: 0 }, parseObject, (current) => ({ value: current.value + 1 }))).toThrow(/concurrent update conflict/);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ value: 1 });
   });
 });
