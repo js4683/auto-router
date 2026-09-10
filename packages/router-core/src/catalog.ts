@@ -258,7 +258,8 @@ function fallbackCatalog(config: RouterConfig): Catalog {
   cat.models.forEach((m) => {
     m.isFree = freeSet.has(m.id.toLowerCase());
     if (!m.runtimeId) {
-      const runtimeId = mappedRuntimeIds.find((candidate) => candidate === m.id || candidate.endsWith(`/${m.id}`));
+      const runtimeId = mappedRuntimeIds.find((candidate) => candidate === m.id || candidate.endsWith(`/${m.id}`))
+        ?? (/^gpt-\d/i.test(m.id) ? `openai/${m.id}` : undefined);
       if (runtimeId) {
         m.runtimeId = runtimeId;
         m.transports = transportsForRuntimeId(runtimeId);
