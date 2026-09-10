@@ -8,6 +8,8 @@ export interface JsonlRecorderOptions {
   directory: string;
   retentionDays: number;
   now?: () => Date;
+  maxQueuedRecords?: number;
+  appendFileImpl?: typeof appendFile;
 }
 
 const REDACTED_PROMPT = "[REDACTED]";
@@ -69,13 +71,18 @@ function metadataSessionState(input: EvalRecordInput["sessionState"]): EvalRecor
   };
 }
 
-function prune(directory: string, retentionDays: number, now: Date): void {
+function prune(directory: string, retentionDays: number, now: Date): number {
   const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
+  let removed = 0;
   for (const name of readdirSync(directory)) {
     if (!name.startsWith("auto-router-eval-") || !name.endsWith(".jsonl")) continue;
     const path = join(directory, name);
-    if (statSync(path).mtimeMs < cutoff) unlinkSync(path);
+    if (statSync(path).mtimeMs < cutoff) {
+      unlinkSync(path);
+      removed += 1;
+    }
   }
+  return removed;
 }
 
 function persistedInput(input: EvalRecordInput, mode: Exclude<RecordingMode, "off">): unknown {
@@ -89,9 +96,12 @@ function persistedInput(input: EvalRecordInput, mode: Exclude<RecordingMode, "of
     status: input.status,
     selection: input.selection,
     sessionState: mode === "metadata" ? metadataSessionState(input.sessionState) : input.sessionState,
+    ...(input.sessionStable !== undefined ? { sessionStable: input.sessionStable } : {}),
     requiredCapabilities: input.requiredCapabilities,
     usageSource: input.usageSource,
     usage: input.usage,
+    ...(input.attempts ? { attempts: input.attempts } : {}),
+    ...(input.finalRuntimeId ? { finalRuntimeId: input.finalRuntimeId } : {}),
     ...(input.contentTruncated ? { contentTruncated: true } : {}),
   };
   if (mode === "metadata") return metadata;
@@ -101,12 +111,20 @@ function persistedInput(input: EvalRecordInput, mode: Exclude<RecordingMode, "of
 export function createJsonlRecorder(options: JsonlRecorderOptions): EvalRecorder {
   if (options.mode === "off") return { mode: "off", async record() {}, async flush() {} };
   if (!Number.isFinite(options.retentionDays) || options.retentionDays <= 0) throw new Error("retentionDays must be positive");
+  const maxQueuedRecords = options.maxQueuedRecords ?? 100;
+  if (!Number.isInteger(maxQueuedRecords) || maxQueuedRecords < 1) throw new Error("maxQueuedRecords must be a positive integer");
   const now = options.now ?? (() => new Date());
   mkdirSync(options.directory, { recursive: true, mode: 0o700 });
-  prune(options.directory, options.retentionDays, now());
-  const stamp = now().toISOString().replace(/[:.]/g, "-");
+  let pruned = prune(options.directory, options.retentionDays, now());
+  const initialNow = now();
+  let lastPrunedAt = initialNow.getTime();
+  const stamp = initialNow.toISOString().replace(/[:.]/g, "-");
   const path = join(options.directory, `auto-router-eval-${stamp}-${process.pid}.jsonl`);
+  const append = options.appendFileImpl ?? appendFile;
   let queue = Promise.resolve();
+  let queued = 0;
+  let dropped = 0;
+  let written = 0;
   return {
     mode: options.mode,
     record(input) {
@@ -117,15 +135,31 @@ export function createJsonlRecorder(options: JsonlRecorderOptions): EvalRecorder
         return Promise.reject(error);
       }
       if (Buffer.byteLength(line, "utf8") > 1024 * 1024) return Promise.reject(new Error("recording turn exceeds 1 MiB"));
+      if (queued >= maxQueuedRecords) {
+        dropped += 1;
+        return Promise.resolve();
+      }
+      queued += 1;
       const write = queue.then(async () => {
-        await appendFile(path, line, { encoding: "utf8", mode: 0o600 });
+        const current = now();
+        if (current.getTime() - lastPrunedAt >= 60_000) {
+          pruned += prune(options.directory, options.retentionDays, current);
+          lastPrunedAt = current.getTime();
+        }
+        await append(path, line, { encoding: "utf8", mode: 0o600 });
         await chmod(path, 0o600);
+        written += 1;
       });
-      queue = write.catch(() => {});
+      queue = write.catch(() => {}).finally(() => {
+        queued -= 1;
+      });
       return write;
     },
     flush() {
       return queue;
+    },
+    stats() {
+      return { queued, dropped, written, pruned };
     },
   };
 }

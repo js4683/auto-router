@@ -5,6 +5,7 @@ export interface EmbeddingClientConfig {
   apiKey: string;
   model: string;
   timeoutMs: number;
+  revision?: string;
 }
 
 const MAX_BATCH_SIZE = 128;

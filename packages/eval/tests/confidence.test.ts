@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { bootstrapRetentionInterval, evaluateQualityGate } from "../src/metrics.js";
+import { bootstrapRetentionInterval, evaluateQualityGate, evaluateVersionedQualityGate } from "../src/metrics.js";
+import type { GroupedQualityCaseScore, VersionedQualityInput } from "../src/types.js";
 
 describe("live quality confidence", () => {
   it("produces a deterministic seeded bootstrap interval", () => {
@@ -28,4 +29,72 @@ describe("live quality confidence", () => {
       reason: "quality retention is below 0.95",
     });
   });
+
+  it("fails closed when a declared critical cohort is missing", () => {
+    const input = {
+      overall: groups("public"),
+      cohorts: { public: groups("public") },
+      criticalCohorts: ["public", "consented-production"],
+    } as VersionedQualityInput & { criticalCohorts: string[] };
+
+    const result = evaluateVersionedQualityGate(input, {
+      minIndependentGroups: 2,
+      minCohortGroups: 2,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toMatch(/consented-production.*missing/i);
+  });
+
+  it("fails closed when incomplete cases are excluded from the evidence", () => {
+    const result = evaluateVersionedQualityGate({
+      overall: groups("public"),
+      cohorts: { public: groups("public") },
+      incompleteCases: 1,
+    }, {
+      minIndependentGroups: 2,
+      minCohortGroups: 2,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toMatch(/incomplete/i);
+  });
+
+  it("does not allow aggregate-only evidence to pass the versioned gate", () => {
+    const result = evaluateVersionedQualityGate({ overall: groups("public"), cohorts: {} }, {
+      minIndependentGroups: 2,
+      minCohortGroups: 2,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toMatch(/cohort/i);
+  });
+
+  it("rejects a session group assigned to multiple cohorts", () => {
+    const duplicated = groups("public")[0];
+    const result = evaluateVersionedQualityGate({
+      overall: groups("public"),
+      cohorts: {
+        public: [duplicated],
+        "consented-production": [{ ...duplicated, cohort: "consented-production" }],
+      },
+      criticalCohorts: ["public", "consented-production"],
+    }, {
+      minIndependentGroups: 2,
+      minCohortGroups: 1,
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toMatch(/multiple cohorts/i);
+  });
 });
+
+function groups(cohort: string): GroupedQualityCaseScore[] {
+  return ["group-1", "group-2"].map((groupId) => ({
+    groupId,
+    cohort,
+    routerScore: 1,
+    frontierScore: 1,
+    weight: 1,
+  }));
+}

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { artifactDigest, normalizeEmbeddingText, type AvengersProArtifactFiles, type EmbeddingClientConfig } from "@auto-router/router-core";
+import {
+  artifactDigest,
+  canonicalDigest,
+  embeddingEndpointDigest,
+  normalizeEmbeddingText,
+  policyDigest,
+  type AvengersProArtifactFiles,
+  type EmbeddingClientConfig,
+} from "@auto-router/router-core";
 import { avengersCorpusDigest, parseAvengersCorpus, splitAvengersCorpus, type AvengersCorpusV1 } from "../src/avengers-corpus.js";
 import { validateAvengersArtifact } from "../src/avengers-validation.js";
 
@@ -83,10 +91,10 @@ function corpus(count = 40, synthetic = false): AvengersCorpusV1 {
   });
 }
 
-function artifactFor(source: AvengersCorpusV1, synthetic = false): AvengersProArtifactFiles {
-  const files = {
+function artifactFor(source: AvengersCorpusV1, synthetic = false, version: 2 | 3 = 2): AvengersProArtifactFiles {
+  const files: AvengersProArtifactFiles = {
     metadata: {
-      schemaVersion: 2 as const,
+      schemaVersion: version,
       synthetic,
       embeddingModel: "embed/test",
       embeddingDimensions: 2,
@@ -101,7 +109,18 @@ function artifactFor(source: AvengersCorpusV1, synthetic = false): AvengersProAr
       beta: 9,
       minObservations: 1,
       availableModels: ["paper/cheap", "paper/frontier"],
-    },
+      ...(version === 3
+        ? {
+            embeddingEndpointDigest: embeddingEndpointDigest(embedding.baseUrl),
+            embeddingModelRevision: "unknown",
+            catalogDigest: canonicalDigest(source.routingSnapshot.catalog),
+            configDigest: canonicalDigest(source.routingSnapshot.config),
+            policyDigest: policyDigest(source.routingSnapshot.config),
+            sourceManifestDigest: source.provenance?.sourceManifestDigest ?? "a".repeat(64),
+            collectionOrigin: source.provenance?.collectionOrigin ?? "public",
+          }
+        : {}),
+    } as AvengersProArtifactFiles["metadata"],
     centers: [[1, 0]],
     clusterModelStats: {
       0: {
@@ -235,5 +254,179 @@ describe("validateAvengersArtifact", () => {
     });
 
     expect(report.validation.qualityRetentionConfidenceInterval).toMatchObject({ lower: 1, upper: 1 });
+  });
+
+  it("requires versioned grouped evidence for provenance-bound validation", async () => {
+    const source = corpus();
+    source.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "public",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: canonicalDigest(source.routingSnapshot.catalog),
+      configDigest: canonicalDigest(source.routingSnapshot.config),
+      policyDigest: policyDigest(source.routingSnapshot.config),
+    };
+    for (const item of source.examples) {
+      item.costs = {
+        candidateGeneration: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        judge: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        embedding: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        failedAttempts: [],
+        retries: [],
+      };
+      for (const outcome of item.outcomes) {
+        outcome.usage = { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+        outcome.usageSource = "provider";
+        outcome.costSource = "provider-usage";
+      }
+    }
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source, false, 3),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.validation.versionedQuality).toMatchObject({ gateVersion: 2, passed: false, independentGroups: 14 });
+    expect(report.validation.eligible).toBe(false);
+  });
+
+  it("does not treat missing corpus cost ledgers as complete evidence", async () => {
+    const source = corpus();
+    source.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "public",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: canonicalDigest(source.routingSnapshot.catalog),
+      configDigest: canonicalDigest(source.routingSnapshot.config),
+      policyDigest: policyDigest(source.routingSnapshot.config),
+    };
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source, false, 3),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.validation.versionedQuality?.reason).toContain("incomplete");
+  });
+
+  it("does not treat estimated outcome costs as complete provenance-bound evidence", async () => {
+    const source = corpus();
+    source.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "public",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: canonicalDigest(source.routingSnapshot.catalog),
+      configDigest: canonicalDigest(source.routingSnapshot.config),
+      policyDigest: policyDigest(source.routingSnapshot.config),
+    };
+    for (const example of source.examples) {
+      example.costs = {
+        candidateGeneration: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        judge: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        embedding: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        failedAttempts: [],
+        retries: [],
+      };
+    }
+
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source, false, 3),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.cases.every((item) => item.reasons.some((reason) => reason.includes("missing cost provenance")))).toBe(true);
+  });
+
+  it("does not treat an empty candidate or judge ledger as complete evidence", async () => {
+    const source = corpus();
+    source.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "public",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: canonicalDigest(source.routingSnapshot.catalog),
+      configDigest: canonicalDigest(source.routingSnapshot.config),
+      policyDigest: policyDigest(source.routingSnapshot.config),
+    };
+    for (const example of source.examples) {
+      example.costs = {
+        candidateGeneration: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        judge: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        embedding: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        failedAttempts: [],
+        retries: [],
+      };
+      for (const outcome of example.outcomes) {
+        outcome.usage = { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+        outcome.usageSource = "provider";
+        outcome.costSource = "provider-usage";
+      }
+    }
+
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source, false, 3),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.cases.every((item) => item.reasons.includes("cost ledger is incomplete"))).toBe(true);
+  });
+
+  it("does not ignore cost gaps in unselected candidate outcomes", async () => {
+    const source = corpus();
+    source.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "public",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: canonicalDigest(source.routingSnapshot.catalog),
+      configDigest: canonicalDigest(source.routingSnapshot.config),
+      policyDigest: policyDigest(source.routingSnapshot.config),
+    };
+    for (const example of source.examples) {
+      example.costs = {
+        candidateGeneration: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        judge: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        embedding: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+        failedAttempts: [],
+        retries: [],
+      };
+      for (const outcome of example.outcomes) {
+        outcome.usage = { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+        outcome.usageSource = "provider";
+        outcome.costSource = "provider-usage";
+        outcome.costUsd = 1;
+      }
+      example.outcomes.push({
+        paperModelId: "paper/unselected",
+        runtimeModelId: "provider/unselected",
+        terminalState: "completed",
+        contentTruncated: false,
+        quality: 1,
+        qualitySource: "deterministic",
+      });
+    }
+
+    const report = await validateAvengersArtifact({
+      corpus: source,
+      artifact: artifactFor(source, false, 3),
+      embedding,
+      bootstrapSeed: "boot",
+      fetchImpl: fetchImpl(),
+      now: clock(),
+    });
+
+    expect(report.cases.every((item) => item.reasons.some((reason) => reason.includes("paper/unselected") && reason.includes("cost provenance")))).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ import {
   artifactDigest,
   type AvengersProArtifactFiles,
   type AvengersProMetadataV2,
+  type AvengersProMetadataV3,
   type ClusterModelStat,
 } from "@auto-router/router-core";
 import { avengersCorpusDigest, splitAvengersCorpus, type AvengersCorpusExampleV1, type AvengersCorpusV1 } from "./avengers-corpus.js";
@@ -19,6 +20,15 @@ export interface AvengersTrainingOptions {
   topK: number;
   beta: number;
   minObservations: number;
+  provenance?: {
+    embeddingEndpointDigest: string;
+    embeddingModelRevision: string;
+    catalogDigest: string;
+    configDigest: string;
+    policyDigest: string;
+    sourceManifestDigest: string;
+    collectionOrigin: "public" | "synthetic-fixture" | "consented-production";
+  };
 }
 
 export type AvengersTrainingPlanOptions = Omit<AvengersTrainingOptions, "embeddingDimensions">;
@@ -81,6 +91,12 @@ export function validateAvengersTrainingPlan(corpus: AvengersCorpusV1, options: 
 function validateTrainingOptions(corpus: AvengersCorpusV1, options: AvengersTrainingOptions): void {
   validateAvengersTrainingPlan(corpus, options);
   positiveInteger(options.embeddingDimensions, "embeddingDimensions");
+  if (options.provenance) {
+    if (!corpus.provenance) throw new Error("provenance-bound training requires corpus provenance");
+    for (const field of ["sourceManifestDigest", "catalogDigest", "configDigest", "policyDigest", "collectionOrigin"] as const) {
+      if (options.provenance[field] !== corpus.provenance[field]) throw new Error(`training ${field} provenance does not match corpus`);
+    }
+  }
 }
 
 function squaredDistance(left: number[], right: number[]): number {
@@ -214,8 +230,7 @@ export function trainAvengersArtifact(
     for (const model of Object.keys(stats)) available.add(model);
   }
 
-  const metadata: AvengersProMetadataV2 = {
-    schemaVersion: 2,
+  const baseMetadata: Omit<AvengersProMetadataV2, "schemaVersion"> = {
     synthetic: corpus.synthetic,
     embeddingModel: options.embeddingModel,
     embeddingDimensions: options.embeddingDimensions,
@@ -231,6 +246,9 @@ export function trainAvengersArtifact(
     minObservations: options.minObservations,
     availableModels: [...available].sort(),
   };
+  const metadata: AvengersProMetadataV2 | AvengersProMetadataV3 = options.provenance
+    ? { ...baseMetadata, schemaVersion: 3, normalizationVersion: "phase4-text-v1", ...options.provenance }
+    : { ...baseMetadata, schemaVersion: 2 };
   const files = { metadata, centers, clusterModelStats, digest: "" };
   files.digest = artifactDigest(files);
   return files;

@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -36,5 +36,35 @@ describe("loadConfig merge", () => {
 
     expect(cfg.taskTypeModels.planning).toEqual({ prefer: null, strategy: "quality", minQuality: 85 });
     expect(cfg.taskTypeModels.run_tests.strategy).toBe("lowest-cost");
+  });
+
+  it("does not let project inline settings override an explicit config path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "auto-router-config-precedence-"));
+    const previousCwd = process.cwd();
+    const explicitPath = join(dir, "explicit.json");
+    try {
+      writeFileSync(
+        explicitPath,
+        JSON.stringify({
+          tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
+          avengersPro: { enabled: false },
+        }),
+      );
+      writeFileSync(
+        join(dir, "opencode.json"),
+        JSON.stringify({
+          "auto-router": {
+            tiers: { simple: { minQuality: 0 }, medium: { minQuality: 60 }, complex: { minQuality: 80 } },
+            avengersPro: { enabled: true },
+          },
+        }),
+      );
+      process.chdir(dir);
+
+      expect(loadConfig(explicitPath).avengersPro?.enabled).toBe(false);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -2,10 +2,11 @@ import { appendFileSync, chmodSync, existsSync, readFileSync, renameSync, unlink
 import type { ModelMap } from "@auto-router/router-core";
 import { runChecks } from "./checks.js";
 import { calculateCost, compositeQuality } from "./metrics.js";
-import { judgeLabeledOutputs, requestCompletion, type JudgeClientConfig } from "./live.js";
+import { judgeLabeledOutputsDetailed, liveRequestFailure, requestCompletion, type JudgeClientConfig, type JudgeResult } from "./live.js";
 import { redactContent } from "./recording.js";
-import type { AvengersCorpusV1, AvengersCorpusExampleV1, AvengersOutcomeV1 } from "./avengers-corpus.js";
-import type { EvalDatasetV1, EvalTurnV1, LiveOutput } from "./types.js";
+import { createEvalProvenance, sourceManifestDigest, validateSourceManifest, type EvalSourceManifest } from "./provenance.js";
+import { validateCostLedger, type AvengersCorpusV1, type AvengersCorpusExampleV1, type AvengersOutcomeV1 } from "./avengers-corpus.js";
+import type { EvalCostLedger, EvalDatasetV1, EvalTurnV1, EvalUsage, LiveOutput } from "./types.js";
 
 export interface AvengersCollectionPlan {
   exampleCount: number;
@@ -18,6 +19,52 @@ export interface AvengersCollectionPlan {
 export type AvengersAliasMap = Map<string, string>;
 
 const MAX_RECORD_BYTES = 4 * 1024 * 1024;
+
+export function readAvengersSourceManifest(path: string): EvalSourceManifest {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`source manifest is not valid JSON: ${path}`, { cause: error });
+  }
+  return validateSourceManifest(value);
+}
+
+function localSyntheticManifest(dataset: EvalDatasetV1, aliases: AvengersAliasMap): EvalSourceManifest {
+  return {
+    schemaVersion: 1,
+    datasetId: dataset.id,
+    collectionOrigin: "synthetic-fixture",
+    records: dataset.sessions.flatMap((session) => session.turns.map((turn, sequence) => ({
+      id: `${session.id}/${turn.id}`,
+      sessionGroupId: session.sessionGroupId ?? session.id,
+      sequence,
+      candidatePaperModelIds: [...aliases.keys()].sort(),
+    }))),
+  };
+}
+
+function validateManifestCoverage(manifest: EvalSourceManifest, dataset: EvalDatasetV1, aliases: AvengersAliasMap): void {
+  if (manifest.datasetId !== dataset.id) throw new Error("source manifest dataset ID does not match dataset");
+  const expected = new Map(dataset.sessions.flatMap((session) => session.turns.map((turn, sequence) => [
+    `${session.id}/${turn.id}`,
+    { sessionGroupId: session.sessionGroupId ?? session.id, sequence },
+  ])));
+  if (manifest.records.length !== expected.size) throw new Error("source manifest record count does not match dataset");
+  const candidates = [...aliases.keys()].sort();
+  const seen = new Set<string>();
+  for (const record of manifest.records) {
+    const source = expected.get(record.id);
+    if (!source || seen.has(record.id)) throw new Error(`source manifest contains an unknown or duplicate record ${record.id}`);
+    seen.add(record.id);
+    if (record.sessionGroupId !== source.sessionGroupId || record.sequence !== source.sequence) {
+      throw new Error(`source manifest record ${record.id} does not match dataset sequence`);
+    }
+    if (JSON.stringify(record.candidatePaperModelIds) !== JSON.stringify(candidates)) {
+      throw new Error(`source manifest record ${record.id} candidates do not match the requested aliases`);
+    }
+  }
+}
 
 class CollectionTurnError extends Error {
   constructor(message: string, readonly record: Record<string, unknown>) {
@@ -72,8 +119,21 @@ function outputTruncated(output: LiveOutput): boolean {
   return output.terminalState === "incomplete";
 }
 
+function emptyUsage(): EvalUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 };
+}
+
+function addUsage(target: EvalUsage, source: EvalUsage | undefined): void {
+  if (!source) return;
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadInputTokens += source.cacheReadInputTokens;
+  target.cacheWriteInputTokens += source.cacheWriteInputTokens;
+}
+
 async function collectTurn(
   sessionId: string,
+  sessionGroupId: string,
   sequence: number,
   turn: EvalTurnV1,
   aliases: AvengersAliasMap,
@@ -82,33 +142,54 @@ async function collectTurn(
   fetchImpl: typeof fetch
 ): Promise<Record<string, unknown>> {
   const papers = [...aliases.keys()].sort();
-  const generations: Array<{ paper: string; runtime: string; output?: LiveOutput; error?: string }> = [];
+  const generations: Array<{ paper: string; runtime: string; output?: LiveOutput; error?: string; failure?: ReturnType<typeof liveRequestFailure> }> = [];
   for (const paper of papers) {
     const runtime = aliases.get(paper)!;
     try {
       const output = await requestCompletion({ model: runtime, messages: turn.messages ?? [] }, config, fetchImpl);
-      generations.push({ paper, runtime, output });
+      const identityError = output.runtimeModelId && output.runtimeModelId !== runtime
+        ? `runtime identity mismatch: requested ${runtime}, provider returned ${output.runtimeModelId}`
+        : undefined;
+      generations.push({
+        paper,
+        runtime,
+        output,
+        ...(identityError
+          ? { error: identityError, failure: { retries: output.retries ?? [], usage: output.usage } }
+          : {}),
+      });
     } catch (error) {
-      generations.push({ paper, runtime, error: error instanceof Error ? error.message : "generation failed" });
+      generations.push({
+        paper,
+        runtime,
+        error: error instanceof Error ? error.message : "generation failed",
+        failure: liveRequestFailure(error),
+      });
     }
   }
 
   const completed = generations.every((item) => item.output?.terminalState === "completed");
   let judged: Record<string, number> = {};
+  let judgeResult: JudgeResult | undefined;
+  let judgeAttempted = false;
+  let judgeFailure: ReturnType<typeof liveRequestFailure> = { retries: [] };
   const generationErrors = generations.filter((item) => item.error);
   let collectionError = generationErrors.length
     ? `generation failed: ${generationErrors.map((item) => `${item.paper}: ${item.error}`).join("; ")}`
     : undefined;
   if (!collectionError && completed && turn.judgeRubric) {
+    judgeAttempted = true;
     try {
-      judged = await judgeLabeledOutputs(
+      judgeResult = await judgeLabeledOutputsDetailed(
         `${sessionId}/${turn.id}`,
         turn.judgeRubric,
         generations.map((item) => ({ id: item.paper, output: item.output! })),
         config,
         fetchImpl
       );
+      judged = judgeResult.scores;
     } catch (error) {
+      judgeFailure = liveRequestFailure(error);
       const message = error instanceof Error ? error.message : "judge request failed";
       collectionError = `judge failed: ${message}`;
     }
@@ -127,7 +208,7 @@ async function collectTurn(
     const costUsd = usage && price ? calculateCost(usage, price) : undefined;
     return {
       paperModelId: item.paper,
-      runtimeModelId: item.runtime,
+      runtimeModelId: output?.runtimeModelId ?? item.runtime,
       terminalState,
       contentTruncated,
       quality,
@@ -138,9 +219,39 @@ async function collectTurn(
     };
   });
 
+  const candidateUsage = emptyUsage();
+  for (const generation of generations) addUsage(candidateUsage, generation.output?.usage);
+  const failedAttempts = generations
+    .filter((generation) => generation.error || generation.output?.terminalState !== "completed")
+    .map((generation) => {
+      const failure = generation.failure;
+      const usage = failure?.usage ?? generation.output?.usage;
+      return {
+        modelId: generation.runtime,
+        ...(failure?.status === undefined ? {} : { status: failure.status }),
+        ...(usage ? { usage } : {}),
+      };
+    });
+  if (judgeAttempted && !judgeResult) {
+    failedAttempts.push({
+      modelId: config.judgeModel,
+      ...(judgeFailure.status === undefined ? {} : { status: judgeFailure.status }),
+      ...(judgeFailure.usage ? { usage: judgeFailure.usage } : {}),
+    });
+  }
+  const costs: EvalCostLedger = {
+    candidateGeneration: candidateUsage,
+    judge: judgeResult?.usage ?? judgeFailure.usage ?? emptyUsage(),
+    embedding: emptyUsage(),
+    failedAttempts,
+    retries: [
+      ...generations.flatMap((generation) => generation.failure?.retries ?? generation.output?.retries ?? []),
+      ...(judgeResult?.retries ?? judgeFailure.retries),
+    ],
+  };
   const record = redactContent({
     id: `${sessionId}/${turn.id}`,
-    sessionGroupId: sessionId,
+    sessionGroupId,
     sequence,
     weight: turn.weight ?? 1,
     text: lastUserText(turn),
@@ -148,6 +259,7 @@ async function collectTurn(
     sessionState: turn.sessionState,
     requiredCapabilities: turn.requiredCapabilities,
     outcomes,
+    costs,
     ...(collectionError ? { collectionError } : {}),
   }) as Record<string, unknown>;
   if (collectionError) throw new CollectionTurnError(collectionError, record);
@@ -159,9 +271,11 @@ export async function collectAvengersOutcomes(
   aliases: AvengersAliasMap,
   config: JudgeClientConfig,
   fetchImpl: typeof fetch = fetch,
-  outputPath?: string
+  outputPath?: string,
+  sourceManifest?: EvalSourceManifest,
 ): Promise<Record<string, unknown>[]> {
   if (outputPath && existsSync(outputPath)) throw new Error(`collection output already exists: ${outputPath}`);
+  if (sourceManifest) validateManifestCoverage(sourceManifest, dataset, aliases);
   planAvengersCollection(dataset, aliases);
   const records: Record<string, unknown>[] = [];
   for (const session of dataset.sessions) {
@@ -169,7 +283,7 @@ export async function collectAvengersOutcomes(
       let record: Record<string, unknown>;
       let collectionError: Error | undefined;
       try {
-        record = await collectTurn(session.id, sequence, turn, aliases, dataset, config, fetchImpl);
+        record = await collectTurn(session.id, session.sessionGroupId ?? session.id, sequence, turn, aliases, dataset, config, fetchImpl);
       } catch (error) {
         if (!(error instanceof CollectionTurnError)) throw error;
         record = error.record;
@@ -206,7 +320,7 @@ function expectedCollectionRecords(dataset: EvalDatasetV1): Map<string, Record<s
       const id = `${session.id}/${turn.id}`;
       expected.set(id, redactContent({
         id,
-        sessionGroupId: session.id,
+        sessionGroupId: session.sessionGroupId ?? session.id,
         sequence,
         weight: turn.weight ?? 1,
         text: lastUserText(turn),
@@ -227,8 +341,10 @@ function validateRecordBinding(record: Record<string, unknown>, expected: Record
   }
 }
 
-export function curateAvengersCollection(inputPath: string, baseDataset: EvalDatasetV1, aliases: AvengersAliasMap): AvengersCorpusV1 {
+export function curateAvengersCollection(inputPath: string, baseDataset: EvalDatasetV1, aliases: AvengersAliasMap, sourceManifest?: EvalSourceManifest): AvengersCorpusV1 {
   if (aliases.size < 2 || aliases.size > 26) throw new Error("candidate list must contain between 2 and 26 aliases");
+  const manifest = sourceManifest ?? localSyntheticManifest(baseDataset, aliases);
+  validateManifestCoverage(manifest, baseDataset, aliases);
   const lines = readFileSync(inputPath, "utf8").split("\n").filter((line) => line.trim());
   const expected = expectedCollectionRecords(baseDataset);
   const examples: AvengersCorpusExampleV1[] = [];
@@ -271,6 +387,7 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
     for (const paper of aliases.keys()) {
       if (!seenModels.has(paper)) throw new Error(`example ${id} is missing candidate ${paper}`);
     }
+    const costs = record.costs === undefined ? undefined : validateCostLedger(record.costs, `example ${id}.costs`);
     examples.push({
       id,
       sessionGroupId,
@@ -281,6 +398,7 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
       sessionState: record.sessionState as AvengersCorpusExampleV1["sessionState"],
       requiredCapabilities: (record.requiredCapabilities as string[]) ?? [],
       outcomes: curatedOutcomes,
+      ...(costs ? { costs } : {}),
     });
   }
 
@@ -299,18 +417,28 @@ export function curateAvengersCollection(inputPath: string, baseDataset: EvalDat
   const modelMap: ModelMap = {};
   for (const [paper, runtime] of aliases) modelMap[paper] = [{ runtimeId: runtime, source: "hand" }];
 
+  const synthetic = manifest.collectionOrigin === "synthetic-fixture";
+  const config = { ...baseDataset.config, modelMap };
+  const provenance = createEvalProvenance(
+    baseDataset.catalog,
+    config,
+    manifest.digest ?? sourceManifestDigest(manifest),
+    manifest.collectionOrigin,
+    { sourceManifestOrigin: manifest.collectionOrigin, synthetic },
+  );
   return {
     schemaVersion: 1,
     id: `${baseDataset.id}-avengers`,
-    synthetic: false,
+    synthetic,
     candidatePaperModelIds: [...aliases.keys()].sort(),
     routingSnapshot: {
       catalog: baseDataset.catalog,
-      config: baseDataset.config,
+      config,
       prices: baseDataset.prices,
       capabilities: baseDataset.capabilities ?? {},
       modelMap,
     },
+    provenance,
     examples,
   };
 }

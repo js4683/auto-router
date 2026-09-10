@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { Catalog, ModelEntry, RouterConfig } from "./types.js";
+import type { Catalog, ModelEntry, RouterConfig, RoutingCapability, RoutingTransport } from "./types.js";
 
 export interface RawAAModel {
   id: string;
@@ -16,6 +16,8 @@ export interface RawAAModel {
   median_output_tokens_per_second?: number;
   median_time_to_first_token_seconds?: number;
   limit?: { context?: number; output?: number };
+  capabilities?: readonly RoutingCapability[];
+  transports?: readonly RoutingTransport[];
   // sometimes AA uses different casing
   [k: string]: unknown;
 }
@@ -26,6 +28,8 @@ export interface OpenCodeProviderModel {
   cost?: { input?: number; output?: number; cache?: { read?: number; write?: number } };
   limit?: { context?: number; output?: number };
   status?: string;
+  capabilities?: readonly RoutingCapability[];
+  transports?: readonly RoutingTransport[];
 }
 
 export interface OpenCodeProvider {
@@ -58,6 +62,51 @@ function hasExplicitZeroPrice(raw: RawAAModel): boolean {
   if (!pricing) return false;
   if (typeof pricing.price_1m_blended_3_to_1 === "number") return pricing.price_1m_blended_3_to_1 === 0;
   return pricing.price_1m_input_tokens === 0 && pricing.price_1m_output_tokens === 0;
+}
+
+function providerName(rawId: string, providerID?: string): string {
+  if (providerID) return providerID.toLowerCase();
+  const slash = rawId.indexOf("/");
+  return slash > 0 ? rawId.slice(0, slash).toLowerCase() : "";
+}
+
+function defaultTransports(provider: string, providerQualified: boolean): RoutingTransport[] {
+  if (provider === "anthropic") return ["anthropic"];
+  if (provider === "opencode") return ["responses"];
+  if (provider === "openai") return ["chat", "responses"];
+  return providerQualified ? ["chat", "responses"] : ["chat"];
+}
+
+function transportsForRuntimeId(runtimeId: string): RoutingTransport[] {
+  return defaultTransports(providerName(runtimeId), runtimeId.includes("/"));
+}
+
+function routingCapabilities(raw: RawAAModel): readonly RoutingCapability[] {
+  return raw.capabilities === undefined ? ["text"] : [...new Set(raw.capabilities)];
+}
+
+function routingTransports(raw: RawAAModel, rawId: string, providerID?: string): readonly RoutingTransport[] {
+  return raw.transports === undefined
+    ? defaultTransports(providerName(rawId, providerID), providerID !== undefined || rawId.includes("/"))
+    : [...new Set(raw.transports)];
+}
+
+function normalizeCachedCatalog(catalog: Catalog): Catalog {
+  return {
+    ...catalog,
+    models: catalog.models.map((model) => {
+      if (model.transports !== undefined) return model;
+      const runtimeId = model.runtimeId ?? model.id;
+      return {
+        ...model,
+        transports: transportsForRuntimeId(runtimeId),
+      };
+    }),
+  };
+}
+
+function cachedCatalog(catalog: Catalog): Catalog {
+  return { ...normalizeCachedCatalog(catalog), source: "cache" };
 }
 
 export function buildCatalog(
@@ -109,6 +158,8 @@ export function buildCatalog(
       value: valueScore(codingIndex, blended),
       windowTokens,
       isFree,
+      capabilities: routingCapabilities(raw),
+      transports: routingTransports(raw, rawId, providerID),
       medianOutputTokensPerSec: raw.median_output_tokens_per_second,
       medianTimeToFirstTokenSec: raw.median_time_to_first_token_seconds,
     };
@@ -172,6 +223,8 @@ export function buildCatalogFromProviders(providerList: OpenCodeProviderList, co
         evaluations: { artificial_analysis_coding_index: inferred.codingIndex },
         pricing,
         limit: context && context > 0 ? { context, output: model.limit?.output } : undefined,
+        capabilities: model.capabilities,
+        transports: model.transports,
       });
     }
   }
@@ -205,7 +258,11 @@ function fallbackCatalog(config: RouterConfig): Catalog {
   cat.models.forEach((m) => {
     m.isFree = freeSet.has(m.id.toLowerCase());
     if (!m.runtimeId) {
-      m.runtimeId = mappedRuntimeIds.find((runtimeId) => runtimeId === m.id || runtimeId.endsWith(`/${m.id}`));
+      const runtimeId = mappedRuntimeIds.find((candidate) => candidate === m.id || candidate.endsWith(`/${m.id}`));
+      if (runtimeId) {
+        m.runtimeId = runtimeId;
+        m.transports = transportsForRuntimeId(runtimeId);
+      }
     }
   });
   return cat;
@@ -224,7 +281,7 @@ export async function fetchAACatalog(config: RouterConfig, cachePathOverride?: s
       const cached = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog & { fetchedAt: string };
       const age = Date.now() - new Date(cached.fetchedAt).getTime();
       if (age < intervalMs && cached.models?.length) {
-        return { ...cached, source: "cache" };
+        return cachedCatalog(cached);
       }
     } catch {
       // ignore corrupt cache
@@ -237,7 +294,7 @@ export async function fetchAACatalog(config: RouterConfig, cachePathOverride?: s
     if (existsSync(cachePath)) {
       try {
         const stale = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog;
-        if (stale.models?.length) return { ...stale, source: "cache" };
+        if (stale.models?.length) return cachedCatalog(stale);
       } catch {}
     }
     return fallbackCatalog(config);
@@ -263,7 +320,7 @@ export async function fetchAACatalog(config: RouterConfig, cachePathOverride?: s
     if (existsSync(cachePath)) {
       try {
         const stale = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog;
-        if (stale.models?.length) return { ...stale, source: "cache" };
+        if (stale.models?.length) return cachedCatalog(stale);
       } catch {}
     }
     return fallbackCatalog(config);
@@ -275,7 +332,7 @@ export function loadCatalogSync(config: RouterConfig, cachePathOverride?: string
   if (existsSync(cachePath)) {
     try {
       const c = JSON.parse(readFileSync(cachePath, "utf8")) as Catalog;
-      if (c.models?.length) return { ...c, source: "cache" };
+      if (c.models?.length) return cachedCatalog(c);
     } catch {}
   }
   return fallbackCatalog(config);

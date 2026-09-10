@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadAvengersProArtifactFiles } from "@auto-router/router-core";
+import { canonicalDigest, loadAvengersProArtifactFiles, policyDigest } from "@auto-router/router-core";
 import { parseAvengersCorpus, readAvengersCorpus, splitAvengersCorpus, type AvengersCorpusV1, type AvengersOutcomeV1 } from "../src/avengers-corpus.js";
 import { canonicalJson, trainAvengersArtifact, writeAvengersArtifact, type AvengersTrainingOptions } from "../src/avengers-training.js";
 
@@ -167,6 +167,50 @@ describe("trainAvengersArtifact", () => {
     const loaded = loadAvengersProArtifactFiles(dir);
     expect(loaded.digest).toBe(trained.digest);
     expect(loaded.metadata.synthetic).toBe(true);
+  });
+
+  it("emits v3 provenance when training is bound to an evaluation source", () => {
+    const corpus = trainingCorpus();
+    corpus.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "synthetic-fixture",
+      sourceManifestDigest: "f".repeat(64),
+      catalogDigest: canonicalDigest(corpus.routingSnapshot.catalog),
+      configDigest: canonicalDigest(corpus.routingSnapshot.config),
+      policyDigest: policyDigest(corpus.routingSnapshot.config),
+    };
+    const trained = trainAvengersArtifact(corpus, trainVectors(corpus), {
+      ...options,
+      provenance: {
+        embeddingEndpointDigest: "a".repeat(64),
+        embeddingModelRevision: "revision-a",
+        catalogDigest: corpus.provenance.catalogDigest,
+        configDigest: corpus.provenance.configDigest,
+        policyDigest: corpus.provenance.policyDigest,
+        sourceManifestDigest: corpus.provenance.sourceManifestDigest,
+        collectionOrigin: corpus.provenance.collectionOrigin,
+      },
+    });
+    expect(trained.metadata.schemaVersion).toBe(3);
+    const dir = mkdtempSync(join(tmpdir(), "artifact-v3-"));
+    dirs.push(dir);
+    writeAvengersArtifact(dir, trained);
+    expect(loadAvengersProArtifactFiles(dir).metadata.schemaVersion).toBe(3);
+  });
+
+  it("requires corpus provenance before emitting a provenance-bound artifact", () => {
+    const corpus = trainingCorpus();
+    const provenance = {
+      embeddingEndpointDigest: "a".repeat(64),
+      embeddingModelRevision: "revision-a",
+      catalogDigest: "b".repeat(64),
+      configDigest: "c".repeat(64),
+      policyDigest: "d".repeat(64),
+      sourceManifestDigest: "e".repeat(64),
+      collectionOrigin: "consented-production" as const,
+    };
+
+    expect(() => trainAvengersArtifact(corpus, trainVectors(corpus), { ...options, provenance })).toThrow(/corpus provenance/i);
   });
 
   it("regenerates the synthetic fixture through the trainer", () => {

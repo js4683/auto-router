@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { EvalDatasetV1, EvalUsage } from "./types.js";
+import { canonicalDigest, policyDigest, validateEvalProvenance, type EvalProvenance } from "./provenance.js";
 
 const MAX_DATASET_BYTES = 50 * 1024 * 1024;
 const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -229,6 +230,8 @@ function validateSessions(value: unknown): void {
     const id = string(session.id, "session.id");
     if (sessionIds.has(id)) throw new Error(`duplicate session id ${id}`);
     sessionIds.add(id);
+    if (session.sessionGroupId !== undefined) string(session.sessionGroupId, `session ${id}.sessionGroupId`);
+    if (session.cohort !== undefined) string(session.cohort, `session ${id}.cohort`);
     const turnIds = new Set<string>();
     const turns = array(session.turns, "session.turns");
     if (!turns.length) throw new Error(`session ${id} must contain turns`);
@@ -275,8 +278,20 @@ export function parseDataset(input: unknown): EvalDatasetV1 {
       liveTransport(value, `liveTransports.${key}`);
     }
   }
+  if (dataset.provenance !== undefined) validateEvalProvenance(dataset.provenance);
   validateSessions(dataset.sessions);
   return input as EvalDatasetV1;
+}
+
+export function validateLiveProvenance(dataset: EvalDatasetV1): void {
+  if (!dataset.provenance) throw new Error("live evaluation requires provenance");
+  const provenance = validateEvalProvenance(dataset.provenance);
+  if (provenance.collectionOrigin === "synthetic-fixture" || provenance.sourceManifestOrigin === "synthetic-fixture" || provenance.synthetic === true) {
+    throw new Error("synthetic collection cannot satisfy live evaluation provenance");
+  }
+  if (provenance.catalogDigest !== canonicalDigest(dataset.catalog)) throw new Error("provenance catalog digest does not match dataset");
+  if (provenance.configDigest !== canonicalDigest(dataset.config)) throw new Error("provenance config digest does not match dataset");
+  if (provenance.policyDigest !== policyDigest(dataset.config)) throw new Error("provenance policy digest does not match dataset");
 }
 
 export function readDataset(path: string): EvalDatasetV1 {

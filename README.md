@@ -86,9 +86,11 @@ Default listen address is `http://127.0.0.1:8787`.
 - Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.
 
 The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
-requests. It translates text and function calls across Zen's Responses API, Gemini's
-`generateContent` API, and the separate Antigravity Cloud Code Assist transport,
-including client-compatible streaming envelopes.
+requests. It translates text, image, and function-call content across Zen's Responses
+API, Gemini's `generateContent` API, and the separate Antigravity Cloud Code Assist
+transport, including client-compatible streaming envelopes. Requests carrying image
+content a target transport cannot represent are rejected rather than silently sent as
+text only.
 Gemini chat completions and native OpenAI Responses streams are forwarded
 incrementally as upstream chunks arrive. Cross-protocol paths without an incremental
 translator request buffered upstream JSON, then synthesize a client-compatible event

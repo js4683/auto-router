@@ -170,6 +170,19 @@ describe("requestCompletion", () => {
 
     expect(result.text).toBe("recovered");
     expect(calls).toBe(2);
+    expect(result.retries).toEqual([{ operation: "completion", attempt: 1, delayMs: 0, status: 429 }]);
+  });
+
+  it("returns provider runtime identity when the response supplies one", async () => {
+    const result = await requestCompletion(
+      { model: "requested/model", messages: [] },
+      config("https://example.com/v1"),
+      async () => new Response(JSON.stringify({
+        model: "served/model",
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      })),
+    );
+    expect(result.runtimeModelId).toBe("served/model");
   });
 
   it("stops after the configured number of retry attempts", async () => {
@@ -327,6 +340,26 @@ describe("requestCompletion", () => {
       text: "{\"ok\":true}",
       terminalState: "completed",
       usage: { inputTokens: 8, outputTokens: 2, cacheReadInputTokens: 1, cacheWriteInputTokens: 0 },
+    });
+  });
+
+  it("normalizes Responses function-call-only output", async () => {
+    const output = await requestCompletion(
+      { model: "gpt-5.6-sol", messages: [{ role: "user", content: "read README" }] },
+      { baseUrl: "https://opencode.ai/zen/v1", apiKey: "secret", timeoutMs: 1000, maxOutputTokens: 64 },
+      async () => new Response(JSON.stringify({
+        status: "completed",
+        output: [{ type: "function_call", id: "call_read", call_id: "call_read", name: "read_file", arguments: "{\"path\":\"README.md\"}" }],
+        usage: { input_tokens: 12, output_tokens: 3 },
+      })),
+      "responses",
+    );
+
+    expect(output).toMatchObject({
+      text: "",
+      terminalState: "completed",
+      toolCalls: [{ id: "call_read", name: "read_file", arguments: { path: "README.md" } }],
+      usage: { inputTokens: 12, outputTokens: 3 },
     });
   });
 

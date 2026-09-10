@@ -1,11 +1,31 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { listProviderAccounts } from "../src/accounts.js";
 import { completeOAuthCode, ensureGoogleProject, refreshAccountToken, refreshOAuthToken, startOAuth } from "../src/oauth.js";
 
+const claudeCodeOauth = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn() }));
+
+vi.mock("../src/claude-code-auth.js", () => ({
+  readClaudeCodeOauth: claudeCodeOauth.read,
+  writeClaudeCodeOauth: claudeCodeOauth.write,
+}));
+
 describe("startOAuth", () => {
+  it("persists pending login state with restrictive permissions and consumes it once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-oauth-state-"));
+    const authPath = join(dir, "auth.json");
+    const statePath = join(dir, "pending.json");
+    const started = await startOAuth("opencode", { statePath });
+
+    expect("error" in started).toBe(false);
+    if ("error" in started) return;
+    expect(statSync(statePath).mode & 0o777).toBe(0o600);
+    await expect(completeOAuthCode(started.id, "zen-key", authPath, undefined, { statePath })).resolves.toEqual({ done: true });
+    await expect(completeOAuthCode(started.id, "zen-key", authPath, undefined, { statePath })).resolves.toMatchObject({ error: expect.stringMatching(/expired|used/) });
+  });
+
   it("builds a Claude Pro/Max authorize URL", async () => {
     const started = await startOAuth("anthropic");
     expect("error" in started).toBe(false);
@@ -222,6 +242,45 @@ describe("refreshOAuthToken", () => {
 });
 
 describe("refreshAccountToken", () => {
+  it("refreshes an auth-file account without using Claude Code credentials", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-refresh-auth-source-"));
+    const authPath = join(dir, "auth.json");
+    writeFileSync(
+      authPath,
+      JSON.stringify({ anthropic: { type: "oauth", access: "auth-access", refresh: "auth-refresh", expires: Date.now() - 1000 } }),
+    );
+    claudeCodeOauth.read.mockReturnValue({ access: "keychain-access", refresh: "keychain-refresh", expires: Date.now() - 1000 });
+    try {
+      const next = await refreshAccountToken(
+        {
+          id: "anthropic:primary",
+          provider: "anthropic",
+          token: "auth-access",
+          type: "oauth",
+          expires: Date.now() - 1000,
+          refresh: "auth-refresh",
+          primary: true,
+          source: "auth",
+        },
+        {
+          authPath,
+          fetchImpl: async (_url, init) => {
+            expect(String(init?.body)).toContain("auth-refresh");
+            expect(String(init?.body)).not.toContain("keychain-refresh");
+            return new Response(JSON.stringify({ access_token: "auth-new", refresh_token: "auth-new-refresh", expires_in: 3600 }));
+          },
+        },
+      );
+
+      expect(next).toBe("auth-new");
+      expect(claudeCodeOauth.write).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(authPath, "utf8")).anthropic).toMatchObject({ access: "auth-new", refresh: "auth-new-refresh" });
+    } finally {
+      claudeCodeOauth.read.mockReset();
+      claudeCodeOauth.write.mockReset();
+    }
+  });
+
   it("refreshes an expired extra account without touching primary", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ar-refresh-extra-"));
     const authPath = join(dir, "auth.json");
@@ -275,5 +334,37 @@ describe("refreshAccountToken", () => {
     expect(next).toBe("new-only");
     expect(JSON.parse(readFileSync(authPath, "utf8")).openai).toBeUndefined();
     expect(JSON.parse(readFileSync(accountsPath, "utf8")).accounts[0].access).toBe("new-only");
+  });
+
+  it("single-flights concurrent refreshes for one source key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ar-refresh-single-flight-"));
+    const authPath = join(dir, "auth.json");
+    const accountsPath = join(dir, "accounts.json");
+    writeFileSync(authPath, "{}");
+    writeFileSync(
+      accountsPath,
+      JSON.stringify({
+        accounts: [{ id: "single-flight", provider: "openai", type: "oauth", access: "old", refresh: "refresh", expires: Date.now() - 1000 }],
+      }),
+    );
+    const account = listProviderAccounts("openai", { env: {}, authPath, accountsPath })[0];
+    expect(account).toBeTruthy();
+    let calls = 0;
+    let release!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = async () => {
+      calls += 1;
+      return response;
+    };
+
+    const first = refreshAccountToken(account!, { authPath, accountsPath, fetchImpl });
+    const second = refreshAccountToken(account!, { authPath, accountsPath, fetchImpl });
+    expect(calls).toBe(1);
+    release(new Response(JSON.stringify({ access_token: "new", refresh_token: "new-refresh", expires_in: 3600 })));
+
+    await expect(Promise.all([first, second])).resolves.toEqual(["new", "new"]);
+    expect(JSON.parse(readFileSync(accountsPath, "utf8")).accounts[0].access).toBe("new");
   });
 });

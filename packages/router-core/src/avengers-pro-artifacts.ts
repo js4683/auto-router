@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 export const AVENGERS_PRO_ARTIFACT_VERSION = 2 as const;
+export const AVENGERS_PRO_ARTIFACT_VERSION_V3 = 3 as const;
 
 export interface AvengersProMetadataV2 {
   schemaVersion: 2;
@@ -22,6 +23,30 @@ export interface AvengersProMetadataV2 {
   availableModels: string[];
 }
 
+export interface AvengersProMetadataV3 extends Omit<AvengersProMetadataV2, "schemaVersion"> {
+  schemaVersion: 3;
+  embeddingEndpointDigest: string;
+  embeddingModelRevision: string;
+  catalogDigest: string;
+  configDigest: string;
+  policyDigest: string;
+  sourceManifestDigest: string;
+  collectionOrigin: "public" | "synthetic-fixture" | "consented-production";
+}
+
+export type AvengersProMetadata = AvengersProMetadataV2 | AvengersProMetadataV3;
+
+export interface ActivationProvenance {
+  sourceManifestDigest: string;
+  catalogDigest: string;
+  configDigest: string;
+  policyDigest: string;
+  collectionOrigin: "public" | "synthetic-fixture" | "consented-production";
+  embeddingEndpointDigest?: string;
+  embeddingModelRevision?: string;
+  normalizationVersion?: string;
+}
+
 export interface ClusterModelStat {
   qualityMean: number;
   completed: number;
@@ -30,7 +55,7 @@ export interface ClusterModelStat {
 }
 
 export interface ArtifactDigestInput {
-  metadata: AvengersProMetadataV2;
+  metadata: AvengersProMetadata;
   centers: number[][];
   clusterModelStats: Record<number, Record<string, ClusterModelStat>>;
 }
@@ -69,7 +94,17 @@ export interface AvengersProValidationV1 {
     | "synthetic",
     { passed: boolean; reason: string }
   >;
+  versionedQuality?: VersionedQualityGateV2;
   eligible: boolean;
+}
+
+export interface VersionedQualityGateV2 {
+  gateVersion: 2;
+  passed: boolean;
+  reason: string;
+  lowerBound: number | null;
+  independentGroups: number;
+  cohortResults: Record<string, { passed: boolean; lowerBound: number | null; independentGroups: number; reason: string }>;
 }
 
 export interface AvengersProArtifactFiles extends ArtifactDigestInput {
@@ -101,6 +136,16 @@ const METADATA_KEYS = [
   "minObservations",
   "availableModels",
 ] as const;
+const METADATA_V3_KEYS = [
+  ...METADATA_KEYS,
+  "embeddingEndpointDigest",
+  "embeddingModelRevision",
+  "catalogDigest",
+  "configDigest",
+  "policyDigest",
+  "sourceManifestDigest",
+  "collectionOrigin",
+] as const;
 const STAT_KEYS = ["qualityMean", "completed", "failed", "observations"] as const;
 const VALIDATION_KEYS = [
   "schemaVersion",
@@ -114,6 +159,7 @@ const VALIDATION_KEYS = [
   "gates",
   "eligible",
 ] as const;
+const VERSIONED_VALIDATION_KEYS = [...VALIDATION_KEYS, "versionedQuality"] as const;
 const METRIC_KEYS = ["qualityRetentionVsFrontier", "costSavingsVsFrontier", "qualityDeltaVsTier0", "costDeltaVsTier0"] as const;
 const CONFIDENCE_INTERVAL_KEYS = ["lower", "upper", "samples", "seed"] as const;
 const GATE_KEYS = [
@@ -131,6 +177,8 @@ const GATE_KEYS = [
   "synthetic",
 ] as const satisfies readonly ValidationGateName[];
 const GATE_VALUE_KEYS = ["passed", "reason"] as const;
+const VERSIONED_QUALITY_KEYS = ["gateVersion", "passed", "reason", "lowerBound", "independentGroups", "cohortResults"] as const;
+const VERSIONED_COHORT_KEYS = ["passed", "lowerBound", "independentGroups", "reason"] as const;
 
 function canonicalCompare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -224,9 +272,7 @@ function sha256(value: unknown, message: string): string {
   return value;
 }
 
-function validateMetadata(value: unknown): AvengersProMetadataV2 {
-  const metadata = exactObject(value, METADATA_KEYS, "artifact metadata does not match schema v2");
-  if (metadata.schemaVersion !== AVENGERS_PRO_ARTIFACT_VERSION) throw new Error("artifact schema version must be 2");
+function validateMetadataFields(metadata: JsonObject): void {
   if (typeof metadata.synthetic !== "boolean") throw new Error("artifact synthetic flag must be boolean");
   nonEmptyString(metadata.embeddingModel, "artifact embedding model must be non-empty");
   positiveInteger(metadata.embeddingDimensions, "artifact dimensions must be a positive integer");
@@ -244,7 +290,29 @@ function validateMetadata(value: unknown): AvengersProMetadataV2 {
   if (beta <= 0) throw new Error("artifact beta must be positive and finite");
   positiveInteger(metadata.minObservations, "artifact minimum observations must be a positive integer");
   validateAvailableModels(metadata.availableModels);
-  return metadata as unknown as AvengersProMetadataV2;
+}
+
+function validateMetadata(value: unknown): AvengersProMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("artifact metadata does not match schema");
+  const raw = value as JsonObject;
+  if (raw.schemaVersion === AVENGERS_PRO_ARTIFACT_VERSION) {
+    const metadata = exactObject(value, METADATA_KEYS, "artifact metadata does not match schema v2");
+    validateMetadataFields(metadata);
+    return metadata as unknown as AvengersProMetadataV2;
+  }
+  if (raw.schemaVersion === AVENGERS_PRO_ARTIFACT_VERSION_V3) {
+    const metadata = exactObject(value, METADATA_V3_KEYS, "artifact metadata does not match schema v3");
+    validateMetadataFields(metadata);
+    for (const field of ["embeddingEndpointDigest", "catalogDigest", "configDigest", "policyDigest", "sourceManifestDigest"] as const) {
+      sha256(metadata[field], `artifact ${field} must be lowercase SHA-256`);
+    }
+    nonEmptyString(metadata.embeddingModelRevision, "artifact embedding model revision must be non-empty");
+    if (!["public", "synthetic-fixture", "consented-production"].includes(String(metadata.collectionOrigin))) {
+      throw new Error("artifact collection origin is invalid");
+    }
+    return metadata as unknown as AvengersProMetadataV3;
+  }
+  throw new Error("artifact schema version must be 2 or 3");
 }
 
 function validateAvailableModels(value: unknown): void {
@@ -254,7 +322,7 @@ function validateAvailableModels(value: unknown): void {
   if (!valid) throw new Error("artifact available models must be sorted unique non-empty IDs");
 }
 
-function validateCenters(value: unknown, metadata: AvengersProMetadataV2): number[][] {
+function validateCenters(value: unknown, metadata: AvengersProMetadata): number[][] {
   if (!Array.isArray(value) || value.length !== metadata.nClusters) throw new Error("artifact cluster count does not match metadata");
   for (const center of value) validateCenter(center, metadata.embeddingDimensions);
   return value as number[][];
@@ -267,7 +335,7 @@ function validateCenter(value: unknown, dimensions: number): void {
   if (!Number.isFinite(norm) || Math.abs(norm - 1) > 1e-9) throw new Error("artifact center is not normalized");
 }
 
-function validateClusterModelStats(value: unknown, metadata: AvengersProMetadataV2): ArtifactDigestInput["clusterModelStats"] {
+function validateClusterModelStats(value: unknown, metadata: AvengersProMetadata): ArtifactDigestInput["clusterModelStats"] {
   const clusterKeys = Array.from({ length: metadata.nClusters }, (_, index) => String(index));
   const clusters = exactObject(value, clusterKeys, "artifact cluster stats do not match metadata");
   const observedModels = new Set<string>();
@@ -280,7 +348,7 @@ function validateClusterModelStats(value: unknown, metadata: AvengersProMetadata
   return clusters as unknown as ArtifactDigestInput["clusterModelStats"];
 }
 
-function validateClusterStats(value: unknown, metadata: AvengersProMetadataV2, observedModels: Set<string>): void {
+function validateClusterStats(value: unknown, metadata: AvengersProMetadata, observedModels: Set<string>): void {
   if (value === null || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length === 0) {
     throw new Error("artifact cluster must contain at least one model stat");
   }
@@ -343,6 +411,50 @@ function validateConfidenceInterval(value: unknown): AvengersProValidationV1["qu
   return interval as unknown as AvengersProValidationV1["qualityRetentionConfidenceInterval"];
 }
 
+function validateVersionedQuality(value: unknown): VersionedQualityGateV2 {
+  const quality = exactObject(value, VERSIONED_QUALITY_KEYS, "validation versioned quality gate does not match schema");
+  if (quality.gateVersion !== 2) throw new Error("validation versioned quality gate version must be 2");
+  if (typeof quality.passed !== "boolean" || typeof quality.reason !== "string") throw new Error("validation versioned quality gate does not match schema");
+  if (quality.lowerBound !== null) {
+    const lowerBound = finiteNumber(quality.lowerBound, "validation versioned quality lower bound must be finite or null");
+    if (lowerBound < 0) throw new Error("validation versioned quality lower bound is out of range");
+  }
+  const independentGroups = nonNegativeInteger(quality.independentGroups, "validation versioned quality group count must be non-negative");
+  if (!quality.cohortResults || typeof quality.cohortResults !== "object" || Array.isArray(quality.cohortResults)) {
+    throw new Error("validation versioned cohort results must be an object");
+  }
+  const cohortResults = quality.cohortResults as JsonObject;
+  const parsedCohortResults: VersionedQualityGateV2["cohortResults"] = {};
+  for (const [cohort, raw] of Object.entries(cohortResults)) {
+    const result = exactObject(raw, VERSIONED_COHORT_KEYS, `validation versioned cohort ${cohort} does not match schema`);
+    if (typeof result.passed !== "boolean" || typeof result.reason !== "string") throw new Error(`validation versioned cohort ${cohort} does not match schema`);
+    if (result.lowerBound !== null) {
+      const lowerBound = finiteNumber(result.lowerBound, `validation versioned cohort ${cohort} lower bound must be finite or null`);
+      if (lowerBound < 0) throw new Error(`validation versioned cohort ${cohort} lower bound is out of range`);
+    }
+    parsedCohortResults[cohort] = {
+      passed: result.passed,
+      lowerBound: result.lowerBound as number | null,
+      independentGroups: nonNegativeInteger(result.independentGroups, `validation versioned cohort ${cohort} group count must be non-negative`),
+      reason: result.reason,
+    };
+  }
+  if (Object.values(parsedCohortResults).some((result) => result.passed && result.lowerBound === null)) {
+    throw new Error("passed versioned cohort is missing evidence");
+  }
+  if (quality.passed && (quality.lowerBound === null || !Object.keys(parsedCohortResults).length || Object.values(parsedCohortResults).some((result) => !result.passed))) {
+    throw new Error("passed versioned quality gate is missing evidence");
+  }
+  return {
+    gateVersion: 2,
+    passed: quality.passed,
+    reason: quality.reason,
+    lowerBound: quality.lowerBound as number | null,
+    independentGroups,
+    cohortResults: parsedCohortResults,
+  };
+}
+
 function validateGates(value: unknown): AvengersProValidationV1["gates"] {
   const gates = exactObject(value, GATE_KEYS, "validation gates do not have the exact required keys");
   for (const key of GATE_KEYS) {
@@ -356,7 +468,7 @@ function assertEvidenceGate(gates: AvengersProValidationV1["gates"], name: Valid
   if (gates[name].passed !== expected) throw new Error(`validation ${name} gate does not match evidence`);
 }
 
-function validateEvidenceGates(validation: AvengersProValidationV1, metadata: AvengersProMetadataV2): void {
+function validateEvidenceGates(validation: AvengersProValidationV1, metadata: AvengersProMetadata): void {
   const metrics = validation.metrics;
   assertEvidenceGate(validation.gates, "sampleSize", validation.sampleSize >= 30);
   assertEvidenceGate(validation.gates, "qualityRetention", metrics.qualityRetentionVsFrontier !== null && metrics.qualityRetentionVsFrontier >= 0.95);
@@ -369,24 +481,28 @@ function validateEvidenceGates(validation: AvengersProValidationV1, metadata: Av
 }
 
 function validateValidation(value: unknown, artifact: AvengersProArtifactFiles): AvengersProValidationV1 {
-  const raw = exactObject(value, VALIDATION_KEYS, "validation manifest does not match schema v1");
+  const valueObject = value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : value;
+  const hasVersionedQuality = Boolean(valueObject && typeof valueObject === "object" && "versionedQuality" in valueObject);
+  const raw = exactObject(value, artifact.metadata.schemaVersion === AVENGERS_PRO_ARTIFACT_VERSION_V3 && hasVersionedQuality ? VERSIONED_VALIDATION_KEYS : VALIDATION_KEYS, "validation manifest does not match schema v1");
   if (raw.schemaVersion !== 1) throw new Error("validation schema version must be 1");
   const manifestDigest = sha256(raw.artifactDigest, "validation artifact digest must be lowercase SHA-256");
   sha256(raw.embeddingEndpointDigest, "validation embedding endpoint digest must be lowercase SHA-256");
   positiveInteger(raw.embeddingTimeoutMs, "validation embedding timeout must be a positive integer");
-  positiveInteger(raw.sampleSize, "validation sample size must be a positive integer");
+  nonNegativeInteger(raw.sampleSize, "validation sample size must be a non-negative integer");
   const p95Latency = finiteNumber(raw.p95EmbeddingLatencyMs, "validation p95 embedding latency must be finite and non-negative");
   if (p95Latency < 0) throw new Error("validation p95 embedding latency must be finite and non-negative");
   const metrics = validateMetrics(raw.metrics);
   const qualityRetentionConfidenceInterval = validateConfidenceInterval(raw.qualityRetentionConfidenceInterval);
   const gates = validateGates(raw.gates);
+  const versionedQuality = raw.versionedQuality === undefined ? undefined : validateVersionedQuality(raw.versionedQuality);
   if (typeof raw.eligible !== "boolean") throw new Error("validation eligibility must be boolean");
   if (manifestDigest !== artifact.digest) throw new Error("validation artifact digest does not match");
 
-  const validation = { ...raw, metrics, qualityRetentionConfidenceInterval, gates } as unknown as AvengersProValidationV1;
+  const validation = { ...raw, metrics, qualityRetentionConfidenceInterval, gates, ...(versionedQuality ? { versionedQuality } : {}) } as unknown as AvengersProValidationV1;
   if (artifact.metadata.synthetic && validation.eligible) throw new Error("synthetic validation cannot be eligible");
   validateEvidenceGates(validation, artifact.metadata);
-  const expectedEligibility = GATE_KEYS.every((key) => validation.gates[key].passed);
+  const expectedEligibility = GATE_KEYS.every((key) => validation.gates[key].passed)
+    && (artifact.metadata.schemaVersion !== AVENGERS_PRO_ARTIFACT_VERSION_V3 || validation.versionedQuality?.passed === true);
   if (validation.eligible !== expectedEligibility) throw new Error("validation eligibility does not match gates");
   return validation;
 }
@@ -400,4 +516,27 @@ export function loadAvengersProArtifact(dir: string): AvengersProArtifact {
 export function assertActivationEligible(artifact: AvengersProArtifact): void {
   if (artifact.metadata.synthetic) throw new Error("synthetic artifact cannot activate");
   if (!artifact.validation.eligible) throw new Error("artifact validation is not eligible");
+  if (artifact.metadata.schemaVersion !== AVENGERS_PRO_ARTIFACT_VERSION_V3) throw new Error("artifact activation requires v3 provenance");
+  if (artifact.metadata.collectionOrigin === "synthetic-fixture") throw new Error("synthetic artifact cannot activate");
+  if (artifact.metadata.schemaVersion === AVENGERS_PRO_ARTIFACT_VERSION_V3 && artifact.validation.versionedQuality?.passed !== true) {
+    throw new Error("artifact versioned quality gate is not eligible");
+  }
+}
+
+export function assertActivationProvenance(artifact: AvengersProArtifactFiles, expected: ActivationProvenance): void {
+  if (artifact.metadata.schemaVersion !== AVENGERS_PRO_ARTIFACT_VERSION_V3) throw new Error("artifact activation requires v3 provenance");
+  const metadata = artifact.metadata;
+  const fields: Array<keyof ActivationProvenance> = [
+    "sourceManifestDigest",
+    "catalogDigest",
+    "configDigest",
+    "policyDigest",
+    "collectionOrigin",
+  ];
+  for (const field of fields) {
+    if (metadata[field] !== expected[field]) throw new Error(`artifact ${field} provenance does not match`);
+  }
+  for (const field of ["embeddingEndpointDigest", "embeddingModelRevision", "normalizationVersion"] as const) {
+    if (expected[field] !== undefined && metadata[field] !== expected[field]) throw new Error(`artifact ${field} provenance does not match`);
+  }
 }

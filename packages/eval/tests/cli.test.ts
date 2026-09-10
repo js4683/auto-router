@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.js";
 import { fixtureDataset, fixtureTurn } from "./fixtures.js";
+import { canonicalDigest, policyDigest } from "../src/provenance.js";
 
 function io(fetchImpl?: typeof fetch) {
   const stdout: string[] = [];
@@ -18,6 +19,18 @@ function io(fetchImpl?: typeof fetch) {
       fetch: fetchImpl,
     },
   };
+}
+
+function addLiveProvenance<T extends ReturnType<typeof fixtureDataset>>(dataset: T): T {
+  dataset.provenance = {
+    schemaVersion: 1,
+    collectionOrigin: "consented-production",
+    sourceManifestDigest: "a".repeat(64),
+    catalogDigest: canonicalDigest(dataset.catalog),
+    configDigest: canonicalDigest(dataset.config),
+    policyDigest: policyDigest(dataset.config),
+  };
+  return dataset;
 }
 
 describe("eval CLI", () => {
@@ -97,11 +110,42 @@ describe("eval CLI", () => {
     expect(missingEnvironment.stderr.join("\n")).toContain("AUTO_ROUTER_EVAL_BASE_URL is required");
   });
 
+  it("rejects synthetic provenance before making live calls", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-eval-"));
+    const datasetPath = join(directory, "synthetic.json");
+    const dataset = fixtureDataset();
+    dataset.sessions[0].turns[0].judgeRubric = "Score correctness.";
+    dataset.liveModelAliases = { "provider/cheap": "live/cheap", "provider/frontier": "live/frontier" };
+    dataset.provenance = {
+      schemaVersion: 1,
+      collectionOrigin: "synthetic-fixture",
+      sourceManifestDigest: "a".repeat(64),
+      catalogDigest: "b".repeat(64),
+      configDigest: "c".repeat(64),
+      policyDigest: "d".repeat(64),
+    };
+    writeFileSync(datasetPath, JSON.stringify(dataset));
+    let calls = 0;
+    const output = io(async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "answer" }, finish_reason: "stop" }] }));
+    });
+    output.value.env = {
+      AUTO_ROUTER_EVAL_BASE_URL: "https://example.com/v1",
+      AUTO_ROUTER_EVAL_API_KEY: "secret",
+      AUTO_ROUTER_EVAL_JUDGE_MODEL: "live/judge",
+    };
+
+    expect(await runCli(["live", "--dataset", datasetPath, "--confirm-live"], output.value)).toBe(1);
+    expect(output.stderr.join("\n")).toContain("synthetic");
+    expect(calls).toBe(0);
+  });
+
   it("writes a live report through an injected provider", async () => {
     const directory = mkdtempSync(join(tmpdir(), "auto-router-eval-"));
     const datasetPath = join(directory, "dataset.json");
     const outputPath = join(directory, "live-report");
-    const dataset = fixtureDataset();
+    const dataset = addLiveProvenance(fixtureDataset());
     dataset.sessions[0].turns[0].judgeRubric = "Score correctness.";
     dataset.liveModelAliases = { "provider/cheap": "live/cheap", "provider/frontier": "live/frontier" };
     writeFileSync(datasetPath, JSON.stringify(dataset));
@@ -135,7 +179,7 @@ describe("eval CLI", () => {
     const directory = mkdtempSync(join(tmpdir(), "auto-router-eval-"));
     const datasetPath = join(directory, "dataset.json");
     const outputPath = join(directory, "live-report");
-    const dataset = fixtureDataset();
+    const dataset = addLiveProvenance(fixtureDataset());
     dataset.sessions[0].turns[0].judgeRubric = "Score correctness.";
     dataset.liveModelAliases = { "provider/cheap": "live/cheap", "provider/frontier": "live/frontier" };
     writeFileSync(datasetPath, JSON.stringify(dataset));

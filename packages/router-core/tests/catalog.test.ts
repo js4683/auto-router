@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect } from "vitest";
-import { buildCatalog, buildCatalogFromProviders } from "../src/catalog.js";
+import { checkModelEligibility } from "../src/eligibility.js";
+import { buildCatalog, buildCatalogFromProviders, loadCatalogSync } from "../src/catalog.js";
 import type { RouterConfig } from "../src/types.js";
 
 const cfg: RouterConfig = {
@@ -27,6 +31,8 @@ describe("catalog build", () => {
     const f = cat.models.find((m) => m.id === "free-model")!;
     expect(f.isFree).toBe(true);
     expect(a.windowTokens).toBe(128000);
+    expect(a.capabilities).toEqual(["text"]);
+    expect(a.transports).toEqual(["chat"]);
   });
 
   it("free join is case-insensitive", () => {
@@ -79,7 +85,57 @@ describe("catalog build", () => {
       runtimeId: "opencode/muse-spark-1.2-contributor-free",
       isFree: true,
       windowTokens: 1048576,
+      capabilities: ["text"],
+      transports: ["responses"],
     });
+  });
+
+  it("normalizes a previous-schema cache before transport eligibility", () => {
+    const root = mkdtempSync(join(tmpdir(), "ar-catalog-cache-"));
+    const path = join(root, "catalog.json");
+    writeFileSync(path, JSON.stringify({
+      fetchedAt: new Date().toISOString(),
+      source: "aa",
+      models: [{
+        id: "gpt-4",
+        runtimeId: "openai/gpt-4",
+        codingIndex: 80,
+        blendedPrice: 1,
+        value: 80,
+        windowTokens: 128000,
+        isFree: false,
+      }],
+    }));
+
+    try {
+      const loaded = loadCatalogSync({ ...cfg, catalog: { ...cfg.catalog, cachePath: path } });
+      expect(loaded.source).toBe("cache");
+      expect(loaded.models[0].transports).toEqual(["chat", "responses"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("derives fallback transports after applying a mapped runtime ID", () => {
+    const root = mkdtempSync(join(tmpdir(), "ar-catalog-fallback-"));
+    try {
+      const loaded = loadCatalogSync(
+        {
+          ...cfg,
+          modelMap: { "paper/model-a": [{ runtimeId: "openai/model-a", source: "hand" }] },
+        },
+        join(root, "missing.json"),
+      );
+      const model = loaded.models.find((entry) => entry.id === "model-a");
+      expect(model?.runtimeId).toBe("openai/model-a");
+      expect(checkModelEligibility(model!, {
+        lifetimeTokens: 1_000,
+        requiredCapabilities: ["text"],
+        transport: "responses",
+      }, cfg)).toMatchObject({ pass: true });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("only marks OpenCode models free when pricing says they are free", () => {

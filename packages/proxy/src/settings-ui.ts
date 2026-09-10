@@ -26,6 +26,8 @@ function esc(value: string): string {
 
 function status(p: ProviderRow): { cls: string; text: string } {
   if (p.quota?.limited) return { cls: "err", text: "Rate limited" };
+  if (p.quota?.meters.some((meter) => meter.state === "unknown")) return { cls: "warn", text: "Quota unknown" };
+  if (p.quota?.meters.some((meter) => meter.state === "stale")) return { cls: "warn", text: "Quota stale" };
   if (p.login && p.expires && p.expires < Date.now()) return { cls: "warn", text: "Login expired" };
   if (p.login) return { cls: "ok", text: "Logged in" };
   if (p.envSet) return { cls: "ok", text: "API key" };
@@ -123,10 +125,11 @@ export function settingsPage(providers: ProviderRow[], healthy: boolean, routes:
     .map((p) => {
       const st = status(p);
       const meters = [...(p.quota?.meters ?? [])];
-      if (p.quota?.limited && meters.length === 0) meters.push({ label: "Rate limit", used: 1, limit: 1, remaining: 0, percent: 100 });
       const meterHtml = meters
         .map(
-          (m) => `<div class="meter"><div class="lab"><span>${esc(m.label)}</span><strong>${m.percent}%</strong></div>${bar(m.percent)}<p class="hint">${m.resetLabel ? `Resets ${esc(m.resetLabel)}` : `${m.remaining} / ${m.limit} remaining`}</p></div>`,
+          (m) => m.state === "observed"
+            ? `<div class="meter"><div class="lab"><span>${esc(m.label)}</span><strong>${m.percent}%</strong></div>${bar(m.percent)}<p class="hint">${m.resetLabel ? `Resets ${esc(m.resetLabel)}` : `${m.remaining} / ${m.limit} remaining`}</p></div>`
+            : `<div class="meter"><div class="lab"><span>${esc(m.label)}</span><strong>${esc(m.state === "stale" ? "Stale" : "Unknown")}</strong></div><p class="hint">No current usage sample.</p></div>`,
         )
         .join("");
       const emptyQuota = meterHtml ? "" : `<p class="hint">No quota sample yet. Click Refresh quota.</p>`;

@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createJsonlRecorder, redactContent } from "../src/recording.js";
 import type { EvalRecordInput } from "../src/types.js";
 import { fixtureTurn } from "./fixtures.js";
@@ -137,5 +137,57 @@ describe("JSONL recorder", () => {
     createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30, now: () => new Date("2026-08-31T00:00:00.000Z") });
 
     expect(readdirSync(directory).sort()).toEqual(["auto-router-eval-recent.jsonl", "keep.txt"]);
+  });
+
+  it("bounds queued writes and reports dropped records", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-recording-"));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const append = vi.fn(async (...args: any[]) => {
+      const [path, line] = args;
+      writeFileSync(path, line, { flag: "a", mode: 0o600 });
+      await gate;
+    });
+    const recorder = createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30, maxQueuedRecords: 1, appendFileImpl: append });
+
+    const first = recorder.record(record("turn-1"));
+    const dropped = recorder.record(record("turn-2"));
+    expect(recorder.stats?.()).toMatchObject({ queued: 1, dropped: 1 });
+    release();
+    await first;
+    await dropped;
+    expect(recorder.stats?.()).toMatchObject({ queued: 0, dropped: 1, written: 1 });
+  });
+
+  it("prunes expired files during recorder activity", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-recording-"));
+    const old = join(directory, "auto-router-eval-old.jsonl");
+    writeFileSync(old, "");
+    utimesSync(old, new Date("2026-08-01T00:00:30.000Z"), new Date("2026-08-01T00:00:30.000Z"));
+    let current = new Date("2026-08-31T00:00:00.000Z");
+    const recorder = createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30, now: () => current });
+
+    current = new Date("2026-08-31T00:01:01.000Z");
+    await recorder.record(record("turn-maintenance"));
+    await recorder.flush();
+
+    expect(readdirSync(directory)).not.toContain("auto-router-eval-old.jsonl");
+  });
+
+  it("persists final target and ordered attempts", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "auto-router-recording-"));
+    const recorder = createJsonlRecorder({ mode: "metadata", directory, retentionDays: 30 });
+    await recorder.record({
+      ...record("turn-final"),
+      attempts: [{ provider: "openai", runtimeModelId: "openai/slow", status: 429 }, { provider: "anthropic", runtimeModelId: "anthropic/fast", status: 200 }],
+      finalRuntimeId: "anthropic/fast",
+    });
+    await recorder.flush();
+
+    const line = JSON.parse(readFileSync(join(directory, readdirSync(directory)[0]), "utf8"));
+    expect(line.attempts).toHaveLength(2);
+    expect(line.finalRuntimeId).toBe("anthropic/fast");
   });
 });

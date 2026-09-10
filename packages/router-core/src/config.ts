@@ -152,18 +152,7 @@ export function loadConfig(configPath?: string): RouterConfig {
   const projectInlineCandidates = ["./opencode.json", "./opencode.jsonc", "./.opencode/opencode.json", "./.opencode/opencode.jsonc"].filter(Boolean);
 
   // Priority: env/explicit + path pointers + project files > project inline > global inline > global files > fallback
-  // 1. Check project inline (highest among inline)
-  for (const p of projectInlineCandidates) {
-    if (existsSync(p)) {
-      try {
-        const oc = readJsonSafe(p);
-        const inline = oc?.["auto-router"] ?? oc?.["autoRouter"];
-        if (inline && inline.tiers) return asConfig(inline);
-      } catch {}
-    }
-  }
-
-  // 2. Check project files (tryPaths contains project files only at this point; global files not yet added)
+  // 1. Check explicit, pointed-to, and project config files.
   for (const p of tryPaths) {
     if (existsSync(p)) {
       try {
@@ -180,7 +169,18 @@ export function loadConfig(configPath?: string): RouterConfig {
     }
   }
 
-  // 3. Check global inline (global opencode.json auto-router block)
+  // 2. Check project inline (highest among inline configurations).
+  for (const p of projectInlineCandidates) {
+    if (existsSync(p)) {
+      try {
+        const oc = readJsonSafe(p);
+        const inline = oc?.["auto-router"] ?? oc?.["autoRouter"];
+        if (inline && inline.tiers) return asConfig(inline);
+      } catch {}
+    }
+  }
+
+  // 3. Check global inline (global opencode.json auto-router block).
   for (const p of globalInlineCandidates) {
     if (existsSync(p)) {
       try {
