@@ -1,215 +1,159 @@
 # auto-router
 
-A lightweight, agent-loop-aware model router for opencode (and any harness). Selects
-one model per task/theme based on **task complexity and task type**, while treating
-**context preservation** and **prompt-cache stickiness** as first-class concerns.
+`auto-router` is a local model router for AI coding clients. It keeps a task on one
+model when possible, moves harder work to stronger models, and lets you use several
+provider accounts through one local endpoint.
 
-## Thesis
+This is an experimental release. It runs on your computer and does not host models or
+provide API credits.
 
-Prior art exists but none fits this goal:
+[View `@js4683/auto-router` on npm](https://www.npmjs.com/package/@js4683/auto-router)
 
-| Tool | What it does | Why not this |
-|------|--------------|--------------|
-| RouteLLM (LMSYS) | OpenAI drop-in, strong/weak binary router | Single-prompt, not agent-loop aware, no context-preservation logic |
-| OpenRouter auto | Market-spend model pick, cloud | Not local, not harness-integrated, opaque |
-| Not-Diamond / RoRF | Random-forest router across model pairs | A library, not a harness integration |
+## Requirements
 
-**The gap:** an *agent-loop-aware, local, harness-integrated* router that classifies on
-**whole-session state** (diff size, files touched, tool-call depth) — not just the
-single prompt — and guards **context-window fit + prompt-cache stickiness**, which none
-of the above do.
+- Node.js 22 or newer
+- At least one provider account or API key
+- A supported client: Claude Code, OpenCode, Codex, Cursor, or another compatible client
 
-## Locked decisions
+## Install
 
-1. **Language:** TypeScript for `router-core` + the opencode plugin (native plugin
-   language, richest session signals). Revisit Go later for the standalone proxy.
-2. **Classifier:** Tier-0 heuristic `selectModel` remains the default. The fixture-backed
-   Avengers-Pro scorer is an opt-in Tier-1 reranker that fails open to Tier 0. Overlap
-   models join through LLMRouterBench; Muse/Grok/Luna use an explicit hand map until we
-   have our own labels.
-3. **Apply paths:** the OpenCode plugin applies connected-provider targets natively at
-   task boundaries. The local OpenAI/Anthropic proxy remains available for other
-   harnesses that cannot load the plugin.
-4. **Model selection data:** Artificial Analysis free API for quality (coding index)
-   + price -> a "bang-for-buck" score per model, refreshed daily and cached.
-5. **Free-first:** within the tier a task needs, prefer models that are free *to the
-   user* (local / provider free tier); verification work falls back to the lowest
-   blended-cost eligible model.
-6. **Two routing axes:** complexity tier (how hard, from AA data) *and* task type
-   (what kind — review / verification / monitoring / planning / implement / debug).
-7. **High-capability planning:** planning and architecture tasks require a quality floor
-   and quality-first selection, favoring connected Sol, Fable, or Opus-class models.
-8. **Routing trigger:** switch on *confident task boundaries*, not every turn and not
-   every session. Model names are never hardcoded — catalog + explicit free-model
-   configuration or authoritative zero pricing + task policy drive selection, so the
-   router survives model churn.
-
-## Apply path
-
-Public v1 is a local proxy plus an installer. The in-repo OpenCode plugin is an
-optional native apply path.
+Install the published package globally:
 
 ```bash
-npm start --workspace=@auto-router/proxy
-npm run install-clients -- --claude --codex --opencode --cursor
+npm install --global @js4683/auto-router
 ```
 
-Open http://127.0.0.1:8787 and log in (`/connect/...` or `npm run login -- claude`).
-Extra logins are stored in `~/.config/auto-router/accounts.json` and do not overwrite
-the primary OpenCode/Claude Code login. API keys are fallback
-and are written to `~/.config/auto-router/.env` mode `0600`. Gemini API-key inference
-uses an AI Studio key; Antigravity login uses Google OAuth and Cloud Code Assist
-instead. Use `npm run login -- gemini` or `npm run login -- antigravity` after setting
-`GOOGLE_OAUTH_CLIENT_ID`; set `GOOGLE_OAUTH_CLIENT_SECRET` too when the OAuth client
-requires a secret. OAuth client credentials are not bundled. OAuth access tokens are never sent as Gemini API keys.
-Antigravity OAuth discovery is scoped to each Google account and its Cloud Code Assist
-project; a Gemini API key bypasses OAuth discovery.
-OpenCode Zen is used only when a Zen key exists and is skipped after a billing
-error. Cursor Pro
-quota is not used. Codex is wired with `wire_api = "responses"`.
-
-Live eval can target the same proxy:
+If you prefer not to install globally, use `npx` and prefix later commands with
+`npx @js4683/auto-router` as well:
 
 ```bash
-AUTO_ROUTER_EVAL_BASE_URL=http://127.0.0.1:8787/v1 AUTO_ROUTER_EVAL_API_KEY=local \
-  npm run eval -- live --dataset path/to/dataset.json --confirm-live
+npx @js4683/auto-router
 ```
 
-- Claude Code and OpenCode use Anthropic Messages at `http://127.0.0.1:8787`.
-- Codex uses OpenAI Responses (`wire_api = "responses"`) at `http://127.0.0.1:8787/v1`.
-- Cursor uses OpenAI Chat Completions at `http://127.0.0.1:8787/v1`.
-
-Default listen address is `http://127.0.0.1:8787`.
-
-- Other OpenAI Chat Completions clients can use `http://127.0.0.1:8787/v1`.
-- Claude Code can use `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`.
-- Codex can use `OPENAI_BASE_URL=http://127.0.0.1:8787/v1`.
-
-The proxy accepts OpenAI Chat Completions, Anthropic Messages, and OpenAI Responses
-requests. It translates text, image, and function-call content across Zen's Responses
-API, Gemini's `generateContent` API, and the separate Antigravity Cloud Code Assist
-transport, including client-compatible streaming envelopes. Requests carrying image
-content a target transport cannot represent are rejected rather than silently sent as
-text only.
-Gemini chat completions and native OpenAI Responses streams are forwarded
-incrementally as upstream chunks arrive. Cross-protocol paths without an incremental
-translator request buffered upstream JSON, then synthesize a client-compatible event
-stream instead of attempting to parse upstream SSE as JSON.
-
-When enabled, the proxy scores the first message of a task with a validated Avengers-Pro
-artifact, applies free-first / planning-quality overlays, then holds that target until a
-confirmed boundary. The checked-in synthetic fixture is for scoring and tests only; production
-activation requires a validated non-synthetic artifact. The checked-in configuration leaves
-this Tier-1 path disabled by default; failures fall back to Tier 0. Routing state is
-reconstructed conservatively from normalized messages, tool schemas, and tool-call history so
-context size, tool depth, file/patch hints, and prior tool errors inform selection when the
-request exposes them.
-
-## Evaluation
-
-Run the required deterministic replay without provider credentials:
+For contributors or current development work, run the source checkout instead:
 
 ```bash
-npm run eval -- replay \
-  --dataset packages/eval/fixtures/phase-3-smoke.v1.json \
-  --output phase-3.eval-report.local
+git clone https://github.com/js4683/auto-router.git
+cd auto-router
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
+node dist/cli.js
 ```
 
-The report compares `router`, `always-frontier`, and `always-cheap` against the same
-frozen catalog, prices, capabilities, and context constraints. JSON and Markdown output
-exclude recorded prompts and model responses.
+## Quick Start
 
-Live generation and blinded judging are optional and billable. Update the dataset's
-`liveModelAliases`, then explicitly confirm the run:
+1. Install the package globally, or use `npx` for each command.
+2. Start the proxy with `auto-router`.
+3. Open `http://127.0.0.1:8787` and add a provider account or API key.
+4. Run `auto-router install` to configure your supported coding clients.
+5. Keep the proxy running while your client sends requests through it.
+
+## Start the Proxy
+
+After installation, start the local proxy:
 
 ```bash
-export AUTO_ROUTER_EVAL_BASE_URL="https://openrouter.ai/api/v1"
-export AUTO_ROUTER_EVAL_API_KEY="..."
-export AUTO_ROUTER_EVAL_JUDGE_MODEL="provider/judge-model"
-npm run eval -- live \
-  --dataset path/to/live-dataset.json \
-  --output phase-3-live.eval-report.local \
-  --confirm-live
+auto-router
 ```
 
-Optional live limits are `AUTO_ROUTER_EVAL_TIMEOUT_MS` and
-`AUTO_ROUTER_EVAL_MAX_OUTPUT_TOKENS`. The CLI prints planned generation and judge call
-counts before execution. Do not claim quality retention from offline catalog proxies.
-The benchmark gate requires at least 30 complete live cases, 95% router quality
-retention, 50% estimated cost savings, and a seeded bootstrap interval.
-Replay reports expose recorded terminal state and truncation; incomplete records fail
-the completeness gate and cannot support cost or quality comparisons.
+The default address is `http://127.0.0.1:8787`. Open that address in a browser to see
+provider status, connect accounts, add API keys, and view recent routes.
 
-The proxy's upstream request deadline defaults to 120,000 milliseconds (120 seconds). Slow
-provider requests can opt into a bounded deadline from 1 through 600,000 milliseconds (10
-minutes) with
-`AUTO_ROUTER_UPSTREAM_TIMEOUT_MS`; timeouts remain single-attempt because their billing
-outcome is ambiguous.
+Keep the proxy running while your client uses it.
 
-### Recording and curation
+## Connect a Provider
 
-Proxy recording is off by default. `metadata` excludes request and response content;
-`content` adds bounded, automatically redacted content and therefore requires explicit
-opt-in:
+You can connect accounts from the browser at `http://127.0.0.1:8787`, or use the CLI:
 
 ```bash
-AUTO_ROUTER_EVAL_RECORD_MODE=metadata npm start --workspace=@auto-router/proxy
-AUTO_ROUTER_EVAL_RECORD_MODE=content npm start --workspace=@auto-router/proxy
+auto-router login claude
+auto-router login codex
+auto-router login gemini
+auto-router login antigravity
+auto-router login grok
+auto-router login zen
 ```
 
-Records default to the ignored `.eval-recordings/` directory with `0600` file
-permissions and 30-day retention. Override these with
-`AUTO_ROUTER_EVAL_RECORD_DIR` and `AUTO_ROUTER_EVAL_RETENTION_DAYS`.
-Persisted session and turn IDs are opaque process-local digests, including when callers
-provide IDs or omit them. Metadata mode retains routing numbers and a fixed prompt
-placeholder, never raw prompt text.
-Proxy-derived token usage is labeled `estimated`; only usage explicitly labeled
-`provider` contributes to the report's separate provider-observed cost.
+The login names are aliases for Anthropic, OpenAI, Google, xAI, and OpenCode Zen. API
+keys can be entered in the local settings page. They are stored locally with restricted
+file permissions.
 
-Curate JSON Lines into a validated dataset using an existing dataset as the frozen
-catalog, policy, price, and capability base:
+Google Antigravity login needs a Google Desktop OAuth client that you control. The
+client ID is not bundled with auto-router.
+
+## Configure Your Client
+
+Let the installer update supported client settings:
 
 ```bash
-npm run eval -- curate \
-  --input .eval-recordings/auto-router-eval-<timestamp>.jsonl \
-  --base-dataset packages/eval/fixtures/phase-3-smoke.v1.json \
-  --output curated.eval-dataset.local.json
+auto-router install --opencode
+auto-router install --claude
+auto-router install --codex
+auto-router install --cursor
 ```
 
-Automatic redaction cannot guarantee anonymity. Manually review every curated file for
-credentials, personal data, and proprietary content before committing it.
-
-## Phase 4 embedding classifier
-
-Tier 1 stays disabled by default. Rollback is `avengersPro.enabled: false`.
-Networked commands require `--confirm-live` and print planned billable calls first.
-Collection uses `AUTO_ROUTER_EVAL_BASE_URL`, `AUTO_ROUTER_EVAL_API_KEY`, and
-`AUTO_ROUTER_EVAL_JUDGE_MODEL`. Training and validation use
-`AUTO_ROUTER_EMBEDDING_BASE_URL`, `AUTO_ROUTER_EMBEDDING_API_KEY`, and
-`AUTO_ROUTER_EMBEDDING_MODEL`. Artifacts store aggregate centers and stats only.
-Local collection, corpus, cache, and validation files stay ignored, mode `0600`,
-and need manual review before any commit.
+To configure every supported client, omit the client flags:
 
 ```bash
-npm run eval -- collect-avengers --dataset path/to/reviewed-dataset.json --models paper/a=provider/a,paper/b=provider/b --output phase-4-collection.local.jsonl --confirm-live
-npm run eval -- curate-avengers --input phase-4-collection.local.jsonl --dataset path/to/reviewed-dataset.json --models paper/a=provider/a,paper/b=provider/b --output phase-4-corpus.local.json
-npm run eval -- train-avengers --corpus phase-4-corpus.local.json --artifact-dir path/to/artifact --cache phase-4-embeddings.local.json --clusters 8 --seed 4683 --held-out-ratio 0.2 --top-k 3 --beta 9 --min-observations 3 --max-input-chars 16000 --timeout-ms 400 --confirm-live
-npm run eval -- validate-avengers --corpus phase-4-corpus.local.json --artifact-dir path/to/artifact --output phase-4-validation.local --bootstrap-seed fixture-seed --timeout-ms 400 --confirm-live
+auto-router install
 ```
 
-## Docs
+Review existing settings before installing. Conflicting values are preserved rather
+than overwritten. To remove unchanged auto-router settings:
 
-| Doc | Purpose |
-|-----|---------|
-| [PLAN.md](./PLAN.md) | Canonical scope, implementation status, acceptance criteria, and decision log |
-| [design.md](./design.md) | Architecture, the two hard problems, classification tiers |
-| [roadmap.md](./roadmap.md) | Phased plan, effort, checklist |
-| [Phase 3 eval design](./docs/plans/2026-08-31-phase-3-eval-harness-design.md) | Accepted offline/live evaluation, recording, metrics, and trust-boundary design |
-| [Phase 4 embedding classifier design](./docs/plans/2026-09-01-phase-4-embedding-classifier-design.md) | Approved Tier-1 architecture, privacy boundaries, and activation gates |
+```bash
+auto-router install --uninstall
+```
 
-## Why this is a strong fit
+You can also configure a client manually:
 
-Same shape as the Atlassian platform work: a **decision system on a hot path with a
-measurement loop**. Route decision = escalate/approve risk engine. Eval harness =
-backtest. Stickiness + context-fit guards = the operational judgment that separates a
-demo from something that survives production.
+```text
+Claude Code: ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+Codex:       OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+OpenAI API:  http://127.0.0.1:8787/v1
+```
+
+In OpenCode, select the `auto-router/auto` model after adding the provider.
+
+## Safety
+
+- The proxy listens on loopback by default.
+- Do not expose it to your network unless you have secured the surrounding boundary.
+- Credentials stay in your local configuration; do not commit `.env` or auth files.
+- Provider credentials are not interchangeable. auto-router does not send an API key or
+  OAuth token to a different provider.
+- `auto-router --help` and `auto-router install --help` show the available commands.
+
+## Troubleshooting
+
+Check that the proxy is running, then visit:
+
+```text
+http://127.0.0.1:8787/health
+```
+
+If a client still uses its original provider, check its base URL and restart the client.
+If the installer reports a conflict, keep the existing setting and configure the base
+URL manually or remove only the setting you own.
+
+## Current Limitations
+
+The package is local and experimental. Live coverage for every provider, Google browser
+OAuth, real-client installer behavior, and some account rotation paths still need
+separate verification. Offline tests and package checks are not proof of successful live
+inference or provider quota behavior.
+
+## For Contributors
+
+The [project plan](PLAN.md) contains the implementation status and evidence boundaries.
+The [audit](docs/plans/2026-09-06-proxy-account-audit.md) records open release blockers.
+
+Run the local checks from the repository root:
+
+```bash
+npm run build
+npm test
+npm run package:smoke
+npm run release:check
+git diff --check
+```
